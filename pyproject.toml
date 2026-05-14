@@ -1,0 +1,12 @@
+[project]
+name = "mtsco-knowledge-base"
+version = "0.1.0"
+description = "Enterprise internal knowledge base backend for onboarding Q&A and future business assistants."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0,<1.0.0",
+    "uvicorn[standard]>=0.30.0,<1.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

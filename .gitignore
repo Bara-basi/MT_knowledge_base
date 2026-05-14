@@ -1,0 +1,61 @@
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.envrc
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and runtime files
+*.log
+logs/
+tmp/
+temp/
+*.pid
+
+# Local knowledge-base data and generated artifacts
+data/raw/
+data/uploads/
+data/processed/
+data/cache/
+data/index/
+data/vector_store/
+data/minio/
+data/milvus/
+data/postgres/
+data/redis/
+n8n-files/
+
+# Docker/local service volumes
+docker-data/
+volumes/
+.docker/
+
+# Keep prompt assets trackable
+!data/prompt/
+!data/prompt/**
