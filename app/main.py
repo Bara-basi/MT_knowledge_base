@@ -8,7 +8,7 @@ app = FastAPI(
     version="0.1.0",
     description="Internal knowledge base backend exposed for n8n workflows.",
 )
-
+    
 
 @app.get("/")
 def read_root() -> dict[str, str]:

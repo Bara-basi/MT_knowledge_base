@@ -1,0 +1,257 @@
+from __future__ import annotations
+
+import base64
+import json
+import mimetypes
+import sys
+from pathlib import Path
+from typing import Any
+
+try:
+    from app.services.llm import LLMAPIError, LLMConfigError, LLMClient, get_llm_client
+except ModuleNotFoundError:
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from llm import LLMAPIError, LLMConfigError, LLMClient, get_llm_client
+
+
+IMAGE_ANALYSIS_MODEL = "Qwen/Qwen3.5-397B-A17B"
+ALREADY_SATISFIED = "already satisfied"
+VIDEO_LIKE_SUFFIXES = {".gif", ".git"}
+
+IMAGE_TYPE_SCREENSHOT = "screenshot"
+IMAGE_TYPE_TABLE = "table"
+IMAGE_TYPE_FLOWCHART = "flowchart"
+
+
+def enrich_image_descriptions(
+    items: list[dict[str, str]],
+    *,
+    llm_client: LLMClient | None = None,
+    model: str = IMAGE_ANALYSIS_MODEL,
+) -> list[dict[str, str]]:
+    """Classify and describe image items with one synchronous LLM request per image."""
+    client = _get_optional_client(llm_client)
+
+    for group in _build_image_groups(items):
+        context = _build_context(items, group[0])
+        for position, item_index in enumerate(group, start=1):
+            item = items[item_index]
+
+            if _is_video_like_item(item) or client is None:
+                _apply_fallback_description(item, context["nearest_body_text"])
+                continue
+
+            try:
+                analysis = _analyze_image(
+                    item,
+                    context,
+                    client=client,
+                    model=model,
+                    group_position=position,
+                    group_size=len(group),
+                )
+            except (LLMAPIError, LLMConfigError, OSError, ValueError):
+                _apply_fallback_description(item, context["nearest_body_text"])
+                continue
+
+            _apply_analysis(item, analysis, context["nearest_body_text"])
+
+    return items
+
+
+def _get_optional_client(llm_client: LLMClient | None) -> LLMClient | None:
+    if llm_client is not None:
+        return llm_client
+    try:
+        return get_llm_client()
+    except LLMConfigError:
+        return None
+
+
+def _build_image_groups(items: list[dict[str, str]]) -> list[list[int]]:
+    groups: list[list[int]] = []
+    current_group: list[int] = []
+
+    for index, item in enumerate(items):
+        if item.get("type") == "image":
+            current_group.append(index)
+        elif current_group:
+            groups.append(current_group)
+            current_group = []
+
+    if current_group:
+        groups.append(current_group)
+    return groups
+
+
+def _build_context(items: list[dict[str, str]], image_index: int) -> dict[str, str]:
+    document_title = ""
+    heading_path: list[str] = []
+    nearest_body_text = ""
+
+    for item in items[:image_index]:
+        if item.get("type") == "image":
+            continue
+
+        text = item.get("text", "").strip()
+        if not text:
+            continue
+
+        style = item.get("style", "")
+        if style == "标题" and not document_title:
+            document_title = text
+        elif style.startswith("标题"):
+            heading_path.append(text)
+        elif style == "正文" or item.get("type", "").startswith("table"):
+            nearest_body_text = text
+
+    return {
+        "document_title": document_title,
+        "heading_path": " -> ".join(heading_path[-4:]),
+        "nearest_body_text": nearest_body_text,
+    }
+
+
+def _is_video_like_item(item: dict[str, str]) -> bool:
+    path = item.get("path") or item.get("text") or ""
+    return Path(path).suffix.lower() in VIDEO_LIKE_SUFFIXES
+
+
+def _apply_fallback_description(item: dict[str, str], fallback_text: str) -> None:
+    item["image_type"] = IMAGE_TYPE_SCREENSHOT
+    item["description"] = ALREADY_SATISFIED if fallback_text else "图片位于教程上下文中，暂无可用正文描述。"
+
+
+def _analyze_image(
+    item: dict[str, str],
+    context: dict[str, str],
+    *,
+    client: LLMClient,
+    model: str,
+    group_position: int,
+    group_size: int,
+) -> dict[str, Any]:
+    content: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": _build_prompt(context, group_position=group_position, group_size=group_size),
+        },
+        {
+            "type": "image_url",
+            "image_url": {"url": _image_to_data_url(Path(item["path"]))},
+        },
+    ]
+    response = client.chat(
+        [{"role": "user", "content": content}],
+        model=model,
+        temperature=0,
+        max_tokens=1200,
+    )
+    return _parse_analysis(response)
+
+
+def _build_prompt(context: dict[str, str], *, group_position: int, group_size: int) -> str:
+    return f"""
+你是企业内部知识库的教程图片解析器。当前请求只包含一张图片；它是原连续图片组中的第 {group_position} 张，共 {group_size} 张。
+
+上下文元数据：
+- 教程名称：{context["document_title"] or "未知"}
+- 当前教程分块：{context["heading_path"] or "未知"}
+- 最近一条上文正文：{context["nearest_body_text"] or "无"}
+
+请先判断图片类型，再按类型抽取信息：
+1. screenshot：操作界面截图。若图片只是上文教程步骤的截图说明，或上文已经充分覆盖图片信息，description 必须输出 already satisfied，不要复述上文。只有图片补充了上文没有表达的关键按钮、界面位置、填写项或注意事项时，才写具体 description。
+2. table：图片主体是表格。必须尽可能只字不差转成 JSON，放入 table_data；不要总结、不要改写、不要遗漏文字。
+3. flowchart：流程图。description 用自然语言描述原文中的主干流程，关注关键阶段/步骤，复杂细节可省略。流程图仍保留图片。
+
+输出必须是 JSON 对象，不要 Markdown，不要代码块，不要额外解释：
+{{
+  "image_type": "screenshot|table|flowchart",
+  "description": "描述文本或 already satisfied",
+  "table_data": null
+}}
+""".strip()
+
+
+def _apply_analysis(item: dict[str, str], analysis: dict[str, Any], fallback_text: str) -> None:
+    image_type = str(analysis.get("image_type") or IMAGE_TYPE_SCREENSHOT).strip().lower()
+
+    if image_type == IMAGE_TYPE_TABLE:
+        item["original_type"] = item.get("type", "")
+        item["original_path"] = item.get("path", "")
+        item.pop("path", None)
+        item["type"] = "image_table"
+        item["style"] = "图片表格"
+        item["image_type"] = IMAGE_TYPE_TABLE
+        item["text"] = _format_table_data(analysis.get("table_data"), fallback_text)
+        return
+
+    item["image_type"] = IMAGE_TYPE_FLOWCHART if image_type == IMAGE_TYPE_FLOWCHART else IMAGE_TYPE_SCREENSHOT
+    item["description"] = _normalize_description(analysis.get("description"), fallback_text)
+
+
+def _normalize_description(description: Any, fallback_text: str) -> str:
+    text = str(description or "").strip()
+    if text.lower() == ALREADY_SATISFIED:
+        return ALREADY_SATISFIED
+    if _same_meaning_as_context(text, fallback_text):
+        return ALREADY_SATISFIED
+    return text or fallback_text or "图片位于教程上下文中，暂无可用正文描述。"
+
+
+def _same_meaning_as_context(description: str, context: str) -> bool:
+    normalized_description = _normalize_for_compare(description)
+    normalized_context = _normalize_for_compare(context)
+    if not normalized_description or not normalized_context:
+        return False
+    return normalized_description == normalized_context
+
+
+def _normalize_for_compare(text: str) -> str:
+    return "".join(str(text).split()).strip("。；;，,：:")
+
+
+def _format_table_data(table_data: Any, fallback_text: str) -> str:
+    if table_data not in (None, ""):
+        return json.dumps(table_data, ensure_ascii=False, indent=2)
+    return fallback_text or "图片表格未能结构化提取。"
+
+
+def _image_to_data_url(path: Path) -> str:
+    if not path.exists():
+        raise FileNotFoundError(f"Image file not found: {path}")
+
+    mime_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def _parse_analysis(response: str) -> dict[str, Any]:
+    cleaned = _strip_json_code_fence(response)
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return {
+            "image_type": IMAGE_TYPE_SCREENSHOT,
+            "description": response.strip(),
+            "table_data": None,
+        }
+
+    if isinstance(parsed, list) and parsed:
+        parsed = parsed[0]
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Image analysis response is not a JSON object: {response}")
+    return parsed
+
+
+def _strip_json_code_fence(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+
+    lines = stripped.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].startswith("```"):
+        lines = lines[:-1]
+    return "\n".join(lines).strip()

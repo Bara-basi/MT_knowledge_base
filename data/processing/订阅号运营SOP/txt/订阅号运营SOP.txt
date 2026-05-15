@@ -1,0 +1,55 @@
+[paragraph] [标题] 订阅号运营SOP
+[paragraph] [标题 2] 一、如何制作推文
+[table:1:row:1:column:1] [正文] 使用软件：
+[table:1:row:1:column:1] [正文] 秀米：
+[link] [链接] https://xiumi.us/#/（秀米网站链接）
+[table:1:row:1:column:1] [正文] 135编辑器：
+[link] [链接] https://www.135editor.com/beautify_editor.html（135编辑器网站链接）
+[paragraph] [标题 4] 1、根据模板填充内容
+[paragraph] [正文] ①要根据文章主题选择合适的风格模板，另存到“我的图文”中（建议购买会员，会有更多模板选择）
+[image] [图片] data\processing\订阅号运营SOP\img\image_0001.gif（already satisfied）
+[paragraph] [正文] ②秀米排版功能很丰富，可根据实际需求进行编辑
+[image] [图片] data\processing\订阅号运营SOP\img\image_0002.gif（already satisfied）
+[paragraph] [正文] 编辑区功能：
+[image] [图片] data\processing\订阅号运营SOP\img\image_0003.png（already satisfied）
+[paragraph] [标题 4] 2、外部推文直接使用
+[table:2:row:1:column:1] [正文] 秀米需要会员才能实现这个功能；135编辑器不需要会员，但排版不便捷
+[paragraph] [正文] 新建一个图文并复制链接导入
+[image] [图片] data\processing\订阅号运营SOP\img\image_0004.gif（already satisfied）
+[paragraph] [标题 2] 二、如何制作封面图
+[table:3:row:1:column:1] [正文] 建议使用国内版可画
+[table:3:row:1:column:1] [正文] 网址：
+[link] [链接] https://www.canva.cn/（www.canva.cn 链接）
+[paragraph] [正文] 截止目前订阅号做过的封面图：
+[link] [链接] https://www.canva.cn/design/DAGPBy59wjg/pALzXbnBLSUME9bN8phFWQ/edit?utm_content=DAGPBy59wjg&utm_campaign=designshare&utm_medium=link2&utm_source=sharebutton（截止目前订阅号做过的封面图网站链接）
+[table:4:row:1:column:1] [正文] 可点开链接后复制到自己的可画账号中继续往后编辑
+[table:4:row:1:column:1] [正文] 飞书订阅号封面图尺寸：640*360
+[image] [图片] data\processing\订阅号运营SOP\img\image_0005.png（already satisfied）
+[paragraph] [标题 4] 操作流程：
+[paragraph] [正文] 1、挑选合适的模板进行编辑
+[image] [图片] data\processing\订阅号运营SOP\img\image_0006.gif（already satisfied）
+[paragraph] [正文] 2、根据主题挑选合适的模板
+[table:5:row:1:column:1] [正文] 因为飞书订阅号封面尺寸比较特殊，选好模板后可直接复制过去再调节排版编辑
+[image] [图片] data\processing\订阅号运营SOP\img\image_0007.gif（already satisfied）
+[paragraph] [正文] 3、完成编辑后导出为png格式（选择要导出的内容）
+[image] [图片] data\processing\订阅号运营SOP\img\image_0008.gif（already satisfied）
+[paragraph] [正文] 4、如果模板内容还需要调整，可使用侧边栏等进行操作
+[image] [图片] data\processing\订阅号运营SOP\img\image_0009.gif（already satisfied）
+[paragraph] [标题 2] 三、飞书订阅号操作指南
+[table:6:row:1:column:1] [正文] 飞书订阅号操作手册：
+[link] [链接] https://www.feishu.cn/hc/zh-CN/articles/360049067518-%E8%AE%A2%E9%98%85%E5%8F%B7%E6%93%8D%E4%BD%9C%E6%89%8B%E5%86%8C（飞书订阅号操作手册网站链接）
+[paragraph] [正文] 1、打开管理后台并新建图文
+[image] [图片] data\processing\订阅号运营SOP\img\image_0010.png（already satisfied）
+[image] [图片] data\processing\订阅号运营SOP\img\image_0011.gif（already satisfied）
+[paragraph] [正文] 2、将在秀米上排版好的文章导出同步到订阅号中
+[image] [图片] data\processing\订阅号运营SOP\img\image_0012.gif（already satisfied）
+[paragraph] [正文] 3、完成标题和封面的设置，如果有需要还可以添加文章简介
+[table:7:row:1:column:1] [正文] 封面可选择文章中已有的图片，也可以使用可画制作
+[image] [图片] data\processing\订阅号运营SOP\img\image_0013.gif（already satisfied）
+[paragraph] [正文] 4、最后提交审批流程，等流程通过后回到管理后台进行发布
+[paragraph] [标题 2] 四、“迈拓知识星球”运营注意事项
+[paragraph] [正文] 1、发送时间及频次
+[paragraph] [正文] 每周三篇，每次在17:30定时发送
+[table:8:row:1:column:1] [正文] 文章在审批通过后可以后台设置定时发送
+[image] [图片] data\processing\订阅号运营SOP\img\image_0014.png（already satisfied）
+[paragraph] [正文] 2、审批前可先发布预览给自己，检查错字、错行等问题

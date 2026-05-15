@@ -1,3 +1,30 @@
-# 文档切片数据模型
-# 负责定义文档分块后的片段、位置、向量引用和元数据。
-# 后续可用于支撑检索召回、引用溯源和上下文拼接。
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class Chunk:
+    """A semantic chunk ready for embedding, retrieval, and later persistence."""
+
+    content: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+    chunk_index: int | None = None
+    document_id: str | None = None
+    vector_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "content": self.content,
+            "metadata": self.metadata,
+        }
+
+        if self.chunk_index is not None:
+            data["chunk_index"] = self.chunk_index
+        if self.document_id is not None:
+            data["document_id"] = self.document_id
+        if self.vector_id is not None:
+            data["vector_id"] = self.vector_id
+
+        return data
