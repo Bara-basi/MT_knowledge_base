@@ -11,6 +11,12 @@ services:
     environment:
       GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
       TZ: ${GENERIC_TIMEZONE}
+      MILVUS_URI: http://milvus-standalone:19530
+      EMBEDDING_CACHE_DIR: /models
+      RERANKER_CACHE_DIR: /models
+    volumes:
+      - ./data:/app/data
+      - E:/models:/models
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5).read()"]
       interval: 30s
@@ -21,7 +27,10 @@ services:
       - ai-net
 
   n8n:
-    image: docker.n8n.io/n8nio/n8n:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.n8n
+    image: mtsco-n8n-python:latest
     container_name: n8n
     restart: unless-stopped
     ports:

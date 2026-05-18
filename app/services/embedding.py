@@ -6,6 +6,7 @@ import tempfile
 from functools import cached_property
 from pathlib import Path
 from typing import Any, Iterable
+from uuid import uuid4
 
 from app.core.config import settings
 from app.models.chunk import Chunk
@@ -240,7 +241,6 @@ class EmbeddingService:
         bm25_model.fit(embedding_texts)
         output_file = embedding_file.with_suffix("").with_suffix(".bm25.json")
         bm25_model.save(str(output_file))
-        _rewrite_json_without_ascii_escape(output_file)
         return output_file
 
     def embed_processing_chunks(self, document_name: str) -> Path:
@@ -293,7 +293,12 @@ def build_bm25_embedding_function():
 
 def load_bm25_embedding_function(model_file: str | Path):
     bm25_model = build_bm25_embedding_function()
-    bm25_model.load(str(model_file))
+    safe_model_file = _ensure_bm25_model_loadable_on_windows(model_file)
+    try:
+        bm25_model.load(str(safe_model_file))
+    finally:
+        if safe_model_file != Path(model_file):
+            safe_model_file.unlink(missing_ok=True)
     return bm25_model
 
 
@@ -376,6 +381,18 @@ def load_chunks(chunk_file: str | Path) -> list[Chunk]:
 def _rewrite_json_without_ascii_escape(path: Path) -> None:
     data = json.loads(path.read_text(encoding="utf-8"))
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _ensure_bm25_model_loadable_on_windows(model_file: str | Path) -> Path:
+    path = Path(model_file)
+    data = path.read_text(encoding="utf-8")
+    if data.isascii():
+        return path
+
+    payload = json.loads(data)
+    safe_path = path.with_name(f"{path.stem}.{uuid4().hex}.ascii{path.suffix}")
+    safe_path.write_text(json.dumps(payload, ensure_ascii=True), encoding="ascii")
+    return safe_path
 
 
 def _format_metadata_value(value: Any) -> str:

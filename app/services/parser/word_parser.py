@@ -221,7 +221,8 @@ def format_extracted_items(items: list[dict[str, str]]) -> str:
         text = item["text"]
         if item["type"] == "image" and item.get("description"):
             text = f"{text}（{item['description']}）"
-        elif item["type"] == "link" and item.get("description"):
+        elif item["type"] in {"link", "link_ref"} and item.get("description"):
+            text = item.get("url", text)
             text = f"{text}（{item['description']}）"
         lines.append(f"[{item['type']}] [{item['style']}] {text}")
     return "\n".join(lines)

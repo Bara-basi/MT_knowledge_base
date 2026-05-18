@@ -20,7 +20,7 @@ def parse_document(file_path: str | Path):
 
 
 if __name__ == "__main__":
-    target_file = Path("data") / "raw" / "process_guide" / "高效会议流程.docx"
+    target_file = Path("data") / "raw" / "process_guide" / "订阅号运营SOP.docx"
     parsed_items = parse_document(target_file)
     txt_path = Path("data") / "processing" / target_file.stem / "txt" / f"{target_file.stem}.txt"
 

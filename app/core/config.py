@@ -35,5 +35,17 @@ class Settings:
         os.getenv("EMBEDDING_NORMALIZE", "true").lower() == "true"
     )
 
+    reranker_model_name: str = os.getenv(
+        "RERANKER_MODEL_NAME",
+        "BAAI/bge-reranker-v2-m3",
+    )
+    reranker_cache_dir: str = os.getenv("RERANKER_CACHE_DIR", embedding_cache_dir)
+    reranker_device: str | None = os.getenv("RERANKER_DEVICE") or embedding_device
+    reranker_batch_size: int = int(os.getenv("RERANKER_BATCH_SIZE", "8"))
+    reranker_max_length: int = int(os.getenv("RERANKER_MAX_LENGTH", "512"))
+    retrieval_recall_multiplier: int = int(
+        os.getenv("RETRIEVAL_RECALL_MULTIPLIER", "5")
+    )
+
 
 settings = Settings()

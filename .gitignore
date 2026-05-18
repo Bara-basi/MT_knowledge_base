@@ -41,7 +41,7 @@ temp/
 # Local knowledge-base data and generated artifacts
 data/raw/
 data/uploads/
-data/processed/
+data/processing/
 data/cache/
 data/index/
 data/vector_store/

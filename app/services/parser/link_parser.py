@@ -20,7 +20,7 @@ def enrich_links(
     llm_client: LLMClient | None = None,
     model: str | None = None,
 ) -> list[dict[str, str]]:
-    """Extract URLs from text items, emit link items, and add context-aware descriptions."""
+    """Replace URLs with readable markers and emit link metadata items."""
     client = _get_optional_client(llm_client)
     output: list[dict[str, str]] = []
     nearest_body_text = ""
@@ -43,7 +43,15 @@ def enrich_links(
                 nearest_body_text = text.strip() or nearest_body_text
             continue
 
-        output.extend(_split_text_and_links(item, matches, nearest_body_text, client=client, model=model))
+        enriched_item, link_items = _replace_urls_with_link_markers(
+            item,
+            matches,
+            nearest_body_text,
+            client=client,
+            model=model,
+        )
+        output.append(enriched_item)
+        output.extend(link_items)
 
         remaining_text = URL_PATTERN.sub("", text).strip()
         if remaining_text and _can_be_link_context(item):
@@ -66,33 +74,37 @@ def _can_be_link_context(item: dict[str, str]) -> bool:
     return style == "正文" or item.get("type", "").startswith("table")
 
 
-def _split_text_and_links(
+def _replace_urls_with_link_markers(
     item: dict[str, str],
     matches: list[re.Match[str]],
     nearest_body_text: str,
     *,
     client: LLMClient | None,
     model: str,
-) -> list[dict[str, str]]:
-    pieces: list[dict[str, str]] = []
+) -> tuple[dict[str, str], list[dict[str, str]]]:
+    link_items: list[dict[str, str]] = []
+    text_parts: list[str] = []
     text = item["text"]
     cursor = 0
+    used_descriptions: set[str] = set()
 
     for match in matches:
-        before = text[cursor : match.start()].strip()
-        if before:
-            pieces.append({**item, "text": before})
+        before = text[cursor : match.start()]
+        text_parts.append(before)
 
         url = match.group(0)
-        description_context = before or nearest_body_text
-        pieces.append(_link_item(url, description_context, client=client, model=model))
+        description_context = before.strip() or nearest_body_text
+        link_item = _link_item(url, description_context, client=client, model=model)
+        description = _unique_description(link_item["description"], used_descriptions)
+        link_item["description"] = description
+        link_item["text"] = description
+        text_parts.append(f"{{{{{description}}}}}")
+        link_items.append(link_item)
         cursor = match.end()
 
-    after = text[cursor:].strip()
-    if after:
-        pieces.append({**item, "text": after})
-
-    return pieces
+    text_parts.append(text[cursor:])
+    enriched_item = {**item, "text": "".join(text_parts).strip()}
+    return enriched_item, link_items
 
 
 def _link_item(url: str, context: str, *, client: LLMClient | None, model: str | None) -> dict[str, str]:
@@ -107,12 +119,25 @@ def _link_item(url: str, context: str, *, client: LLMClient | None, model: str |
         description = _domain_description(url)
 
     return {
-        "type": "link",
+        "type": "link_ref",
         "style": "链接",
-        "text": url,
+        "text": description,
         "url": url,
         "description": description,
     }
+
+
+def _unique_description(description: str, used_descriptions: set[str]) -> str:
+    if description not in used_descriptions:
+        used_descriptions.add(description)
+        return description
+
+    index = 2
+    while f"{description} {index}" in used_descriptions:
+        index += 1
+    unique_description = f"{description} {index}"
+    used_descriptions.add(unique_description)
+    return unique_description
 
 
 def _describe_link(url: str, context: str, *, client: LLMClient, model: str | None) -> str:

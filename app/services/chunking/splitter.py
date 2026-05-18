@@ -26,7 +26,7 @@ STEP_PATTERN = re.compile(
 class ChunkState:
     metadata: dict[str, Any] = field(default_factory=dict)
     lines: list[str] = field(default_factory=list)
-    links: list[str] = field(default_factory=list)
+    links: dict[str, str] = field(default_factory=dict)
     images: list[str] = field(default_factory=list)
 
 
@@ -116,6 +116,8 @@ def split_items(items: list[dict[str, str]], *, source_file: Path | None = None)
 
         if item_type == "image":
             _append_image(state, item)
+        elif item_type == "link_ref":
+            _append_link_ref(state, item)
         elif item_type == "link":
             _append_link(state, item)
         elif item_type == "image_table":
@@ -128,7 +130,7 @@ def split_items(items: list[dict[str, str]], *, source_file: Path | None = None)
 
 
 def _restore_special_item_fields(item: dict[str, str]) -> None:
-    if item["type"] not in {"image", "link"}:
+    if item["type"] not in {"image", "link", "link_ref"}:
         return
 
     match = DESCRIPTION_PATTERN.match(item["text"])
@@ -145,7 +147,7 @@ def _restore_special_item_fields(item: dict[str, str]) -> None:
 
     if item["type"] == "image":
         item["path"] = value
-    elif item["type"] == "link":
+    elif item["type"] in {"link", "link_ref"}:
         item["url"] = value
 
 
@@ -194,7 +196,13 @@ def _append_link(state: ChunkState, item: dict[str, str]) -> None:
     description = item.get("description") or item.get("text", "")
     state.lines.append(f"链接：{description}")
     if item.get("url"):
-        state.links.append(item["url"])
+        state.links[description] = item["url"]
+
+
+def _append_link_ref(state: ChunkState, item: dict[str, str]) -> None:
+    description = item.get("description") or item.get("text", "")
+    if description and item.get("url"):
+        state.links[description] = item["url"]
 
 
 def _flush_chunk(chunks: list[Chunk], state: ChunkState, source_file: Path | None) -> None:
@@ -209,7 +217,7 @@ def _flush_chunk(chunks: list[Chunk], state: ChunkState, source_file: Path | Non
     if source_file is not None:
         metadata["source_file"] = str(source_file)
     if state.links:
-        metadata["link"] = list(dict.fromkeys(state.links))
+        metadata["link"] = dict(state.links)
     if state.images:
         metadata["img"] = list(dict.fromkeys(state.images))
 

@@ -22,6 +22,17 @@ def main() -> None:
     )
     parser.add_argument("--limit", type=int, default=5, help="Number of hits to return.")
     parser.add_argument(
+        "--recall-limit",
+        type=int,
+        default=None,
+        help="Number of hybrid recall candidates before reranking.",
+    )
+    parser.add_argument(
+        "--no-rerank",
+        action="store_true",
+        help="Return raw RRF hybrid recall results without reranking.",
+    )
+    parser.add_argument(
         "--bm25-model",
         default=str(
             Path("data")
@@ -38,10 +49,13 @@ def main() -> None:
         args.query,
         limit=args.limit,
         bm25_model_file=args.bm25_model,
+        recall_limit=args.recall_limit,
+        rerank=not args.no_rerank,
     )
 
     print(f"Query: {args.query}")
     print(f"BM25 model: {args.bm25_model}")
+    print(f"Rerank: {not args.no_rerank}")
     print(f"Results: {len(results)}")
     for index, result in enumerate(results, start=1):
         print("=" * 80)

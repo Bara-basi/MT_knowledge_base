@@ -1,14 +1,14 @@
 [
   {
-    "content": "使用软件：\n秀米：\n链接：秀米网站链接\n135编辑器：\n链接：135编辑器网站链接",
+    "content": "使用软件：\n秀米：{{秀米网站链接}}\n135编辑器：{{135编辑器网站链接}}",
     "metadata": {
       "title": "订阅号运营SOP",
       "chapter": "一、如何制作推文",
       "source_file": "data\\processing\\订阅号运营SOP\\txt\\订阅号运营SOP.txt",
-      "link": [
-        "https://xiumi.us/#/",
-        "https://www.135editor.com/beautify_editor.html"
-      ]
+      "link": {
+        "秀米网站链接": "https://xiumi.us/#/",
+        "135编辑器网站链接": "https://www.135editor.com/beautify_editor.html"
+      }
     },
     "chunk_index": 0
   },
@@ -27,7 +27,7 @@
     "chunk_index": 1
   },
   {
-    "content": "②秀米排版功能很丰富，可根据实际需求进行编辑\n编辑区功能：",
+    "content": "②秀米排版功能很丰富，可根据实际需求进行编辑\n编辑区功能：\n图片：图片详细标注了秀米编辑区的功能分布：左侧为素材栏，包含图文模板、图文收藏（可跨推文使用）、剪贴板（仅限当前推文）及我的图库；顶部为操作栏，含主题色设置、预览、保存（提示需多按保存）、导出（用于导入公众号后台）等；中间为核心编辑区，包含封面图、标题和摘要（支持链接分享审核）及推文主干；右侧及底部工具栏包含撤销/重做、布局模式（调整细节）、基础布局与背景图调整，以及SVG动画编辑辅助工具。",
     "metadata": {
       "title": "订阅号运营SOP",
       "chapter": "一、如何制作推文",
@@ -55,15 +55,15 @@
     "chunk_index": 3
   },
   {
-    "content": "建议使用国内版可画\n网址：\n链接：www.canva.cn 链接\n截止目前订阅号做过的封面图：\n链接：截止目前订阅号做过的封面图网站链接\n可点开链接后复制到自己的可画账号中继续往后编辑\n飞书订阅号封面图尺寸：640*360",
+    "content": "建议使用国内版可画\n网址：{{Canva设计工具官网链接}}\n截止目前订阅号做过的封面图：\n{{截止目前订阅号做过的封面图网站链接}}\n可点开链接后复制到自己的可画账号中继续往后编辑\n飞书订阅号封面图尺寸：640*360",
     "metadata": {
       "title": "订阅号运营SOP",
       "chapter": "二、如何制作封面图",
       "source_file": "data\\processing\\订阅号运营SOP\\txt\\订阅号运营SOP.txt",
-      "link": [
-        "https://www.canva.cn/",
-        "https://www.canva.cn/design/DAGPBy59wjg/pALzXbnBLSUME9bN8phFWQ/edit?utm_content=DAGPBy59wjg&utm_campaign=designshare&utm_medium=link2&utm_source=sharebutton"
-      ],
+      "link": {
+        "Canva设计工具官网链接": "https://www.canva.cn/",
+        "截止目前订阅号做过的封面图网站链接": "https://www.canva.cn/design/DAGPBy59wjg/pALzXbnBLSUME9bN8phFWQ/edit?utm_content=DAGPBy59wjg&utm_campaign=designshare&utm_medium=link2&utm_source=sharebutton"
+      },
       "img": [
         "data\\processing\\订阅号运营SOP\\img\\image_0005.png"
       ]
@@ -127,19 +127,19 @@
     "chunk_index": 8
   },
   {
-    "content": "飞书订阅号操作手册：\n链接：飞书订阅号操作手册网站链接",
+    "content": "飞书订阅号操作手册：\n{{飞书订阅号操作手册网站链接}}",
     "metadata": {
       "title": "订阅号运营SOP",
       "chapter": "三、飞书订阅号操作指南",
       "source_file": "data\\processing\\订阅号运营SOP\\txt\\订阅号运营SOP.txt",
-      "link": [
-        "https://www.feishu.cn/hc/zh-CN/articles/360049067518-%E8%AE%A2%E9%98%85%E5%8F%B7%E6%93%8D%E4%BD%9C%E6%89%8B%E5%86%8C"
-      ]
+      "link": {
+        "飞书订阅号操作手册网站链接": "https://www.feishu.cn/hc/zh-CN/articles/360049067518-%E8%AE%A2%E9%98%85%E5%8F%B7%E6%93%8D%E4%BD%9C%E6%89%8B%E5%86%8C"
+      }
     },
     "chunk_index": 9
   },
   {
-    "content": "1、打开管理后台并新建图文",
+    "content": "1、打开管理后台并新建图文\n图片：在飞书客户端顶部搜索栏输入“订阅号”，在搜索结果中找到并点击“订阅号”应用（红框标注区域），根据红色箭头提示“搜索打开”进入订阅号管理界面。",
     "metadata": {
       "title": "订阅号运营SOP",
       "chapter": "三、飞书订阅号操作指南",
@@ -189,7 +189,7 @@
     "chunk_index": 13
   },
   {
-    "content": "1、发送时间及频次\n每周三篇，每次在17:30定时发送\n文章在审批通过后可以后台设置定时发送",
+    "content": "1、发送时间及频次\n每周三篇，每次在17:30定时发送\n文章在审批通过后可以后台设置定时发送\n图片：在文章管理列表页，针对状态为“审批通过”的文章，点击右侧操作列的“更多”下拉菜单，选择“定时发送”选项。",
     "metadata": {
       "title": "订阅号运营SOP",
       "chapter": "四、“迈拓知识星球”运营注意事项",

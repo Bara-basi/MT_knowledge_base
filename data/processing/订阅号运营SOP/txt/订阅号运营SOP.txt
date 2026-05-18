@@ -1,27 +1,28 @@
 [paragraph] [标题] 订阅号运营SOP
 [paragraph] [标题 2] 一、如何制作推文
 [table:1:row:1:column:1] [正文] 使用软件：
-[table:1:row:1:column:1] [正文] 秀米：
-[link] [链接] https://xiumi.us/#/（秀米网站链接）
-[table:1:row:1:column:1] [正文] 135编辑器：
-[link] [链接] https://www.135editor.com/beautify_editor.html（135编辑器网站链接）
+[table:1:row:1:column:1] [正文] 秀米：{{秀米网站链接}}
+[link_ref] [链接] https://xiumi.us/#/（秀米网站链接）
+[table:1:row:1:column:1] [正文] 135编辑器：{{135编辑器网站链接}}
+[link_ref] [链接] https://www.135editor.com/beautify_editor.html（135编辑器网站链接）
 [paragraph] [标题 4] 1、根据模板填充内容
 [paragraph] [正文] ①要根据文章主题选择合适的风格模板，另存到“我的图文”中（建议购买会员，会有更多模板选择）
 [image] [图片] data\processing\订阅号运营SOP\img\image_0001.gif（already satisfied）
 [paragraph] [正文] ②秀米排版功能很丰富，可根据实际需求进行编辑
 [image] [图片] data\processing\订阅号运营SOP\img\image_0002.gif（already satisfied）
 [paragraph] [正文] 编辑区功能：
-[image] [图片] data\processing\订阅号运营SOP\img\image_0003.png（already satisfied）
+[image] [图片] data\processing\订阅号运营SOP\img\image_0003.png（图片详细标注了秀米编辑区的功能分布：左侧为素材栏，包含图文模板、图文收藏（可跨推文使用）、剪贴板（仅限当前推文）及我的图库；顶部为操作栏，含主题色设置、预览、保存（提示需多按保存）、导出（用于导入公众号后台）等；中间为核心编辑区，包含封面图、标题和摘要（支持链接分享审核）及推文主干；右侧及底部工具栏包含撤销/重做、布局模式（调整细节）、基础布局与背景图调整，以及SVG动画编辑辅助工具。）
 [paragraph] [标题 4] 2、外部推文直接使用
 [table:2:row:1:column:1] [正文] 秀米需要会员才能实现这个功能；135编辑器不需要会员，但排版不便捷
 [paragraph] [正文] 新建一个图文并复制链接导入
 [image] [图片] data\processing\订阅号运营SOP\img\image_0004.gif（already satisfied）
 [paragraph] [标题 2] 二、如何制作封面图
 [table:3:row:1:column:1] [正文] 建议使用国内版可画
-[table:3:row:1:column:1] [正文] 网址：
-[link] [链接] https://www.canva.cn/（www.canva.cn 链接）
+[table:3:row:1:column:1] [正文] 网址：{{Canva设计工具官网链接}}
+[link_ref] [链接] https://www.canva.cn/（Canva设计工具官网链接）
 [paragraph] [正文] 截止目前订阅号做过的封面图：
-[link] [链接] https://www.canva.cn/design/DAGPBy59wjg/pALzXbnBLSUME9bN8phFWQ/edit?utm_content=DAGPBy59wjg&utm_campaign=designshare&utm_medium=link2&utm_source=sharebutton（截止目前订阅号做过的封面图网站链接）
+[paragraph] [正文] {{截止目前订阅号做过的封面图网站链接}}
+[link_ref] [链接] https://www.canva.cn/design/DAGPBy59wjg/pALzXbnBLSUME9bN8phFWQ/edit?utm_content=DAGPBy59wjg&utm_campaign=designshare&utm_medium=link2&utm_source=sharebutton（截止目前订阅号做过的封面图网站链接）
 [table:4:row:1:column:1] [正文] 可点开链接后复制到自己的可画账号中继续往后编辑
 [table:4:row:1:column:1] [正文] 飞书订阅号封面图尺寸：640*360
 [image] [图片] data\processing\订阅号运营SOP\img\image_0005.png（already satisfied）
@@ -37,9 +38,10 @@
 [image] [图片] data\processing\订阅号运营SOP\img\image_0009.gif（already satisfied）
 [paragraph] [标题 2] 三、飞书订阅号操作指南
 [table:6:row:1:column:1] [正文] 飞书订阅号操作手册：
-[link] [链接] https://www.feishu.cn/hc/zh-CN/articles/360049067518-%E8%AE%A2%E9%98%85%E5%8F%B7%E6%93%8D%E4%BD%9C%E6%89%8B%E5%86%8C（飞书订阅号操作手册网站链接）
+[table:6:row:1:column:1] [正文] {{飞书订阅号操作手册网站链接}}
+[link_ref] [链接] https://www.feishu.cn/hc/zh-CN/articles/360049067518-%E8%AE%A2%E9%98%85%E5%8F%B7%E6%93%8D%E4%BD%9C%E6%89%8B%E5%86%8C（飞书订阅号操作手册网站链接）
 [paragraph] [正文] 1、打开管理后台并新建图文
-[image] [图片] data\processing\订阅号运营SOP\img\image_0010.png（already satisfied）
+[image] [图片] data\processing\订阅号运营SOP\img\image_0010.png（在飞书客户端顶部搜索栏输入“订阅号”，在搜索结果中找到并点击“订阅号”应用（红框标注区域），根据红色箭头提示“搜索打开”进入订阅号管理界面。）
 [image] [图片] data\processing\订阅号运营SOP\img\image_0011.gif（already satisfied）
 [paragraph] [正文] 2、将在秀米上排版好的文章导出同步到订阅号中
 [image] [图片] data\processing\订阅号运营SOP\img\image_0012.gif（already satisfied）
@@ -51,5 +53,5 @@
 [paragraph] [正文] 1、发送时间及频次
 [paragraph] [正文] 每周三篇，每次在17:30定时发送
 [table:8:row:1:column:1] [正文] 文章在审批通过后可以后台设置定时发送
-[image] [图片] data\processing\订阅号运营SOP\img\image_0014.png（already satisfied）
+[image] [图片] data\processing\订阅号运营SOP\img\image_0014.png（在文章管理列表页，针对状态为“审批通过”的文章，点击右侧操作列的“更多”下拉菜单，选择“定时发送”选项。）
 [paragraph] [正文] 2、审批前可先发布预览给自己，检查错字、错行等问题
