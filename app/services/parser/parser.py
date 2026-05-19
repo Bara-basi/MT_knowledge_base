@@ -8,13 +8,17 @@ except ModuleNotFoundError:
     from word_parser import parse_word_document
 
 
-def parse_document(file_path: str | Path):
+def parse_document(
+    file_path: str | Path,
+    *,
+    image_analysis_workers: int = 3,
+):
     """Route an input document to the matching parser by file extension."""
     path = Path(file_path)
     suffix = path.suffix.lower()
 
     if suffix == ".docx":
-        return parse_word_document(path)
+        return parse_word_document(path, image_analysis_workers=image_analysis_workers)
 
     raise ValueError(f"Unsupported document type: {suffix or 'unknown'}")
 

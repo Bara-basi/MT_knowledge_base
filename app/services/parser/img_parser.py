@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import mimetypes
 import sys
@@ -21,6 +22,8 @@ VIDEO_LIKE_SUFFIXES = {".gif", ".git"}
 IMAGE_TYPE_SCREENSHOT = "screenshot"
 IMAGE_TYPE_TABLE = "table"
 IMAGE_TYPE_FLOWCHART = "flowchart"
+DEFAULT_IMAGE_ANALYSIS_WORKERS = 3
+MAX_IMAGE_ANALYSIS_WORKERS = 5
 
 
 def enrich_image_descriptions(
@@ -28,35 +31,101 @@ def enrich_image_descriptions(
     *,
     llm_client: LLMClient | None = None,
     model: str = IMAGE_ANALYSIS_MODEL,
+    max_concurrency: int = DEFAULT_IMAGE_ANALYSIS_WORKERS,
 ) -> list[dict[str, str]]:
-    """Classify and describe image items with one synchronous LLM request per image."""
+    """Classify and describe image items with bounded concurrent LLM requests."""
     client = _get_optional_client(llm_client)
+    tasks = _build_analysis_tasks(items)
 
+    if client is None:
+        for task in tasks:
+            _apply_fallback_description(items[task["item_index"]], task["fallback_text"])
+        return items
+
+    api_tasks = []
+    for task in tasks:
+        item = items[task["item_index"]]
+        if _is_video_like_item(item):
+            _apply_fallback_description(item, task["fallback_text"])
+        else:
+            api_tasks.append(task)
+
+    worker_count = _resolve_worker_count(max_concurrency, len(api_tasks))
+    if worker_count <= 1:
+        for task in api_tasks:
+            _analyze_and_apply_image(items, task, client=client, model=model)
+        return items
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_to_task = {
+            executor.submit(
+                _analyze_image,
+                dict(items[task["item_index"]]),
+                task["context"],
+                client=client,
+                model=model,
+                group_position=task["group_position"],
+                group_size=task["group_size"],
+            ): task
+            for task in api_tasks
+        }
+        for future in as_completed(future_to_task):
+            task = future_to_task[future]
+            item = items[task["item_index"]]
+            try:
+                analysis = future.result()
+            except (LLMAPIError, LLMConfigError, OSError, ValueError):
+                _apply_fallback_description(item, task["fallback_text"])
+                continue
+            _apply_analysis(item, analysis, task["fallback_text"])
+
+    return items
+
+
+def _build_analysis_tasks(items: list[dict[str, str]]) -> list[dict[str, Any]]:
+    tasks: list[dict[str, Any]] = []
     for group in _build_image_groups(items):
         context = _build_context(items, group[0])
         for position, item_index in enumerate(group, start=1):
-            item = items[item_index]
+            tasks.append(
+                {
+                    "item_index": item_index,
+                    "context": context,
+                    "fallback_text": context["nearest_body_text"],
+                    "group_position": position,
+                    "group_size": len(group),
+                }
+            )
+    return tasks
 
-            if _is_video_like_item(item) or client is None:
-                _apply_fallback_description(item, context["nearest_body_text"])
-                continue
 
-            try:
-                analysis = _analyze_image(
-                    item,
-                    context,
-                    client=client,
-                    model=model,
-                    group_position=position,
-                    group_size=len(group),
-                )
-            except (LLMAPIError, LLMConfigError, OSError, ValueError):
-                _apply_fallback_description(item, context["nearest_body_text"])
-                continue
+def _resolve_worker_count(max_concurrency: int, task_count: int) -> int:
+    if task_count <= 0:
+        return 0
+    return max(1, min(max_concurrency, MAX_IMAGE_ANALYSIS_WORKERS, task_count))
 
-            _apply_analysis(item, analysis, context["nearest_body_text"])
 
-    return items
+def _analyze_and_apply_image(
+    items: list[dict[str, str]],
+    task: dict[str, Any],
+    *,
+    client: LLMClient,
+    model: str,
+) -> None:
+    item = items[task["item_index"]]
+    try:
+        analysis = _analyze_image(
+            item,
+            task["context"],
+            client=client,
+            model=model,
+            group_position=task["group_position"],
+            group_size=task["group_size"],
+        )
+    except (LLMAPIError, LLMConfigError, OSError, ValueError):
+        _apply_fallback_description(item, task["fallback_text"])
+        return
+    _apply_analysis(item, analysis, task["fallback_text"])
 
 
 def _get_optional_client(llm_client: LLMClient | None) -> LLMClient | None:

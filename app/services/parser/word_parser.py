@@ -43,7 +43,11 @@ class ParseContext:
         return self.image_dir / f"image_{self.image_index:04d}{extension}"
 
 
-def parse_word_document(file_path: str | Path) -> list[dict[str, str]]:
+def parse_word_document(
+    file_path: str | Path,
+    *,
+    image_analysis_workers: int = 3,
+) -> list[dict[str, str]]:
     """Extract docx paragraphs, tables, and images in original order, then describe images."""
     path = Path(file_path)
     if not path.exists():
@@ -56,7 +60,7 @@ def parse_word_document(file_path: str | Path) -> list[dict[str, str]]:
     image_dir.mkdir(parents=True, exist_ok=True)
 
     items = _extract_document_items(document, ParseContext(image_dir=image_dir))
-    items = enrich_image_descriptions(items)
+    items = enrich_image_descriptions(items, max_concurrency=image_analysis_workers)
     items = enrich_links(items)
     write_items_to_txt(items, path)
     return items
