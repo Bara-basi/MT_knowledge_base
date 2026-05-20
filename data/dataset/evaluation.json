@@ -1,0 +1,434 @@
+{
+  "metadata": {
+    "dataset_file": "data\\dataset\\test.json",
+    "query_url": "http://localhost:8000/api/v1/query",
+    "retrieval_url": "http://localhost:8000/api/v1/retrieval/flow",
+    "evaluated_at": "2026-05-19T08:41:04.830605+00:00",
+    "judge_model": "Pro/moonshotai/Kimi-K2.5",
+    "total": 10
+  },
+  "summary": {
+    "pass_rate": 0.2,
+    "average_recall": 0.8,
+    "recalled_count": 8,
+    "passed_count": 2,
+    "total_count": 10,
+    "average_scores": {
+      "readability": 2.8,
+      "correctness": 2.4,
+      "completeness": 2.2
+    },
+    "average_latency_ms": 75599.69,
+    "failed_query_count": 3
+  },
+  "results": [
+    {
+      "item_id": "qa_c29c4a07e69f12b2",
+      "document_name": "学院知识萃取制度及SOP.pdf",
+      "document_path": "学院知识萃取制度及SOP.pdf",
+      "question_types": [
+        "陷阱题"
+      ],
+      "question": "听说知识萃取是由人力资源部统筹负责的，而且要求每个部门每月必须提交两个案例，是这样吗？",
+      "reference_answer": "不正确。知识萃取的主负责人是学院，而非人力资源部。文档中未提及'每月必须提交两个案例'的硬性指标要求。",
+      "evidence": "文档第三部分'知识萃取流程'明确标注'主负责人：学院'，且全文未涉及人力资源部或每月提交数量的规定。",
+      "actual_answer": "知识萃取的**主负责人是学院**，并非人力资源部。",
+      "query_error": "",
+      "latency_ms": 14473.5,
+      "recall": {
+        "score": 1,
+        "reason": "matched document target '学院知识萃取制度及SOP' in chunk from retrieval_api",
+        "matched_chunk_index": 1,
+        "chunk_count": 15,
+        "latency_ms": 2961.6,
+        "error": ""
+      },
+      "judgment": {
+        "scores": {
+          "readability": 4.0,
+          "correctness": 3.0,
+          "completeness": 2.0
+        },
+        "pass": false,
+        "reasons": {
+          "readability": "回答简洁明了，使用加粗突出重点，但篇幅过短可能让用户感觉不够详尽。",
+          "correctness": "正确纠正了主负责人为学院而非人力资源部，但未纠正'每月必须提交两个案例'的错误前提，可能导致用户误以为该规定存在。",
+          "completeness": "仅回答了主负责人问题，完全遗漏了对'每月提交两个案例'这一错误说法的否认和澄清。"
+        },
+        "missing_points": [
+          "未明确否认'每月必须提交两个案例'的说法",
+          "未说明文档中无此硬性指标规定"
+        ],
+        "hallucinations": [],
+        "suggested_answer": "不正确。知识萃取的主负责人是学院，而非人力资源部。另外，文档中并未提及'每月必须提交两个案例'的硬性指标要求。"
+      }
+    },
+    {
+      "item_id": "qa_85fca172716483a2",
+      "document_name": "酷学院管理端操作流程指引.pdf",
+      "document_path": "酷学院管理端操作流程指引.pdf",
+      "question_types": [
+        "超长提问题",
+        "流程问答题"
+      ],
+      "question": "我下周要组织一批新员工参加入职培训，培训结束后需要进行线上考核。作为管理员，我需要完成以下几个关联任务：首先，我需要创建一个新的题库专门用来存放这次培训的考核题目，并且希望能够快速批量导入而不是一道道手动录入；其次，我要基于这个题库发布一场正式的考试，有几个硬性要求：为了防止员工重复刷分，必须限制每人只能考一次，如果试卷里的题目数量不足系统要自动禁止考试不能凑数，而且考试中必须包含简答题需要人工批改而不是系统自动判分，还要指定具体的阅卷负责人；最后，我需要把这场考试添加到现有的“新员工入职培训”学习项目中作为结业考核环节。请详细说明完成这些任务的每个步骤的完整操作路径、关键设置点的具体选项和按钮位置，以及根据操作指引，哪些地方最容易被忽略或操作失误导致整个设置无效？",
+      "reference_answer": "1. 建题库：路径为“培训—试题管理—新建题库”，填写信息后选“快速建题”批量导入，最后点击“确定”。2. 发布考试：路径“培训—考试—考试管理—新建考试”，引用试卷后设考试次数为“1次”、试题不足时“不可考试”，简答题阅卷设“人工”并添加阅卷人，点击“发布”后添加学员。3. 更新学习项目：路径“培训—学习—学习项目”，点击“编辑”进入后添加考试，关键最后必须点击右上角“更新”按钮才能生效，否则修改无效。",
+      "evidence": "题库设置路径为培训-试题管理-新建题库，支持快速建题；考试设置中次数为1次、试题不足时不可考试、简答题需人工阅卷并添加人员；学习项目编辑后必须点击右上角“更新”才能生效。",
+      "actual_answer": "",
+      "query_error": "timed out",
+      "latency_ms": 180136.26,
+      "recall": {
+        "score": 1,
+        "reason": "matched document target '酷学院管理端操作流程指引' in chunk from retrieval_api",
+        "matched_chunk_index": 8,
+        "chunk_count": 15,
+        "latency_ms": 3139.69,
+        "error": ""
+      },
+      "judgment": {
+        "scores": {
+          "readability": 0,
+          "correctness": 0,
+          "completeness": 0
+        },
+        "pass": false,
+        "reasons": {
+          "readability": "query api failed",
+          "correctness": "query api failed",
+          "completeness": "query api failed"
+        },
+        "missing_points": [
+          "query api failed"
+        ],
+        "hallucinations": [],
+        "suggested_answer": ""
+      }
+    },
+    {
+      "item_id": "qa_aee1afb1a8005040",
+      "document_name": "学院知识萃取制度及SOP.pdf",
+      "document_path": "学院知识萃取制度及SOP.pdf",
+      "question_types": [
+        "流程问答题"
+      ],
+      "question": "从一次具体的业务经验到形成可推广的方法，中间需要经过哪些关键环节？",
+      "reference_answer": "需要经过四个环节：首先以'具体的经验'作为起点，经过'复盘和萃取'总结关键技巧，然后'形成系统方法'，最终将这些方法在'新情境下运用'。",
+      "evidence": "文档第一部分描述：从'具体的经验'起点，经'复盘和萃取'总结技巧，'形成系统方法'，最终在新情境下运用。",
+      "actual_answer": "根据《学院知识萃取制度及SOP》，从一次具体的业务经验到形成可推广的方法，需要经过以下四个关键环节：\n\n1.  **岗位经验情境化**：将具体的经验放在特定的业务情境中进行复盘和萃取。\n2.  **隐性经验显性化**：从复盘过程中，总结出关键技巧，将个人隐性的经验转化为显性的、可描述的知识。\n3.  **显性经验形象化**：将总结出的关键技巧和方法，进一步形成系统化的、可理解的体系。\n4.  **推广经验普及化**：最终将这些系统方法和技巧，应用于新的情境下，实现方法的推广和普及。\n\n**总结路径：** 一次“具体的经验” → 经过“复盘和萃取” → 总结“关键技巧” → 形成“系统方法” → 在“新情境下运用”。",
+      "query_error": "",
+      "latency_ms": 67651.57,
+      "recall": {
+        "score": 1,
+        "reason": "matched document target '学院知识萃取制度及SOP' in chunk from retrieval_api",
+        "matched_chunk_index": 1,
+        "chunk_count": 15,
+        "latency_ms": 2882.94,
+        "error": ""
+      },
+      "judgment": {
+        "scores": {
+          "readability": 4.0,
+          "correctness": 4.0,
+          "completeness": 5.0
+        },
+        "pass": true,
+        "reasons": {
+          "readability": "回答采用分点论述并附总结路径，结构清晰、逻辑连贯，但使用了'隐性经验显性化'等专业术语，对非专业人员可能略显抽象。",
+          "correctness": "回答的核心流程（四环节）与标准答案逻辑一致，总结路径准确，但引用了文档依据中未提及的《学院知识萃取制度及SOP》及四个'XX化'术语，属于依据外的信息扩展。",
+          "completeness": "完整覆盖了标准答案要求的四个关键环节（具体经验起点、复盘萃取、形成系统方法、新情境运用），且通过总结路径再次强调了核心要点。"
+        },
+        "missing_points": [],
+        "hallucinations": [],
+        "suggested_answer": ""
+      }
+    },
+    {
+      "item_id": "qa_740810532285ba9a",
+      "document_name": "订阅号运营SOP.pdf",
+      "document_path": "订阅号运营SOP.pdf",
+      "question_types": [
+        "知识问答类"
+      ],
+      "question": "推文提交正式审批前，有什么方法可以检查内容错误？",
+      "reference_answer": "审批前可先发布预览给自己，检查错字、错行等问题。",
+      "evidence": "审批前可先发布预览给自己，检查错字、错行等问题",
+      "actual_answer": "# 推文提交审批前检查内容错误的方法\n\n根据知识库，您可以在提交审批前**发布预览给自己**，进行内容检查。具体操作要点如下：\n\n---\n\n## 操作步骤\n\n1. **在飞书订阅号管理后台**，完成推文编辑后，先不要提交审批\n2. **点击预览功能**，将推文预览发送给自己\n3. **在预览页面中仔细检查**：\n   - 错别字\n   - 错行、排版错乱\n   - 标题和封面是否合适\n   - 文章简介内容\n\n**【相关图片：data/processing/订阅号运营SOP/img/image_0013.gif】**\n\n---\n\n## 其他检查建议\n\n在编辑推文时，您还可以利用秀米编辑器的功能辅助检查：\n- 使用预览功能查看排版效果\n- 多按保存，避免内容丢失\n- 注意封面图是否与正文匹配（封面可用可画制作）\n\n---\n\n> 当前知识库仅提供“审批前预览检查”这一种方法来确认内容错误。对于其他更详细的检查方法，知识库中未提供更多信息。",
+      "query_error": "",
+      "latency_ms": 8651.51,
+      "recall": {
+        "score": 1,
+        "reason": "matched document target '订阅号运营SOP' in chunk from retrieval_api",
+        "matched_chunk_index": 1,
+        "chunk_count": 15,
+        "latency_ms": 3086.91,
+        "error": ""
+      },
+      "judgment": {
+        "scores": {
+          "readability": 4.0,
+          "correctness": 3.0,
+          "completeness": 4.0
+        },
+        "pass": false,
+        "reasons": {
+          "readability": "回答结构清晰，使用步骤化呈现，但包含较多文档未提及的额外信息，略显冗长。",
+          "correctness": "核心方法（发布预览给自己）正确，但添加了文档未提及的'飞书订阅号管理后台'、'秀米编辑器'、'可画制作封面'等外部信息，存在明显幻觉。",
+          "completeness": "完整覆盖了标准答案的核心内容（预览给自己、检查错字错行），但额外添加了文档未支持的信息。"
+        },
+        "missing_points": [],
+        "hallucinations": [
+          "在飞书订阅号管理后台操作（文档未提及具体平台）",
+          "使用秀米编辑器辅助检查（文档未提及）",
+          "封面可用可画制作（文档未提及）",
+          "多按保存避免内容丢失（文档未提及）"
+        ],
+        "suggested_answer": "审批前可先发布预览给自己，检查错字、错行等问题。"
+      }
+    },
+    {
+      "item_id": "qa_e6b0f9588051ec14",
+      "document_name": "视频会议&录音设备操作sop.pdf",
+      "document_path": "视频会议&录音设备操作sop.pdf",
+      "question_types": [
+        "噪声题",
+        "流程问答题"
+      ],
+      "question": "喂，那个视频会议我开完了要咋关啊？是不是直接点那个挂断按钮就行了？还有啊，我录制的视频之后去哪找啊？是自动保存到电脑上了吗？",
+      "reference_answer": "结束视频会议时，不能直接点挂断，需要先点击\"停止共享\"，再点击\"挂断\"按钮。寻找录制好的视频有两种方法：一是结束视频会议后，会议助手会将链接第一时间发送到发起会议的人，直接打开即可；二是自行打开视频会议，寻找历史记录。文档未提及自动保存到电脑本地的方式。",
+      "evidence": "先点击\"停止共享\"，再点击\"挂断\"按钮即可。如何寻找录制好的视频记录• 方法一：结束视频会议后，会议助手会将链接第一时间发送到发起会议的人，直接打开即可• 方法二：自行打开视频会议，寻找历史记录",
+      "actual_answer": "# 视频会议结束操作流程\n\n**注意：不能直接点击挂断按钮！** 请按以下步骤操作：\n\n## 第一步：停止共享屏幕\n- 点击底部工具栏的“**停止共享**”按钮\n\n## 第二步：挂断会议\n- 点击“**挂断**”按钮结束会议\n\n【相关图片：data/processing/视频会议&录音设备操作sop/img/image_0016.png】\n【相关图片：data/processing/视频会议&录音设备操作sop/img/image_0017.png】\n\n---\n\n## 附：如何寻找录制好的视频记录（如已录屏）\n会议结束后，可通过以下方式获取录制文件：\n- **方法一**：会议助手将链接自动发送给会议发起人，直接打开即可\n- **方法二**：进入“视频会议”模块 → 点击“历史记录”查找对应会议条目\n\n【相关图片：data/processing/视频会议&录音设备操作sop/img/image_0019.png】\n\n---\n\n**关键提示**：若使用了收音设备，结束会议后请**关闭设备电源**并**归还学院**。",
+      "query_error": "",
+      "latency_ms": 15496.26,
+      "recall": {
+        "score": 1,
+        "reason": "matched document target '视频会议&录音设备操作sop' in chunk from retrieval_api",
+        "matched_chunk_index": 2,
+        "chunk_count": 15,
+        "latency_ms": 2812.02,
+        "error": ""
+      },
+      "judgment": {
+        "scores": {
+          "readability": 5.0,
+          "correctness": 4.0,
+          "completeness": 3.0
+        },
+        "pass": false,
+        "reasons": {
+          "readability": "回答结构清晰，使用步骤分解、加粗强调和明确标题，易于阅读和理解，用户能快速定位关键操作。",
+          "correctness": "正确描述了会议结束流程（先停止共享再挂断）和两种视频查找方法，纠正了直接挂断的错误前提；但包含文档依据中未提及的收音设备提示（可能为幻觉），且未明确否定自动保存到本地的说法。",
+          "completeness": "遗漏了对'是否自动保存到电脑'这一问题的明确回答（标准答案明确指出的要点），仅提供了正确的查找方式而未澄清该错误前提。"
+        },
+        "missing_points": [
+          "明确说明文档未提及自动保存到电脑本地的方式（或明确否定自动保存到本地）"
+        ],
+        "hallucinations": [
+          "关于结束会议后需关闭收音设备电源并归还学院的提示（若不在原文档中）"
+        ],
+        "suggested_answer": "结束视频会议时，**不能直接点击挂断按钮**。正确操作是：先点击\"**停止共享**\"，再点击\"**挂断**\"按钮。\n\n关于录制视频：**不会自动保存到电脑本地**。寻找录制好的视频有两种方法：\n- **方法一**：结束会议后，会议助手会将链接第一时间发送到发起会议的人，直接打开即可；\n- **方法二**：自行打开视频会议，寻找历史记录。\n\n（注：文档未提及自动保存到电脑本地的方式）"
+      }
+    },
+    {
+      "item_id": "qa_44fe76b8b6136067",
+      "document_name": "一书一课管理后台操作流程.pdf",
+      "document_path": "一书一课管理后台操作流程.pdf",
+      "question_types": [
+        "超长提问题"
+      ],
+      "question": "我是公司培训负责人，刚接手这个系统。现在有两个紧急需求：第一，需要给市场部新来的5个人开通后台账号，听说可以批量操作？第二，之前给销售部小李分配了学习流量但他反馈还是看不了视频，我该怎么排查？另外，员工都在问手机上看课要怎样切换到能看到公司课程的模式，这个设置是在后台操作还是需要员工自己操作？",
+      "reference_answer": "针对您的三个需求：1）批量开通账号：在学员管理中使用批量添加功能，下载Excel模板填写5人信息后上传即可；2）流量问题：在学员列表搜索小李的姓名或手机号，再次进行添加操作；3）手机端切换：不需要后台操作，让员工自己在手机端\"个人\"界面点击切换至组织模式即可。",
+      "evidence": "文档分别涵盖了批量添加（下载Excel模板上传）、流量问题排查（再次添加）、组织模式切换（个人界面点击切换）三个知识点",
+      "actual_answer": "",
+      "query_error": "timed out",
+      "latency_ms": 180314.17,
+      "recall": {
+        "score": 0,
+        "reason": "recall check failed: Server error '500 Internal Server Error' for url 'http://localhost:8000/api/v1/retrieval/flow'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500",
+        "matched_chunk_index": null,
+        "chunk_count": 0,
+        "latency_ms": 10312.91,
+        "error": "Server error '500 Internal Server Error' for url 'http://localhost:8000/api/v1/retrieval/flow'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500"
+      },
+      "judgment": {
+        "scores": {
+          "readability": 0,
+          "correctness": 0,
+          "completeness": 0
+        },
+        "pass": false,
+        "reasons": {
+          "readability": "query api failed",
+          "correctness": "query api failed",
+          "completeness": "query api failed"
+        },
+        "missing_points": [
+          "query api failed"
+        ],
+        "hallucinations": [],
+        "suggested_answer": ""
+      }
+    },
+    {
+      "item_id": "qa_3b7eb5e976f6a019",
+      "document_name": "订阅号运营SOP.pdf",
+      "document_path": "订阅号运营SOP.pdf",
+      "question_types": [
+        "流程问答题"
+      ],
+      "question": "如果要给迈拓知识星球发布一篇新推文，从内容排版到最终发布的完整操作流程是什么？",
+      "reference_answer": "1)在秀米或135编辑器根据主题选择模板填充内容并排版（秀米建议购买会员）；2)使用国内版可画制作640*360的封面图；3)打开飞书订阅号管理后台新建图文；4)将在秀米上排版好的文章导出同步到订阅号中；5)完成标题、封面和文章简介的设置；6)提交审批流程，审批前可先发布预览给自己检查错字、错行；7)审批通过后回到管理后台，设置每周三篇、17:30的定时发送。",
+      "evidence": "整合文档中'如何制作推文'、'如何制作封面图'、'飞书订阅号操作指南'和'迈拓知识星球运营注意事项'各部分流程",
+      "actual_answer": "好的，以下是迈拓知识星球发布新推文的完整操作流程，从内容排版到最终发布。\n\n### 一、 内容排版与制作\n\n1.  **根据模板填充内容**\n    *   **操作位置**：秀米编辑器。\n    *   **操作步骤**：在秀米中，左侧素材栏可选择图文模板、图文收藏、我的图库等；在中间编辑区对封面图、标题、摘要及推文主干进行排版编辑。编辑区顶部有主题色设置、预览、保存和导出按钮。\n    *   【相关图片：data\\processing\\订阅号运营SOP\\img\\image_0002.gif】\n    *   【相关图片：data\\processing\\订阅号运营SOP\\img\\image_0003.png】\n\n2.  **导入外部推文（如适用）**\n    *   **操作位置**：135编辑器。\n    *   **操作步骤**：若需要直接使用外部推文，可在135编辑器中新建图文并复制链接导入。\n\n### 二、 推送至飞书订阅号\n\n3.  **导出并同步文章**\n    *   **操作位置**：秀米 → 飞书订阅号。\n    *   **操作步骤**：将秀米上排版好的文章导出，并同步到飞书订阅号中。\n    *   【相关图片：data\\processing\\订阅号运营SOP\\img\\image_0012.gif】\n\n4.  **设置标题与封面**\n    *   **操作位置**：飞书订阅号后台。\n    *   **操作步骤**：完成标题和封面的设置。封面可从文章中选取，也可使用可画制作。\n    *   【相关图片：data\\processing\\订阅号运营SOP\\img\\image_0013.gif】\n\n### 三、 审批与发布\n\n5.  **发布预览检查**\n    *   **操作位置**：飞书订阅号后台。\n    *   **操作步骤**：在提交审批前，先发布预览给自己，检查错字、错行等问题。\n\n6.  **提交审批流程**\n    *   **操作位置**：飞书订阅号后台。\n    *   **操作步骤**：确认无误后，提交审批流程。\n\n7.  **定时发送**\n    *   **操作位置**：飞书订阅号文章管理列表。\n    *   **操作步骤**：文章审批通过后，在文章列表中找到状态为“审批通过”的条目，点击右侧操作栏的“更多”下拉菜单，选择“定时发送”。\n    *   **发送规范**：每周三篇，每次在 **17:30** 定时发送。\n    *   【相关图片：data\\processing\\订阅号运营SOP\\img\\image_0014.png】",
+      "query_error": "",
+      "latency_ms": 33741.91,
+      "recall": {
+        "score": 1,
+        "reason": "matched document target '订阅号运营SOP' in chunk from retrieval_api",
+        "matched_chunk_index": 1,
+        "chunk_count": 15,
+        "latency_ms": 2640.35,
+        "error": ""
+      },
+      "judgment": {
+        "scores": {
+          "readability": 4.0,
+          "correctness": 3.0,
+          "completeness": 3.0
+        },
+        "pass": false,
+        "reasons": {
+          "readability": "回答采用三级结构（大阶段-步骤-细节）清晰呈现流程，逻辑分明易于跟随，但包含较多图片路径占位符，略微影响阅读连贯性",
+          "correctness": "遗漏了封面图必须使用'国内版可画'制作以及'640*360'的精确尺寸要求，也未提及'文章简介'的设置环节，这些遗漏可能导致实际操作与标准不符",
+          "completeness": "遗漏三个关键信息点：1)秀米建议购买会员的提示；2)封面图具体规格（国内版可画、640*360尺寸）；3)文章简介的设置步骤"
+        },
+        "missing_points": [
+          "秀米建议购买会员",
+          "使用国内版可画制作640*360的封面图",
+          "文章简介的设置"
+        ],
+        "hallucinations": [],
+        "suggested_answer": "完整的操作流程如下：\n\n1) **内容排版**：在秀米（建议购买会员）或135编辑器根据主题选择模板填充内容并排版；\n2) **封面制作**：使用国内版可画制作640*360规格的封面图；\n3) **后台新建**：打开飞书订阅号管理后台新建图文；\n4) **内容同步**：将在秀米上排版好的文章导出并同步到订阅号中；\n5) **信息完善**：完成标题、封面和文章简介的设置；\n6) **预览与审批**：提交审批流程，审批前可先发布预览给自己检查错字、错行；\n7) **定时发布**：审批通过后回到管理后台，设置每周三篇、17:30的定时发送。"
+      }
+    },
+    {
+      "item_id": "qa_d6be577f24d56663",
+      "document_name": "订阅号运营SOP.pdf",
+      "document_path": "订阅号运营SOP.pdf",
+      "question_types": [
+        "陷阱题"
+      ],
+      "question": "听说135编辑器导入外部推文链接必须开会员，而秀米不需要会员就能直接导入，是这样吗？",
+      "reference_answer": "不对，实际情况正好相反。秀米需要会员才能实现导入外部推文的功能；135编辑器不需要会员就能导入，但排版不便捷。",
+      "evidence": "外部推文直接使用：秀米需要会员才能实现这个功能；135编辑器不需要会员，但排版不便捷",
+      "actual_answer": "根据当前知识库信息，**135编辑器导入外部推文链接不需要会员**，但排版不便捷。具体操作方式如下：\n\n1. **新建一个图文**，进入编辑页面。\n2. **复制外部推文链接**并直接导入即可。\n\n【相关图片：data/image_0004.gif】\n\n> 注：秀米实现此功能则需要会员。",
+      "query_error": "",
+      "latency_ms": 76764.26,
+      "recall": {
+        "score": 0,
+        "reason": "recall check failed: Server error '500 Internal Server Error' for url 'http://localhost:8000/api/v1/retrieval/flow'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500",
+        "matched_chunk_index": null,
+        "chunk_count": 0,
+        "latency_ms": 10449.41,
+        "error": "Server error '500 Internal Server Error' for url 'http://localhost:8000/api/v1/retrieval/flow'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500"
+      },
+      "judgment": {
+        "scores": {
+          "readability": 4.0,
+          "correctness": 5.0,
+          "completeness": 4.0
+        },
+        "pass": true,
+        "reasons": {
+          "readability": "回答结构清晰，使用加粗和步骤列表便于阅读，语言简洁，但针对陷阱题建议开头更明确否定用户错误前提。",
+          "correctness": "准确纠正了用户问题中的错误前提（135编辑器无需会员而秀米需要），与文档依据和标准答案完全一致，无幻觉。",
+          "completeness": "覆盖了标准答案的所有核心要点（135无需会员、秀米需要会员、排版不便捷），并提供了额外操作步骤，但明确否定错误前提的表述可以更直接。"
+        },
+        "missing_points": [],
+        "hallucinations": [],
+        "suggested_answer": ""
+      }
+    },
+    {
+      "item_id": "qa_c13251db1d8df1cc",
+      "document_name": "酷学院管理端操作流程指引.pdf",
+      "document_path": "酷学院管理端操作流程指引.pdf",
+      "question_types": [
+        "陷阱题"
+      ],
+      "question": "我听说酷学院考试可以设置无限次考试机会，而且系统会自动批改简答题，这样设置完直接点保存就行了吧？",
+      "reference_answer": "不对。根据操作指引，考试次数应设置为“1次”而非无限次；简答题必须设置为“人工”阅卷方式，不能自动批改；设置完成后需要点击“发布”按钮而非保存。",
+      "evidence": "文档明确设置考试次数为“1次”；若考试中有简答题需将阅卷方式设置为“人工”；完成信息设置后点击页面右下角“发布”按钮。",
+      "actual_answer": "抱歉，根据当前知识库中的内容，未找到关于“设置无限次考试机会”的具体操作步骤。知识库中仅提到在**“考试设置”**步骤中，可以设置**“考试次数为‘1次’”**（相关说明：在考试设置界面，将考试次数设置为“1次”），未涉及无限次考试机会的配置方法。\n\n如需了解更详细的考试次数设置，建议直接联系酷学院管理员或查阅官方帮助文档。",
+      "query_error": "",
+      "latency_ms": 152722.47,
+      "recall": {
+        "score": 1,
+        "reason": "matched document target '酷学院管理端操作流程指引' in chunk from retrieval_api",
+        "matched_chunk_index": 3,
+        "chunk_count": 15,
+        "latency_ms": 2959.2,
+        "error": ""
+      },
+      "judgment": {
+        "scores": {
+          "readability": 3.0,
+          "correctness": 2.0,
+          "completeness": 1.0
+        },
+        "pass": false,
+        "reasons": {
+          "readability": "回答结构清晰、语言通顺，但采取回避策略，未直接回应用户问题中的错误前提，易让用户误以为系统不支持该功能而非明确告知设置错误。",
+          "correctness": "未能识别并纠正用户问题中的三个错误前提（无限次考试、自动批改简答题、点击保存），仅被动陈述部分文档内容，未利用已有知识库信息给出准确判断。",
+          "completeness": "严重遗漏关键信息：未明确纠正考试次数应为'1次'而非无限次、未提及简答题必须'人工'阅卷、未说明应点击'发布'而非'保存'，仅覆盖了考试次数设置的片段信息。"
+        },
+        "missing_points": [
+          "应明确纠正：考试次数必须设置为'1次'而非无限次",
+          "应明确纠正：简答题阅卷方式必须设置为'人工'，不能自动批改",
+          "应明确纠正：设置完成后需点击'发布'按钮而非'保存'"
+        ],
+        "hallucinations": [],
+        "suggested_answer": "不对。根据操作指引，考试次数应设置为'1次'而非无限次；若考试包含简答题，必须将阅卷方式设置为'人工'，系统不会自动批改；所有设置完成后，需点击页面右下角的'发布'按钮，而非保存。"
+      }
+    },
+    {
+      "item_id": "qa_f04181d5f4a54b9b",
+      "document_name": "视频会议&录音设备操作sop.pdf",
+      "document_path": "视频会议&录音设备操作sop.pdf",
+      "question_types": [
+        "流程问答题"
+      ],
+      "question": "怎么用Windows笔记本连接稻盛和夫会议室的投屏设备？",
+      "reference_answer": "首先开启设备电源，将投屏发射器插在屏幕USB接口上，等待出现【配对成功】字样；配对成功后拔下投屏发射器，插到需要投屏的电脑设备上；等待屏幕出现【呼叫接收页面】；等待【连接成功】后，点击【按钮】即可完成投屏。",
+      "evidence": "1. 开启设备电源，将投屏发射器插在屏幕 USB 接口上，等待出现【配对成功】字样2. 成功配对后，拔下投屏发射器，插到需要投屏的电脑设备上3. 等待屏幕出现【呼叫接收页面】4. 等待【连接成功】 ，点击【按钮】即可完成投屏",
+      "actual_answer": "",
+      "query_error": "Server error '502 Bad Gateway' for url 'http://localhost:8000/api/v1/query'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/502",
+      "latency_ms": 26045.0,
+      "recall": {
+        "score": 1,
+        "reason": "matched document target '视频会议&录音设备操作sop' in chunk from retrieval_api",
+        "matched_chunk_index": 1,
+        "chunk_count": 15,
+        "latency_ms": 2847.5,
+        "error": ""
+      },
+      "judgment": {
+        "scores": {
+          "readability": 0,
+          "correctness": 0,
+          "completeness": 0
+        },
+        "pass": false,
+        "reasons": {
+          "readability": "query api failed",
+          "correctness": "query api failed",
+          "completeness": "query api failed"
+        },
+        "missing_points": [
+          "query api failed"
+        ],
+        "hallucinations": [],
+        "suggested_answer": ""
+      }
+    }
+  ]
+}

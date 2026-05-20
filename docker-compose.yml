@@ -12,11 +12,20 @@ services:
       GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
       TZ: ${GENERIC_TIMEZONE}
       MILVUS_URI: http://milvus-standalone:19530
+      USE_LOCAL_EMBEDDING_MODEL: ${USE_LOCAL_EMBEDDING_MODEL:-true}
+      USE_LOCAL_RERANK_MODEL: ${USE_LOCAL_RERANK_MODEL:-true}
       EMBEDDING_CACHE_DIR: /models
       RERANKER_CACHE_DIR: /models
+      NLTK_DATA: /models/nltk_data
+      JIEBA_CACHE_DIR: /models/jieba
+      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
+      SILICONFLOW_BASE_URL: ${SILICONFLOW_BASE_URL:-https://api.siliconflow.cn/v1}
+      N8N_QUERY_WEBHOOK_URL: ${N8N_QUERY_WEBHOOK_URL:-http://n8n:5678/webhook/fastapi-test}
     volumes:
+      - ./app:/app/app
       - ./data:/app/data
       - E:/models:/models
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5).read()"]
       interval: 30s

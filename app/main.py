@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
 from app.api.v1.router import router as api_v1_router
+from app.services.retrieval import get_retrieval_service
 
 
 app = FastAPI(
@@ -8,7 +9,12 @@ app = FastAPI(
     version="0.1.0",
     description="Internal knowledge base backend exposed for n8n workflows.",
 )
-    
+
+
+@app.on_event("startup")
+def warmup_retrieval_models() -> None:
+    get_retrieval_service().warmup_models()
+
 
 @app.get("/")
 def read_root() -> dict[str, str]:

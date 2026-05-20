@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 
+import httpx
+
 from app.core.config import settings
 from app.services.embedding import configure_embedding_runtime_cache
 
@@ -23,6 +25,10 @@ REQUIRED_TOKENIZER_FILES = {
 
 class RerankDependencyError(RuntimeError):
     """Raised when reranker runtime dependencies are missing."""
+
+
+class RerankAPIError(RuntimeError):
+    """Raised when the remote rerank API returns an invalid or failed response."""
 
 
 @dataclass(frozen=True)
@@ -53,6 +59,10 @@ class RerankService:
         self.device = device
         self.batch_size = batch_size
         self.max_length = max_length
+
+    @property
+    def use_local_model(self) -> bool:
+        return settings.use_local_rerank_model
 
     @cached_property
     def tokenizer(self):
@@ -104,6 +114,8 @@ class RerankService:
         ]
         if not query.strip() or not candidate_list:
             return []
+        if not self.use_local_model:
+            return self._rerank_remote(query, candidate_list)
 
         try:
             import torch
@@ -132,6 +144,82 @@ class RerankService:
                     scores.append(RerankScore(id=candidate.id, score=float(score)))
 
         return sorted(scores, key=lambda item: item.score, reverse=True)
+
+    def _rerank_remote(
+        self,
+        query: str,
+        candidates: list[RerankCandidate],
+    ) -> list[RerankScore]:
+        self._ensure_remote_configured()
+        scores: list[RerankScore] = []
+
+        for start in range(0, len(candidates), self.batch_size):
+            batch = candidates[start : start + self.batch_size]
+            payload = {
+                "model": self.model_name,
+                "query": query,
+                "documents": [candidate.content for candidate in batch],
+                "top_n": len(batch),
+                "return_documents": False,
+            }
+            data = self._post_siliconflow("/rerank", payload)
+            results = data.get("results")
+            if not isinstance(results, list):
+                raise RerankAPIError(f"Rerank API response missing results list: {data}")
+
+            for item in results:
+                if not isinstance(item, dict):
+                    raise RerankAPIError(f"Invalid rerank result returned: {item}")
+                index = item.get("index")
+                score = item.get("relevance_score")
+                if not isinstance(index, int) or not isinstance(score, (int, float)):
+                    raise RerankAPIError(f"Invalid rerank score item returned: {item}")
+                if index < 0 or index >= len(batch):
+                    raise RerankAPIError(f"Rerank result index out of range: {item}")
+                scores.append(RerankScore(id=batch[index].id, score=float(score)))
+
+        return sorted(scores, key=lambda item: item.score, reverse=True)
+
+    def _post_siliconflow(self, path: str, payload: dict) -> dict:
+        url = f"{settings.siliconflow_base_url}{path}"
+        headers = {
+            "Authorization": f"Bearer {settings.siliconflow_api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            timeout = httpx.Timeout(
+                timeout=settings.siliconflow_timeout,
+                connect=settings.siliconflow_connect_timeout,
+                read=settings.siliconflow_read_timeout,
+                write=settings.siliconflow_write_timeout,
+                pool=settings.siliconflow_pool_timeout,
+            )
+            with httpx.Client(timeout=timeout) as client:
+                response = client.post(url, json=payload, headers=headers)
+                response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise RerankAPIError(f"Rerank API request timed out: {exc}") from exc
+        except httpx.HTTPStatusError as exc:
+            raise RerankAPIError(
+                f"Rerank API returned {exc.response.status_code}: {exc.response.text}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise RerankAPIError(f"Failed to call Rerank API: {exc}") from exc
+
+        return response.json()
+
+    def _ensure_remote_configured(self) -> None:
+        if not settings.siliconflow_api_key:
+            raise RerankAPIError(
+                "Missing SiliconFlow API key. Set SILICONFLOW_API_KEY before "
+                "USE_LOCAL_RERANK_MODEL=false."
+            )
+
+    def warmup(self) -> None:
+        if not self.use_local_model:
+            return
+        _ = self.tokenizer
+        _ = self.model
 
     def _resolve_model_source(self) -> tuple[str, bool]:
         local_path = Path(self.model_name)

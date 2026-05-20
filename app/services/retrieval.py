@@ -55,6 +55,10 @@ class RetrievalService:
         self.client = client or get_milvus_client()
         self.config = config or MilvusCollectionConfig()
 
+    def warmup_models(self) -> None:
+        self.embedding_service.warmup()
+        self.rerank_service.warmup()
+
     def search(
         self,
         query: str,

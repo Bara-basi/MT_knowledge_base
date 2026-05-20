@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any, Iterable
 from uuid import uuid4
 
+import httpx
+
 from app.core.config import settings
 from app.models.chunk import Chunk
 
@@ -20,6 +22,10 @@ BM25_LANGUAGE = "zh"
 
 class EmbeddingDependencyError(RuntimeError):
     """Raised when optional embedding dependencies are not installed."""
+
+
+class EmbeddingAPIError(RuntimeError):
+    """Raised when the remote embedding API returns an invalid or failed response."""
 
 
 class EmbeddingService:
@@ -38,6 +44,10 @@ class EmbeddingService:
         self.device = device
         self.batch_size = batch_size
         self.normalize_embeddings = normalize_embeddings
+
+    @property
+    def use_local_model(self) -> bool:
+        return settings.use_local_embedding_model
 
     @cached_property
     def tokenizer(self):
@@ -123,6 +133,8 @@ class EmbeddingService:
         text_list = [text.strip() for text in texts if text and text.strip()]
         if not text_list:
             return []
+        if not self.use_local_model:
+            return self._embed_texts_remote(text_list)
 
         try:
             import torch
@@ -153,6 +165,79 @@ class EmbeddingService:
                 vectors.extend(batch_vectors.cpu().float().tolist())
 
         return vectors
+
+    def _embed_texts_remote(self, texts: list[str]) -> list[list[float]]:
+        self._ensure_remote_configured()
+
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), self.batch_size):
+            batch = texts[start : start + self.batch_size]
+            payload = {
+                "model": self.model_name,
+                "input": batch,
+                "encoding_format": "float",
+            }
+            data = self._post_siliconflow("/embeddings", payload)
+            items = data.get("data")
+            if not isinstance(items, list):
+                raise EmbeddingAPIError(f"Embedding API response missing data list: {data}")
+
+            ordered_items = sorted(
+                items,
+                key=lambda item: item.get("index", 0) if isinstance(item, dict) else 0,
+            )
+            for item in ordered_items:
+                if not isinstance(item, dict) or not isinstance(item.get("embedding"), list):
+                    raise EmbeddingAPIError(f"Invalid embedding item returned: {item}")
+                vectors.append([float(value) for value in item["embedding"]])
+
+            if len(ordered_items) != len(batch):
+                raise EmbeddingAPIError(
+                    f"Embedding API returned {len(ordered_items)} vectors for {len(batch)} inputs."
+                )
+
+        return vectors
+
+    def _post_siliconflow(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        url = f"{settings.siliconflow_base_url}{path}"
+        headers = {
+            "Authorization": f"Bearer {settings.siliconflow_api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            timeout = httpx.Timeout(
+                timeout=settings.siliconflow_timeout,
+                connect=settings.siliconflow_connect_timeout,
+                read=settings.siliconflow_read_timeout,
+                write=settings.siliconflow_write_timeout,
+                pool=settings.siliconflow_pool_timeout,
+            )
+            with httpx.Client(timeout=timeout) as client:
+                response = client.post(url, json=payload, headers=headers)
+                response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise EmbeddingAPIError(f"Embedding API request timed out: {exc}") from exc
+        except httpx.HTTPStatusError as exc:
+            raise EmbeddingAPIError(
+                f"Embedding API returned {exc.response.status_code}: {exc.response.text}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise EmbeddingAPIError(f"Failed to call Embedding API: {exc}") from exc
+
+        return response.json()
+
+    def _ensure_remote_configured(self) -> None:
+        if not settings.siliconflow_api_key:
+            raise EmbeddingAPIError(
+                "Missing SiliconFlow API key. Set SILICONFLOW_API_KEY before "
+                "USE_LOCAL_EMBEDDING_MODEL=false."
+            )
+
+    def warmup(self) -> None:
+        if not self.use_local_model:
+            return
+        _ = self.tokenizer
+        _ = self.model
 
     def _resolve_device(self, torch_module) -> str:
         if self.device:

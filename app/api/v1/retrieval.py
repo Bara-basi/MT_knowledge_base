@@ -90,6 +90,7 @@ def _to_flow_chunk(order: int, result: RetrievalResult) -> FlowRetrievedChunk:
     structure = _extract_structure(metadata)
 
     return FlowRetrievedChunk(
+        id=result.id,
         order=order,
         content=result.content,
         structure=structure,

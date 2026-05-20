@@ -1,0 +1,998 @@
+[
+  {
+    "id": "qa_834ab9e57a17236f",
+    "document_name": "一书一课管理后台操作流程.pdf",
+    "document_path": "一书一课管理后台操作流程.pdf",
+    "source_document_name": "一书一课管理后台操作流程.pdf",
+    "source_document_path": "一书一课管理后台操作流程.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "信息咨询题"
+    ],
+    "question": "一书一课管理后台的登录网址是什么？",
+    "reference_answer": "https://client.chiyue365.com/login.html",
+    "evidence": "文档第一部分登录章节明确提供了网址：https://client.chiyue365.com/login.html",
+    "difficulty": "easy",
+    "source_char_count": 470,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_cf6c817c77915b37",
+    "document_name": "一书一课管理后台操作流程.pdf",
+    "document_path": "一书一课管理后台操作流程.pdf",
+    "source_document_name": "一书一课管理后台操作流程.pdf",
+    "source_document_path": "一书一课管理后台操作流程.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "陷阱题",
+      "知识问答类"
+    ],
+    "question": "我听说一书一课后台的默认账号是\"admin\"，密码是\"123456\"，对吗？",
+    "reference_answer": "不对。正确的登录账号是\"迈拓\"，密码是\"AXm7PuZE\"。",
+    "evidence": "文档登录方式部分明确列出账号：迈拓，密码：AXm7PuZE",
+    "difficulty": "medium",
+    "source_char_count": 470,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_7f282f1da66066e6",
+    "document_name": "一书一课管理后台操作流程.pdf",
+    "document_path": "一书一课管理后台操作流程.pdf",
+    "source_document_name": "一书一课管理后台操作流程.pdf",
+    "source_document_path": "一书一课管理后台操作流程.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "流程问答题"
+    ],
+    "question": "怎么在后台给新员工开通一书一课的学习账号？",
+    "reference_answer": "首先在首页点击\"去添加\"，然后录入学员的姓名和手机号码，最后点击保存即可。",
+    "evidence": "文档学员管理-添加学员部分描述了该流程：第一步在首页点击去添加，第二步录入学员姓名和手机号码后点击保存",
+    "difficulty": "easy",
+    "source_char_count": 470,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_18cf462df53a07df",
+    "document_name": "一书一课管理后台操作流程.pdf",
+    "document_path": "一书一课管理后台操作流程.pdf",
+    "source_document_name": "一书一课管理后台操作流程.pdf",
+    "source_document_path": "一书一课管理后台操作流程.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "流程问答题"
+    ],
+    "question": "公司这次有50个新员工要开通账号，一个一个添加太麻烦了，有什么快捷方式吗？",
+    "reference_answer": "可以使用批量添加功能。下载Excel模板，将所有学员信息填写完毕后上传，即可完成批量添加。",
+    "evidence": "文档中提到批量添加方式：下载Excel模板，将信息填写完毕后上传，即可完成批量添加",
+    "difficulty": "easy",
+    "source_char_count": 470,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_ed8e12be97cefff3",
+    "document_name": "一书一课管理后台操作流程.pdf",
+    "document_path": "一书一课管理后台操作流程.pdf",
+    "source_document_name": "一书一课管理后台操作流程.pdf",
+    "source_document_path": "一书一课管理后台操作流程.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "流程问答题"
+    ],
+    "question": "离职员工的账号怎么在后台清理掉？",
+    "reference_answer": "在学员管理模块，输入离职员工的手机号或姓名进行搜索，找到后点击删除；也可以勾选多个学员点击右上角的批量删除进行统一操作。",
+    "evidence": "文档删除学员部分说明：输入手机号/姓名搜索后点击删除，也可点击右上角批量删除进行统一操作",
+    "difficulty": "easy",
+    "source_char_count": 470,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_50951799f796c984",
+    "document_name": "一书一课管理后台操作流程.pdf",
+    "document_path": "一书一课管理后台操作流程.pdf",
+    "source_document_name": "一书一课管理后台操作流程.pdf",
+    "source_document_path": "一书一课管理后台操作流程.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "知识问答类"
+    ],
+    "question": "已经给学员分配了学习流量，但他还是说用不了，该怎么办？",
+    "reference_answer": "在学员列表中，通过搜索该学员的姓名或手机号，再次进行添加操作。",
+    "evidence": "文档常见问题第一条：分配学习流量后仍无法使用，在学员列表中通过搜索姓名/手机号再次进行添加",
+    "difficulty": "medium",
+    "source_char_count": 470,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_ce64b7ad750d5d15",
+    "document_name": "一书一课管理后台操作流程.pdf",
+    "document_path": "一书一课管理后台操作流程.pdf",
+    "source_document_name": "一书一课管理后台操作流程.pdf",
+    "source_document_path": "一书一课管理后台操作流程.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "信息咨询题"
+    ],
+    "question": "员工反映在手机上找不到公司的课程，说只能看到个人内容，怎么解决？",
+    "reference_answer": "需要让员工在手机端\"个人\"界面点击切换至组织模式。",
+    "evidence": "文档常见问题第二条：手机端在\"个人\"界面点击切换至组织模式",
+    "difficulty": "easy",
+    "source_char_count": 470,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_ee5ca4dab0f85679",
+    "document_name": "一书一课管理后台操作流程.pdf",
+    "document_path": "一书一课管理后台操作流程.pdf",
+    "source_document_name": "一书一课管理后台操作流程.pdf",
+    "source_document_path": "一书一课管理后台操作流程.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "陷阱题",
+      "知识问答类"
+    ],
+    "question": "我直接在\"学员管理\"里添加了学员，是不是就自动有学习流量了？",
+    "reference_answer": "不是。添加学员只是创建账号，分配学习流量需要在\"管理学习流量\"模块中单独操作，输入学员姓名或手机号进行添加。",
+    "evidence": "文档将学员管理和学习流量管理分为两个独立模块，后者需要单独输入姓名或手机号添加",
+    "difficulty": "medium",
+    "source_char_count": 470,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_44fe76b8b6136067",
+    "document_name": "一书一课管理后台操作流程.pdf",
+    "document_path": "一书一课管理后台操作流程.pdf",
+    "source_document_name": "一书一课管理后台操作流程.pdf",
+    "source_document_path": "一书一课管理后台操作流程.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "超长提问题"
+    ],
+    "question": "我是公司培训负责人，刚接手这个系统。现在有两个紧急需求：第一，需要给市场部新来的5个人开通后台账号，听说可以批量操作？第二，之前给销售部小李分配了学习流量但他反馈还是看不了视频，我该怎么排查？另外，员工都在问手机上看课要怎样切换到能看到公司课程的模式，这个设置是在后台操作还是需要员工自己操作？",
+    "reference_answer": "针对您的三个需求：1）批量开通账号：在学员管理中使用批量添加功能，下载Excel模板填写5人信息后上传即可；2）流量问题：在学员列表搜索小李的姓名或手机号，再次进行添加操作；3）手机端切换：不需要后台操作，让员工自己在手机端\"个人\"界面点击切换至组织模式即可。",
+    "evidence": "文档分别涵盖了批量添加（下载Excel模板上传）、流量问题排查（再次添加）、组织模式切换（个人界面点击切换）三个知识点",
+    "difficulty": "hard",
+    "source_char_count": 470,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_f943d0cdc278d0bf",
+    "document_name": "一书一课管理后台操作流程.pdf",
+    "document_path": "一书一课管理后台操作流程.pdf",
+    "source_document_name": "一书一课管理后台操作流程.pdf",
+    "source_document_path": "一书一课管理后台操作流程.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "噪声题"
+    ],
+    "question": "那个...一书一课的后台网址是啥来着？还有啊，账号密码是不是mt和123456啊？我老是记不住...",
+    "reference_answer": "一书一课管理后台网址是https://client.chiyue365.com/login.html。账号不是mt，正确账号是\"迈拓\"，密码也不是123456，而是\"AXm7PuZE\"。",
+    "evidence": "文档登录部分提供了网址https://client.chiyue365.com/login.html和正确的账号密码：迈拓/AXm7PuZE",
+    "difficulty": "easy",
+    "source_char_count": 470,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_2a8d5bc3b5142f6d",
+    "document_name": "学院知识萃取制度及SOP.pdf",
+    "document_path": "学院知识萃取制度及SOP.pdf",
+    "source_document_name": "学院知识萃取制度及SOP.pdf",
+    "source_document_path": "学院知识萃取制度及SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "知识问答类"
+    ],
+    "question": "咱们学院推行的知识萃取，常说的四个转化环节具体指什么？",
+    "reference_answer": "岗位经验情境化、隐性经验显性化、显性经验形象化、推广经验普及化。",
+    "evidence": "文档第一部分'什么是知识萃取'明确列出四个要点：岗位经验情境化、隐性经验显性化、显性经验形象化、推广经验普及化。",
+    "difficulty": "easy",
+    "source_char_count": 685,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_e1a172f8b010d9e7",
+    "document_name": "学院知识萃取制度及SOP.pdf",
+    "document_path": "学院知识萃取制度及SOP.pdf",
+    "source_document_name": "学院知识萃取制度及SOP.pdf",
+    "source_document_path": "学院知识萃取制度及SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "知识问答类"
+    ],
+    "question": "公司投入资源做知识萃取，主要想达成哪些目标？",
+    "reference_answer": "沉淀优秀案例、推广优质的方法、培训员工成长、宣传企业文化。",
+    "evidence": "文档第二部分'知识萃取在企业中的核心价值'列出四点：沉淀优秀案例、推广优质的方法、培训员工成长、宣传企业文化。",
+    "difficulty": "easy",
+    "source_char_count": 685,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_26c9ba851850abfd",
+    "document_name": "学院知识萃取制度及SOP.pdf",
+    "document_path": "学院知识萃取制度及SOP.pdf",
+    "source_document_name": "学院知识萃取制度及SOP.pdf",
+    "source_document_path": "学院知识萃取制度及SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "流程问答题"
+    ],
+    "question": "如果我想推荐同事来做经验分享，可以通过哪些正规渠道提名？",
+    "reference_answer": "可以通过以下渠道：总监推荐或其他伙伴反馈、月度经营会的新客户开发名单、群内英雄榜大单人员、出国地推人员、工厂端负责人回公司。",
+    "evidence": "文档第四部分'分享名单来源渠道'列出五种方式：总监推荐或其他伙伴反馈、月度经营会新客户开发名单、群内英雄榜大单人员、出国地推人员、工厂端负责人回公司。",
+    "difficulty": "medium",
+    "source_char_count": 685,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_c29c4a07e69f12b2",
+    "document_name": "学院知识萃取制度及SOP.pdf",
+    "document_path": "学院知识萃取制度及SOP.pdf",
+    "source_document_name": "学院知识萃取制度及SOP.pdf",
+    "source_document_path": "学院知识萃取制度及SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "陷阱题"
+    ],
+    "question": "听说知识萃取是由人力资源部统筹负责的，而且要求每个部门每月必须提交两个案例，是这样吗？",
+    "reference_answer": "不正确。知识萃取的主负责人是学院，而非人力资源部。文档中未提及'每月必须提交两个案例'的硬性指标要求。",
+    "evidence": "文档第三部分'知识萃取流程'明确标注'主负责人：学院'，且全文未涉及人力资源部或每月提交数量的规定。",
+    "difficulty": "medium",
+    "source_char_count": 685,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_9bb42cc15f1adfd9",
+    "document_name": "学院知识萃取制度及SOP.pdf",
+    "document_path": "学院知识萃取制度及SOP.pdf",
+    "source_document_name": "学院知识萃取制度及SOP.pdf",
+    "source_document_path": "学院知识萃取制度及SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "陷阱题"
+    ],
+    "question": "知识萃取是不是就是把专家的经验简单整理成PPT或者文档就行了？我看就是做个记录。",
+    "reference_answer": "不准确。知识萃取不仅仅是记录整理，而是需要经过'复盘和萃取'总结关键技巧，'形成系统方法'，最终还要能在'新情境下运用'。这是一个从具体经验到系统方法再到实践应用的完整过程。",
+    "evidence": "文档第一部分指出，萃取起点是'具体的经验'，需经'复盘和萃取'总结技巧，'形成系统方法'，最终在'新情境下运用'，而非简单记录。",
+    "difficulty": "hard",
+    "source_char_count": 685,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_f1432756b1995011",
+    "document_name": "学院知识萃取制度及SOP.pdf",
+    "document_path": "学院知识萃取制度及SOP.pdf",
+    "source_document_name": "学院知识萃取制度及SOP.pdf",
+    "source_document_path": "学院知识萃取制度及SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "信息咨询题"
+    ],
+    "question": "我想报名做内部分享，但不知道讲什么主题比较合适，学院对分享方向有什么建议吗？",
+    "reference_answer": "可以参考三类方向：一是拿单案例分享，如新客户开发、老客户激活；二是专业知识分享，如新产品知识、行业调研报告；三是效率工具分享，如AI、RPA等工具应用。",
+    "evidence": "文档第四部分'分享主题方向参考'列出三类：拿单案例分享（新客户开发、老客户激活等）、专业知识分享（新产品知识、行业调研报告等）、效率工具分享（AI、RPA等）。",
+    "difficulty": "easy",
+    "source_char_count": 685,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_afbc7f448d37eedc",
+    "document_name": "学院知识萃取制度及SOP.pdf",
+    "document_path": "学院知识萃取制度及SOP.pdf",
+    "source_document_name": "学院知识萃取制度及SOP.pdf",
+    "source_document_path": "学院知识萃取制度及SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "噪声题"
+    ],
+    "question": "哎那个...我想问问啊，就是咱们定分享主题的时候，听说有啥五问六问的，具体是咋操作来着？能不能给讲讲？",
+    "reference_answer": "确定分享主题可以通过'五问'法梳理岗位业务问题：1）问战略——定方向；2）问目标——定标准；3）问任务——询问关键任务和子任务，确定萃取主题；4）问挑战——询问工作流程和节点，找到面临的障碍和挑战，选定萃取主题；5）问原因——分析挑战背后的关键要因（坑）。",
+    "evidence": "文档第四部分'确定分享主题技巧'中'梳理岗位业务问题'明确列出五个步骤：问战略、问目标、问任务、问挑战、问原因。",
+    "difficulty": "medium",
+    "source_char_count": 685,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_cb303566380d0012",
+    "document_name": "学院知识萃取制度及SOP.pdf",
+    "document_path": "学院知识萃取制度及SOP.pdf",
+    "source_document_name": "学院知识萃取制度及SOP.pdf",
+    "source_document_path": "学院知识萃取制度及SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "超长提问题"
+    ],
+    "question": "我是销售部门的主管，最近团队里小王刚拿下了一个大客户的订单，过程挺曲折的，我觉得这个案例很有价值，想让他在全公司做个分享。但我不知道怎么操作这个知识萃取的流程，也不确定这个案例是否符合分享的要求，还有我应该找谁对接这个事儿？能不能给我讲讲从确定人选到最终分享完成的整个操作路径？",
+    "reference_answer": "这个案例符合'拿单案例分享'方向。主负责人是学院，需与学院对接。小王作为大单人员符合分享名单来源。确定主题时可用'五问法'：问战略定方向、问目标定标准、问任务确定萃取主题、问挑战选定主题、问原因分析关键要因。最终要将他的经验从隐性显性化，形成系统方法供他人运用。",
+    "evidence": "文档明确主负责人为学院；分享名单含英雄榜大单人员；主题方向含拿单案例；确定主题技巧含五问法；知识萃取要求隐性经验显性化并形成系统方法。",
+    "difficulty": "hard",
+    "source_char_count": 685,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_beb58abbd39d0bcc",
+    "document_name": "学院知识萃取制度及SOP.pdf",
+    "document_path": "学院知识萃取制度及SOP.pdf",
+    "source_document_name": "学院知识萃取制度及SOP.pdf",
+    "source_document_path": "学院知识萃取制度及SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "知识问答类"
+    ],
+    "question": "知识萃取工作的起点通常是什么？",
+    "reference_answer": "一次'具体的经验'是萃取的起点。",
+    "evidence": "文档第一部分'什么是知识萃取'最后一段明确指出：'一次具体的经验是萃取的起点'。",
+    "difficulty": "easy",
+    "source_char_count": 685,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_aee1afb1a8005040",
+    "document_name": "学院知识萃取制度及SOP.pdf",
+    "document_path": "学院知识萃取制度及SOP.pdf",
+    "source_document_name": "学院知识萃取制度及SOP.pdf",
+    "source_document_path": "学院知识萃取制度及SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "流程问答题"
+    ],
+    "question": "从一次具体的业务经验到形成可推广的方法，中间需要经过哪些关键环节？",
+    "reference_answer": "需要经过四个环节：首先以'具体的经验'作为起点，经过'复盘和萃取'总结关键技巧，然后'形成系统方法'，最终将这些方法在'新情境下运用'。",
+    "evidence": "文档第一部分描述：从'具体的经验'起点，经'复盘和萃取'总结技巧，'形成系统方法'，最终在新情境下运用。",
+    "difficulty": "medium",
+    "source_char_count": 685,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_66a1da837b888964",
+    "document_name": "视频会议&录音设备操作sop.pdf",
+    "document_path": "视频会议&录音设备操作sop.pdf",
+    "source_document_name": "视频会议&录音设备操作sop.pdf",
+    "source_document_path": "视频会议&录音设备操作sop.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "知识问答类"
+    ],
+    "question": "使用Windows电脑投屏到苏格拉底会议室时，乐播投屏的登录账号和密码是什么？如果密码登不进去怎么办？",
+    "reference_answer": "乐播投屏的登录账号是13375833027，密码是MT2006。如果密码登录失败，可以使用验证码登录，联系人资部获取验证码。",
+    "evidence": "Windows设备：需提前下载乐播投屏（账号：13375833027 密码：MT2006）密码登录失败，可使用验证码登录（联系人资部）",
+    "difficulty": "easy",
+    "source_char_count": 1308,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_f04181d5f4a54b9b",
+    "document_name": "视频会议&录音设备操作sop.pdf",
+    "document_path": "视频会议&录音设备操作sop.pdf",
+    "source_document_name": "视频会议&录音设备操作sop.pdf",
+    "source_document_path": "视频会议&录音设备操作sop.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "流程问答题"
+    ],
+    "question": "怎么用Windows笔记本连接稻盛和夫会议室的投屏设备？",
+    "reference_answer": "首先开启设备电源，将投屏发射器插在屏幕USB接口上，等待出现【配对成功】字样；配对成功后拔下投屏发射器，插到需要投屏的电脑设备上；等待屏幕出现【呼叫接收页面】；等待【连接成功】后，点击【按钮】即可完成投屏。",
+    "evidence": "1. 开启设备电源，将投屏发射器插在屏幕 USB 接口上，等待出现【配对成功】字样2. 成功配对后，拔下投屏发射器，插到需要投屏的电脑设备上3. 等待屏幕出现【呼叫接收页面】4. 等待【连接成功】 ，点击【按钮】即可完成投屏",
+    "difficulty": "medium",
+    "source_char_count": 1308,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_6d4ff16523565d88",
+    "document_name": "视频会议&录音设备操作sop.pdf",
+    "document_path": "视频会议&录音设备操作sop.pdf",
+    "source_document_name": "视频会议&录音设备操作sop.pdf",
+    "source_document_path": "视频会议&录音设备操作sop.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "陷阱题"
+    ],
+    "question": "使用苏格拉底会议室的黑色话筒时，是不是需要先按开机键，然后再按一下\"音源\"键才能切换到opp模式？",
+    "reference_answer": "不是。正常情况下，黑色话筒只需要按动一次开机键就是\"opp\"模式，不需要再按\"音源\"键。",
+    "evidence": "（正常情况下，黑色话筒只需要按动一次开机键就是\"opp\"模式，不需要再按\"音源\"键）",
+    "difficulty": "medium",
+    "source_char_count": 1308,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_eef1b3bc31b95278",
+    "document_name": "视频会议&录音设备操作sop.pdf",
+    "document_path": "视频会议&录音设备操作sop.pdf",
+    "source_document_name": "视频会议&录音设备操作sop.pdf",
+    "source_document_path": "视频会议&录音设备操作sop.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "信息咨询题"
+    ],
+    "question": "公司有没有专门的收音设备可以在视频会议录制时使用？需要找哪个部门借用？",
+    "reference_answer": "学院准备了收音设备，有需要可提前向学院借用。",
+    "evidence": "为保证视频会议录制时，能把参会人的声音清晰的录制下来，学院准备了收音设备，有需要可提前向学院借用",
+    "difficulty": "easy",
+    "source_char_count": 1308,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_c8a8a9543097d8f9",
+    "document_name": "视频会议&录音设备操作sop.pdf",
+    "document_path": "视频会议&录音设备操作sop.pdf",
+    "source_document_name": "视频会议&录音设备操作sop.pdf",
+    "source_document_path": "视频会议&录音设备操作sop.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "流程问答题"
+    ],
+    "question": "用视频会议系统录屏时，怎么才能确保把声音也录进去？怎么检查有没有录上声音？",
+    "reference_answer": "点击录制后，一定要\"解除静音\"，否则无法把声音同步录制上。检查方法有两种：一是看录制界面左下角话筒是否有绿色跳动；二是看右上角是否显示真正说话的人。",
+    "evidence": "点击录制后，一定要\"解除静音\"，否则无法把声音同步录制上。如何检查声音有没有录制上，有两种方法• 方法一：看左下角话筒是否有绿色跳动，有的话说明声音是开启的• 方法二：看右上角是否显示真正说话的人，有的话也说明声音是开启的",
+    "difficulty": "medium",
+    "source_char_count": 1308,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_e6b0f9588051ec14",
+    "document_name": "视频会议&录音设备操作sop.pdf",
+    "document_path": "视频会议&录音设备操作sop.pdf",
+    "source_document_name": "视频会议&录音设备操作sop.pdf",
+    "source_document_path": "视频会议&录音设备操作sop.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "噪声题",
+      "流程问答题"
+    ],
+    "question": "喂，那个视频会议我开完了要咋关啊？是不是直接点那个挂断按钮就行了？还有啊，我录制的视频之后去哪找啊？是自动保存到电脑上了吗？",
+    "reference_answer": "结束视频会议时，不能直接点挂断，需要先点击\"停止共享\"，再点击\"挂断\"按钮。寻找录制好的视频有两种方法：一是结束视频会议后，会议助手会将链接第一时间发送到发起会议的人，直接打开即可；二是自行打开视频会议，寻找历史记录。文档未提及自动保存到电脑本地的方式。",
+    "evidence": "先点击\"停止共享\"，再点击\"挂断\"按钮即可。如何寻找录制好的视频记录• 方法一：结束视频会议后，会议助手会将链接第一时间发送到发起会议的人，直接打开即可• 方法二：自行打开视频会议，寻找历史记录",
+    "difficulty": "easy",
+    "source_char_count": 1308,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_3e704f2e07f97ead",
+    "document_name": "视频会议&录音设备操作sop.pdf",
+    "document_path": "视频会议&录音设备操作sop.pdf",
+    "source_document_name": "视频会议&录音设备操作sop.pdf",
+    "source_document_path": "视频会议&录音设备操作sop.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "超长提问题",
+      "流程问答题"
+    ],
+    "question": "我下周要在稻盛和夫会议室做一个项目汇报，需要用自己的Windows笔记本投屏展示PPT，还要同时给外地的同事开视频会议让他们也能实时看到我的屏幕内容，并且需要录制整个会议过程留档。请详细说明我需要提前做哪些准备工作，以及现场操作的完整流程，特别是如何确保远程同事能看到我的屏幕，以及录制时能把声音都录进去？另外，如果我想让录制效果更清晰一些，有没有什么辅助设备可以用？",
+    "reference_answer": "准备工作：提前向学院借用收音设备（包括白色接收器和黑色话筒）。现场操作流程：1）投屏：开启设备电源，将投屏发射器插在屏幕USB接口上等待【配对成功】，然后拔下插到笔记本上，等待【呼叫接收页面】和【连接成功】，点击按钮完成投屏；2）视频会议：打开视频会议发起会议，点击\"共享屏幕\"让所有人看到内容，如需播放视频必须勾选\"共享音频\"；3）录制：点击录制后必须\"解除静音\"，将白色收音设备插在电脑上并打开开关（亮蓝色灯），长按黑色收音设备开关（亮蓝色灯）后别在衣领处靠近嘴巴；4）结束：先点击\"停止共享\"，再点击\"挂断\"。录制视频可通过会议助手发送的链接或自行在视频会议历史记录中查找。",
+    "evidence": "综合了稻盛和夫投屏使用操作指引、视频会议及录制操作指引、话筒收音设备操作指引等内容",
+    "difficulty": "hard",
+    "source_char_count": 1308,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_047ce67dfbf6e50f",
+    "document_name": "视频会议&录音设备操作sop.pdf",
+    "document_path": "视频会议&录音设备操作sop.pdf",
+    "source_document_name": "视频会议&录音设备操作sop.pdf",
+    "source_document_path": "视频会议&录音设备操作sop.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "陷阱题"
+    ],
+    "question": "苹果电脑投屏到稻盛和夫会议室的屏幕时，是不是也需要像苏格拉底投影那样先连接公司的WiFi网络？",
+    "reference_answer": "不是。苹果设备投屏到稻盛和夫会议室时，需要连接的是【Horion 5a】网络，而不是公司WiFi。只有苏格拉底投影才需要将投屏设备连接公司WiFi并保证两个设备在同一网络。",
+    "evidence": "苏格拉底投影：需要将投屏设备连接公司的 WiFi，保证两个设备都连接的同一个网络。稻盛和夫投屏：点击苹果电脑右上角【屏幕镜像】 ，连接【Horion 5a】网络",
+    "difficulty": "medium",
+    "source_char_count": 1308,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_3d87e9e3e7250043",
+    "document_name": "视频会议&录音设备操作sop.pdf",
+    "document_path": "视频会议&录音设备操作sop.pdf",
+    "source_document_name": "视频会议&录音设备操作sop.pdf",
+    "source_document_path": "视频会议&录音设备操作sop.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "知识问答类"
+    ],
+    "question": "怎么判断收音设备是不是在正常工作了？如果设备没反应可能是什么原因？",
+    "reference_answer": "可以通过三种方式判断：一是看录制界面左下角话筒是否有绿色跳动；二是看右上角是否显示正在讲话的人；三是看收音设备是否有蓝色指示灯亮起。如果指示灯没有显示，说明设备需要进行充电。",
+    "evidence": "如何检查收音设备是否正常运行• 方法一：录制界面左下角话筒有绿色跳动，以及右上角显示正在讲话的人• 方法二：收音设备蓝色指示灯亮起，如果指示灯没有显示，说明设备需要进行充电",
+    "difficulty": "easy",
+    "source_char_count": 1308,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_426aeee553c9f56e",
+    "document_name": "视频会议&录音设备操作sop.pdf",
+    "document_path": "视频会议&录音设备操作sop.pdf",
+    "source_document_name": "视频会议&录音设备操作sop.pdf",
+    "source_document_path": "视频会议&录音设备操作sop.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "知识问答类"
+    ],
+    "question": "用MacBook投屏到苏格拉底投影应该怎么操作？",
+    "reference_answer": "将MacBook连接公司的WiFi，保证与投影设备连接同一个网络，然后直接使用屏幕镜像功能即可完成投屏。",
+    "evidence": "苹果设备：直接使用屏幕镜像就可以完成投屏。需要将投屏设备连接公司的 WiFi，保证两个设备都连接的同一个网络",
+    "difficulty": "easy",
+    "source_char_count": 1308,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_d699edcf9acde703",
+    "document_name": "订阅号运营SOP.pdf",
+    "document_path": "订阅号运营SOP.pdf",
+    "source_document_name": "订阅号运营SOP.pdf",
+    "source_document_path": "订阅号运营SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "知识问答类"
+    ],
+    "question": "飞书订阅号的封面图应该用什么尺寸制作？",
+    "reference_answer": "飞书订阅号封面图尺寸为640*360。",
+    "evidence": "飞书订阅号封面图尺寸：640*360",
+    "difficulty": "easy",
+    "source_char_count": 1116,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_3b7eb5e976f6a019",
+    "document_name": "订阅号运营SOP.pdf",
+    "document_path": "订阅号运营SOP.pdf",
+    "source_document_name": "订阅号运营SOP.pdf",
+    "source_document_path": "订阅号运营SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "流程问答题"
+    ],
+    "question": "如果要给迈拓知识星球发布一篇新推文，从内容排版到最终发布的完整操作流程是什么？",
+    "reference_answer": "1)在秀米或135编辑器根据主题选择模板填充内容并排版（秀米建议购买会员）；2)使用国内版可画制作640*360的封面图；3)打开飞书订阅号管理后台新建图文；4)将在秀米上排版好的文章导出同步到订阅号中；5)完成标题、封面和文章简介的设置；6)提交审批流程，审批前可先发布预览给自己检查错字、错行；7)审批通过后回到管理后台，设置每周三篇、17:30的定时发送。",
+    "evidence": "整合文档中'如何制作推文'、'如何制作封面图'、'飞书订阅号操作指南'和'迈拓知识星球运营注意事项'各部分流程",
+    "difficulty": "medium",
+    "source_char_count": 1116,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_d6be577f24d56663",
+    "document_name": "订阅号运营SOP.pdf",
+    "document_path": "订阅号运营SOP.pdf",
+    "source_document_name": "订阅号运营SOP.pdf",
+    "source_document_path": "订阅号运营SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "陷阱题"
+    ],
+    "question": "听说135编辑器导入外部推文链接必须开会员，而秀米不需要会员就能直接导入，是这样吗？",
+    "reference_answer": "不对，实际情况正好相反。秀米需要会员才能实现导入外部推文的功能；135编辑器不需要会员就能导入，但排版不便捷。",
+    "evidence": "外部推文直接使用：秀米需要会员才能实现这个功能；135编辑器不需要会员，但排版不便捷",
+    "difficulty": "medium",
+    "source_char_count": 1116,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_4b04ca5b57b259ff",
+    "document_name": "订阅号运营SOP.pdf",
+    "document_path": "订阅号运营SOP.pdf",
+    "source_document_name": "订阅号运营SOP.pdf",
+    "source_document_path": "订阅号运营SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "信息咨询题"
+    ],
+    "question": "迈拓知识星球的发送频次和具体时间是怎么安排的？",
+    "reference_answer": "迈拓知识星球每周发送三篇，每次在17:30定时发送。文章在审批通过后可以在后台设置定时发送。",
+    "evidence": "每周三篇，每次在 17:30 定时发送。文章在审批通过后可以后台设置定时发送",
+    "difficulty": "easy",
+    "source_char_count": 1116,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_4e13e8820365558d",
+    "document_name": "订阅号运营SOP.pdf",
+    "document_path": "订阅号运营SOP.pdf",
+    "source_document_name": "订阅号运营SOP.pdf",
+    "source_document_path": "订阅号运营SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "噪声题"
+    ],
+    "question": "哎那个我问一下啊，我在秀米上搞好了文章，咋弄到飞书订阅号里去啊？还有那个封面图，必须用PS做吗？急！",
+    "reference_answer": "在秀米上排版好的文章需要导出后同步到飞书订阅号中。封面图不需要用PS制作，建议使用国内版可画（Canva），尺寸为640*360。",
+    "evidence": "将在秀米上排版好的文章导出同步到订阅号中；建议使用国内版可画...飞书订阅号封面图尺寸：640*360",
+    "difficulty": "easy",
+    "source_char_count": 1116,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_34672bfcf7731223",
+    "document_name": "订阅号运营SOP.pdf",
+    "document_path": "订阅号运营SOP.pdf",
+    "source_document_name": "订阅号运营SOP.pdf",
+    "source_document_path": "订阅号运营SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "陷阱题"
+    ],
+    "question": "迈拓知识星球要求每天发一篇推文，而且必须等到17:30手动点击发布，不能提前设置，对吗？",
+    "reference_answer": "不对。迈拓知识星球是每周发送三篇（不是每天），且在审批通过后可以在后台设置定时发送，不需要手动在17:30点击发布。",
+    "evidence": "每周三篇，每次在 17:30 定时发送。文章在审批通过后可以后台设置定时发送",
+    "difficulty": "medium",
+    "source_char_count": 1116,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_c3cc27939fae052b",
+    "document_name": "订阅号运营SOP.pdf",
+    "document_path": "订阅号运营SOP.pdf",
+    "source_document_name": "订阅号运营SOP.pdf",
+    "source_document_path": "订阅号运营SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "超长提问题"
+    ],
+    "question": "我是新来的运营，下周要负责迈拓知识星球的推文发布。领导要求我先用秀米做好一篇关于产品更新的推文，然后做一个配套的封面图，最后安排在下周三下午发布。但我不知道具体该用什么软件、什么尺寸，也不清楚具体的发送时间和审批流程。能否详细说明一下整个操作流程和注意事项？",
+    "reference_answer": "操作流程：1)使用秀米（建议购买会员以获得更多模板）根据模板填充内容并排版；2)使用国内版可画制作封面图，尺寸为640*360；3)打开飞书订阅号管理后台新建图文，将秀米文章导出同步；4)设置标题、封面和简介；5)提交审批，审批前建议先发布预览给自己检查错字、错行；6)审批通过后设置定时发送。注意事项：迈拓知识星球每周发送三篇，在17:30定时发送。",
+    "evidence": "整合文档中关于秀米使用、可画制作封面图（640*360）、飞书订阅号后台操作、审批预览及迈拓知识星球发送频次和时间的全部内容",
+    "difficulty": "hard",
+    "source_char_count": 1116,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_740810532285ba9a",
+    "document_name": "订阅号运营SOP.pdf",
+    "document_path": "订阅号运营SOP.pdf",
+    "source_document_name": "订阅号运营SOP.pdf",
+    "source_document_path": "订阅号运营SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "知识问答类"
+    ],
+    "question": "推文提交正式审批前，有什么方法可以检查内容错误？",
+    "reference_answer": "审批前可先发布预览给自己，检查错字、错行等问题。",
+    "evidence": "审批前可先发布预览给自己，检查错字、错行等问题",
+    "difficulty": "easy",
+    "source_char_count": 1116,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_9bb0b0fad4704ac0",
+    "document_name": "订阅号运营SOP.pdf",
+    "document_path": "订阅号运营SOP.pdf",
+    "source_document_name": "订阅号运营SOP.pdf",
+    "source_document_path": "订阅号运营SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "流程问答题"
+    ],
+    "question": "用可画制作封面图的具体步骤是什么？导出时有什么格式要求？",
+    "reference_answer": "步骤：1)挑选合适的模板；2)根据主题编辑，注意飞书订阅号封面尺寸为640*360，选好模板后可直接复制过去再调节排版；3)完成编辑后导出为png格式（选择要导出的内容）；4)如果模板内容还需要调整，可使用侧边栏等进行操作。",
+    "evidence": "挑选合适的模板进行编辑...飞书订阅号封面尺寸比较特殊...完成编辑后导出为 png 格式（选择要导出的内容）...如果模板内容还需要调整，可使用侧边栏等进行操作",
+    "difficulty": "medium",
+    "source_char_count": 1116,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_74440b9bd76f3b15",
+    "document_name": "订阅号运营SOP.pdf",
+    "document_path": "订阅号运营SOP.pdf",
+    "source_document_name": "订阅号运营SOP.pdf",
+    "source_document_path": "订阅号运营SOP.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "知识问答类"
+    ],
+    "question": "之前同事做过的封面图模板在哪里能找到并复用？",
+    "reference_answer": "可以通过文档中提供的可画链接查看之前订阅号做过的封面图，点开后复制到自己的可画账号中即可继续往后编辑。",
+    "evidence": "截止目前订阅号做过的封面图：https://www.canva.cn/design/... 可点开链接后复制到自己的可画账号中继续往后编辑",
+    "difficulty": "easy",
+    "source_char_count": 1116,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_a55f0dd776d6b2d9",
+    "document_name": "酷学院管理端操作流程指引.pdf",
+    "document_path": "酷学院管理端操作流程指引.pdf",
+    "source_document_name": "酷学院管理端操作流程指引.pdf",
+    "source_document_path": "酷学院管理端操作流程指引.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "流程问答题"
+    ],
+    "question": "我想在酷学院组织一场线上考试，请问从登录到发布的完整操作流程是什么？",
+    "reference_answer": "首先，在飞书工作台找到并打开“酷学院”，点击右上角切换至“管理端”。然后进入“培训—考试—考试管理—新建考试”，引用试卷并填写考试名称、作答时间、及格线、所属部门等信息。在考试设置中，将考试次数设为“1次”，试题不足时选择“不可考试”。若包含简答题，需将阅卷方式设为“人工”并添加阅卷人。最后点击右下角“发布”按钮，成功后点击“添加学员”设置考试时间和对象。",
+    "evidence": "登录需切换至管理端；新建考试路径为培训-考试-考试管理；需设置考试次数为1次、试题不足不可考试；简答题需人工阅卷；发布后添加学员。",
+    "difficulty": "medium",
+    "source_char_count": 1175,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_c13251db1d8df1cc",
+    "document_name": "酷学院管理端操作流程指引.pdf",
+    "document_path": "酷学院管理端操作流程指引.pdf",
+    "source_document_name": "酷学院管理端操作流程指引.pdf",
+    "source_document_path": "酷学院管理端操作流程指引.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "陷阱题"
+    ],
+    "question": "我听说酷学院考试可以设置无限次考试机会，而且系统会自动批改简答题，这样设置完直接点保存就行了吧？",
+    "reference_answer": "不对。根据操作指引，考试次数应设置为“1次”而非无限次；简答题必须设置为“人工”阅卷方式，不能自动批改；设置完成后需要点击“发布”按钮而非保存。",
+    "evidence": "文档明确设置考试次数为“1次”；若考试中有简答题需将阅卷方式设置为“人工”；完成信息设置后点击页面右下角“发布”按钮。",
+    "difficulty": "medium",
+    "source_char_count": 1175,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_8d34fc22a1859382",
+    "document_name": "酷学院管理端操作流程指引.pdf",
+    "document_path": "酷学院管理端操作流程指引.pdf",
+    "source_document_name": "酷学院管理端操作流程指引.pdf",
+    "source_document_path": "酷学院管理端操作流程指引.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "知识问答类"
+    ],
+    "question": "如果试卷里包含简答题，阅卷方式应该怎么配置？",
+    "reference_answer": "需要将简答题阅卷方式设置为“人工”，并在阅卷人设置处点击“添加人员”来指定具体的阅卷人。",
+    "evidence": "若考试中有简答题，需将简答题阅卷方式设置为“人工”；在阅卷人设置处点击“添加人员”可新增阅卷人。",
+    "difficulty": "easy",
+    "source_char_count": 1175,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_5f8df4f40e9f85ee",
+    "document_name": "酷学院管理端操作流程指引.pdf",
+    "document_path": "酷学院管理端操作流程指引.pdf",
+    "source_document_name": "酷学院管理端操作流程指引.pdf",
+    "source_document_path": "酷学院管理端操作流程指引.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "流程问答题"
+    ],
+    "question": "之前上传的培训视频需要更新版本，在素材库里怎么操作替换？",
+    "reference_answer": "在素材库找到需要更新的素材，点击“更多—更换—本地上传”即可完成替换。",
+    "evidence": "素材需要更新时可以直接点击“更多—更换—本地上传”即可替换素材。",
+    "difficulty": "easy",
+    "source_char_count": 1175,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_83e3d753d318e244",
+    "document_name": "酷学院管理端操作流程指引.pdf",
+    "document_path": "酷学院管理端操作流程指引.pdf",
+    "source_document_name": "酷学院管理端操作流程指引.pdf",
+    "source_document_path": "酷学院管理端操作流程指引.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "陷阱题"
+    ],
+    "question": "我要修改一门已经建好的线上课内容，直接点编辑就能改了吗？",
+    "reference_answer": "不完全正确。线上课更新时需要点击“更多—编辑—继续编辑”才能进入后台编辑界面，仅点击编辑无法进入。进入后可通过课件库选取或本地上传方式更新课件。",
+    "evidence": "线上课更新时需点击“更多—编辑—继续编辑”才可进入后台编辑；进入编辑界面后可通过课件库选取或本地上传方式上传课件。",
+    "difficulty": "medium",
+    "source_char_count": 1175,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_35f7d6f4434be4ba",
+    "document_name": "酷学院管理端操作流程指引.pdf",
+    "document_path": "酷学院管理端操作流程指引.pdf",
+    "source_document_name": "酷学院管理端操作流程指引.pdf",
+    "source_document_path": "酷学院管理端操作流程指引.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "流程问答题"
+    ],
+    "question": "如何快速批量导入试题到题库？",
+    "reference_answer": "进入“培训—试题管理—新建题库”，设置题库名称、分类、部门后点击“确定并新建试题”，选择“快速建题”（推荐方式），选择题目类型并设置内容后点击“识别”，在右侧界面调整确认后点击“确定”。",
+    "evidence": "进入新建试题界面后选择“快速建题”；上方点击题目类型设置完成后点击“识别”；在右边界面调整修改后点击“确定”完成试题设置。",
+    "difficulty": "medium",
+    "source_char_count": 1175,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_fafe7d5b0fe6d110",
+    "document_name": "酷学院管理端操作流程指引.pdf",
+    "document_path": "酷学院管理端操作流程指引.pdf",
+    "source_document_name": "酷学院管理端操作流程指引.pdf",
+    "source_document_path": "酷学院管理端操作流程指引.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "信息咨询题"
+    ],
+    "question": "管理员从哪里进入酷学院的管理后台？",
+    "reference_answer": "在飞书工作台找到“酷学院”打开，点击右上角切换至“管理端”。注意所有后台操作都需要在管理端进行。",
+    "evidence": "打开飞书工作台找到“酷学院”；点击右上角切换至“管理端”；酷学院所有后台操作都需要切换至“管理端”。",
+    "difficulty": "easy",
+    "source_char_count": 1175,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_85fca172716483a2",
+    "document_name": "酷学院管理端操作流程指引.pdf",
+    "document_path": "酷学院管理端操作流程指引.pdf",
+    "source_document_name": "酷学院管理端操作流程指引.pdf",
+    "source_document_path": "酷学院管理端操作流程指引.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "超长提问题",
+      "流程问答题"
+    ],
+    "question": "我下周要组织一批新员工参加入职培训，培训结束后需要进行线上考核。作为管理员，我需要完成以下几个关联任务：首先，我需要创建一个新的题库专门用来存放这次培训的考核题目，并且希望能够快速批量导入而不是一道道手动录入；其次，我要基于这个题库发布一场正式的考试，有几个硬性要求：为了防止员工重复刷分，必须限制每人只能考一次，如果试卷里的题目数量不足系统要自动禁止考试不能凑数，而且考试中必须包含简答题需要人工批改而不是系统自动判分，还要指定具体的阅卷负责人；最后，我需要把这场考试添加到现有的“新员工入职培训”学习项目中作为结业考核环节。请详细说明完成这些任务的每个步骤的完整操作路径、关键设置点的具体选项和按钮位置，以及根据操作指引，哪些地方最容易被忽略或操作失误导致整个设置无效？",
+    "reference_answer": "1. 建题库：路径为“培训—试题管理—新建题库”，填写信息后选“快速建题”批量导入，最后点击“确定”。2. 发布考试：路径“培训—考试—考试管理—新建考试”，引用试卷后设考试次数为“1次”、试题不足时“不可考试”，简答题阅卷设“人工”并添加阅卷人，点击“发布”后添加学员。3. 更新学习项目：路径“培训—学习—学习项目”，点击“编辑”进入后添加考试，关键最后必须点击右上角“更新”按钮才能生效，否则修改无效。",
+    "evidence": "题库设置路径为培训-试题管理-新建题库，支持快速建题；考试设置中次数为1次、试题不足时不可考试、简答题需人工阅卷并添加人员；学习项目编辑后必须点击右上角“更新”才能生效。",
+    "difficulty": "hard",
+    "source_char_count": 1175,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_415e05b54457e021",
+    "document_name": "酷学院管理端操作流程指引.pdf",
+    "document_path": "酷学院管理端操作流程指引.pdf",
+    "source_document_name": "酷学院管理端操作流程指引.pdf",
+    "source_document_path": "酷学院管理端操作流程指引.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "噪声题",
+      "信息咨询题"
+    ],
+    "question": "哎那个...我考试已经发发布了，但是忘忘记加学员了，咋弄啊？还有啊，要是发错了能撤回不？",
+    "reference_answer": "发布成功后点击“添加学员”即可设置考试对象和时间。发布后的考试也可以撤回、删除或再次编辑。",
+    "evidence": "发布成功后点击“添加学员”完成考试时间和对象设置；发布后的试卷可以进行撤回、删除或再次编辑。",
+    "difficulty": "easy",
+    "source_char_count": 1175,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_4c9d4e6a3a42a21e",
+    "document_name": "酷学院管理端操作流程指引.pdf",
+    "document_path": "酷学院管理端操作流程指引.pdf",
+    "source_document_name": "酷学院管理端操作流程指引.pdf",
+    "source_document_path": "酷学院管理端操作流程指引.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "陷阱题"
+    ],
+    "question": "我在学习项目里加了新的考试和素材，直接关闭页面就生效了吗？",
+    "reference_answer": "不会生效。在学习项目编辑界面完成内容增加或删除后，必须点击右上角的“更新”按钮才能完成设置，直接关闭页面会导致修改丢失。",
+    "evidence": "完成内容增加或删除后，需点击右上角“更新”，才能完成设置。",
+    "difficulty": "medium",
+    "source_char_count": 1175,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_72ee3f49d37caea0",
+    "document_name": "高效会议流程.pdf",
+    "document_path": "高效会议流程.pdf",
+    "source_document_name": "高效会议流程.pdf",
+    "source_document_path": "高效会议流程.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "信息咨询题"
+    ],
+    "question": "公司有关于高效会议的流程文档吗？",
+    "reference_answer": "有，公司存在一份名为《高效会议流程》的文档。",
+    "evidence": "文档标题为'高效会议流程'",
+    "difficulty": "easy",
+    "source_char_count": 15,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_15335841a9e04b45",
+    "document_name": "高效会议流程.pdf",
+    "document_path": "高效会议流程.pdf",
+    "source_document_name": "高效会议流程.pdf",
+    "source_document_path": "高效会议流程.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "知识问答类"
+    ],
+    "question": "《高效会议流程》这份文档主要包含哪些具体内容？",
+    "reference_answer": "当前文档仅包含标题'高效会议流程'，未提供具体的会议流程步骤、规范要求或操作指引等详细内容。",
+    "evidence": "文档仅包含标题文字'高效会议流程'，无正文内容",
+    "difficulty": "easy",
+    "source_char_count": 15,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_ddfbcfed1de02ae9",
+    "document_name": "高效会议流程.pdf",
+    "document_path": "高效会议流程.pdf",
+    "source_document_name": "高效会议流程.pdf",
+    "source_document_path": "高效会议流程.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "陷阱题"
+    ],
+    "question": "根据《高效会议流程》规定，会议时间必须控制在45分钟以内，参会人员不能超过10人，对吗？",
+    "reference_answer": "不对。文档仅标题为'高效会议流程'，未提及会议时长限制、参会人数限制或其他具体会议规范。",
+    "evidence": "文档仅包含标题'高效会议流程'，无具体制度内容",
+    "difficulty": "medium",
+    "source_char_count": 15,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_b00fc0cf5800b1ba",
+    "document_name": "高效会议流程.pdf",
+    "document_path": "高效会议流程.pdf",
+    "source_document_name": "高效会议流程.pdf",
+    "source_document_path": "高效会议流程.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "噪声题"
+    ],
+    "question": "诶，那个啥，咱们公司有个叫高效会议流程的文档不？里面都写了啥具体内容啊？",
+    "reference_answer": "公司存在名为《高效会议流程》的文档，但当前仅能看到文档标题，未包含具体的会议流程细节、操作规范或管理要求。",
+    "evidence": "文档标题为'高效会议流程'，无正文内容",
+    "difficulty": "easy",
+    "source_char_count": 15,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  },
+  {
+    "id": "qa_1208d40920b4f1e6",
+    "document_name": "高效会议流程.pdf",
+    "document_path": "高效会议流程.pdf",
+    "source_document_name": "高效会议流程.pdf",
+    "source_document_path": "高效会议流程.pdf",
+    "source_kind": "original_pdf",
+    "question_types": [
+      "超长提问题"
+    ],
+    "question": "我是刚入职的行政专员，目前负责优化公司的会议管理体系。领导要求我梳理现有的会议规范文件，特别是关于如何提高会议效率、控制会议时长、明确议程设置以及会后跟进的具体操作流程。请问我应该查阅哪份文档，这份文档的全称是什么，是否包含了会议前准备、会中控制和会后跟进的全流程操作指引？",
+    "reference_answer": "公司存在名为《高效会议流程》的文档，但当前仅包含标题信息，未提供会议前准备、会中控制、会后跟进等具体操作指引或流程细节。",
+    "evidence": "文档仅显示标题'高效会议流程'，无具体流程内容",
+    "difficulty": "medium",
+    "source_char_count": 15,
+    "generator_model": "Pro/moonshotai/Kimi-K2.5",
+    "generated_at": "2026-05-19T07:58:55.908921+00:00"
+  }
+]

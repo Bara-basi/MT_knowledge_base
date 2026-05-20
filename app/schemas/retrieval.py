@@ -26,6 +26,7 @@ class FlowRetrievalRequest(BaseModel):
 
 
 class FlowRetrievedChunk(BaseModel):
+    id: str
     order: int
     content: str
     structure: dict[str, Any] = Field(default_factory=dict)
