@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
+import re
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -20,6 +23,7 @@ _tenant_access_token: str | None = None
 _tenant_access_token_expires_at = 0.0
 _seen_message_keys: dict[str, float] = {}
 _seen_message_ttl_seconds = 3600
+_pseudo_tag_pattern = re.compile(r"<(img|link)>(.*?)</\1>", re.IGNORECASE | re.DOTALL)
 
 
 @router.post("/events")
@@ -316,7 +320,7 @@ async def _reply_feishu_markdown(message_id: str, markdown_text: str) -> bool:
     token = await _get_tenant_access_token()
     timeout = httpx.Timeout(settings.feishu_timeout)
     url = f"{settings.feishu_base_url}/open-apis/im/v1/messages/{message_id}/reply"
-    content = _build_feishu_markdown_card_content(markdown_text)
+    content = await _build_feishu_card_content(markdown_text, token)
     _debug(
         "markdown reply api request",
         message_id=message_id,
@@ -366,21 +370,195 @@ async def _reply_feishu_markdown(message_id: str, markdown_text: str) -> bool:
     return True
 
 
-def _build_feishu_markdown_card_content(markdown_text: str) -> str:
+async def _build_feishu_card_content(markdown_text: str, token: str) -> str:
+    elements = await _build_feishu_card_elements(markdown_text, token)
+    if not elements:
+        elements = [_build_markdown_element(" ")]
+
     return json.dumps(
         {
             "config": {
                 "wide_screen_mode": True,
             },
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": markdown_text.strip() or " ",
-                }
-            ],
+            "elements": elements,
         },
         ensure_ascii=False,
     )
+
+
+async def _build_feishu_card_elements(markdown_text: str, token: str) -> list[dict[str, Any]]:
+    elements: list[dict[str, Any]] = []
+    markdown_buffer: list[str] = []
+    cursor = 0
+
+    for match in _pseudo_tag_pattern.finditer(markdown_text):
+        markdown_buffer.append(markdown_text[cursor : match.start()])
+        tag = match.group(1).lower()
+        value = match.group(2).strip()
+
+        if tag == "link":
+            markdown_buffer.append(_link_tag_to_markdown(value))
+        elif tag == "img":
+            _flush_markdown_buffer(elements, markdown_buffer)
+            image_key = await _upload_local_image(value, token)
+            if image_key:
+                elements.append(
+                    {
+                        "tag": "img",
+                        "img_key": image_key,
+                        "alt": {
+                            "tag": "plain_text",
+                            "content": Path(value.replace("\\", "/")).name or "image",
+                        },
+                    }
+                )
+
+        cursor = match.end()
+
+    markdown_buffer.append(markdown_text[cursor:])
+    _flush_markdown_buffer(elements, markdown_buffer)
+    return elements
+
+
+def _flush_markdown_buffer(elements: list[dict[str, Any]], buffer: list[str]) -> None:
+    markdown = "".join(buffer).strip()
+    buffer.clear()
+    if markdown:
+        elements.append(_build_markdown_element(markdown))
+
+
+def _build_markdown_element(markdown: str) -> dict[str, str]:
+    return {
+        "tag": "markdown",
+        "content": _normalize_card_markdown(markdown),
+    }
+
+
+def _normalize_card_markdown(markdown: str) -> str:
+    lines = markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    normalized_lines: list[str] = []
+    in_code_block = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            normalized_lines.append(line)
+            continue
+
+        if in_code_block:
+            normalized_lines.append(line)
+            continue
+
+        heading = re.match(r"^(#{1,6})\s+(.+?)\s*$", stripped)
+        if heading:
+            level = len(heading.group(1))
+            title = heading.group(2).strip()
+            normalized_lines.extend(_heading_to_card_markdown(level, title))
+            continue
+
+        normalized_lines.append(_normalize_card_markdown_line(line))
+
+    return "\n".join(normalized_lines).strip() or " "
+
+
+def _normalize_card_markdown_line(line: str) -> str:
+    list_item = re.match(r"^(\s*)[*+-]\s+(.+?)\s*$", line)
+    if list_item:
+        indent, content = list_item.groups()
+        return f"{indent}· {_normalize_list_item_content(content)}"
+
+    return line
+
+
+def _normalize_list_item_content(content: str) -> str:
+    italic = re.match(r"^\*(.+?)\*\s*$", content)
+    if italic and "来源：" in italic.group(1):
+        return italic.group(1)
+    return content
+
+
+def _heading_to_card_markdown(level: int, title: str) -> list[str]:
+    if level == 1:
+        return [f"**{title}**", "---"]
+    if level == 2:
+        return ["", f"**{title}**"]
+    if level == 3:
+        return ["", f"**{title}**"]
+    return [f"**{title}**"]
+
+
+def _link_tag_to_markdown(raw_link: str) -> str:
+    link = raw_link.strip()
+    if not link:
+        return ""
+    return f"[{link}]({link})"
+
+
+async def _upload_local_image(raw_path: str, token: str) -> str | None:
+    image_path = _resolve_local_image_path(raw_path)
+    if image_path is None:
+        _warn("image ignored because local file does not exist", path=raw_path)
+        return None
+
+    mime_type = mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"
+    url = f"{settings.feishu_base_url}/open-apis/im/v1/images"
+    timeout = httpx.Timeout(settings.feishu_timeout)
+
+    _debug("image upload request", path=str(image_path), url=url, mime_type=mime_type)
+    try:
+        with image_path.open("rb") as image_file:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    data={"image_type": "message"},
+                    files={"image": (image_path.name, image_file, mime_type)},
+                )
+        _debug(
+            "image upload response",
+            path=str(image_path),
+            http_status=response.status_code,
+            body_preview=_preview(response.text),
+        )
+        response.raise_for_status()
+    except (OSError, httpx.HTTPError) as exc:
+        _warn("image ignored because upload failed", path=str(image_path), error=str(exc))
+        return None
+
+    try:
+        result = response.json()
+    except ValueError:
+        _warn("image ignored because upload response is not json", path=str(image_path))
+        return None
+
+    image_key = (result.get("data") or {}).get("image_key")
+    if result.get("code") != 0 or not image_key:
+        _warn("image ignored because upload API returned error", path=str(image_path), response=result)
+        return None
+
+    _debug("image upload success", path=str(image_path), image_key=image_key)
+    return str(image_key)
+
+
+def _resolve_local_image_path(raw_path: str) -> Path | None:
+    cleaned_path = raw_path.strip().strip("\"'")
+    if not cleaned_path:
+        return None
+
+    normalized_path = cleaned_path.replace("\\", "/")
+    candidates = [Path(normalized_path)]
+    if not Path(normalized_path).is_absolute():
+        candidates.append(Path.cwd() / normalized_path)
+
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved.is_file():
+            return resolved
+    return None
 
 
 async def _get_tenant_access_token() -> str:
@@ -411,7 +589,7 @@ async def _get_tenant_access_token() -> str:
             _debug(
                 "tenant token response",
                 http_status=response.status_code,
-                body_preview=_preview(response.text),
+                has_token=_response_has_tenant_token(response),
             )
             response.raise_for_status()
     except httpx.TimeoutException as exc:
@@ -445,6 +623,14 @@ def _response_text(response: httpx.Response) -> str:
     return text[:500] if text else "<empty response>"
 
 
+def _response_has_tenant_token(response: httpx.Response) -> bool:
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    return bool(payload.get("tenant_access_token"))
+
+
 def _detail_to_text(detail: Any) -> str:
     if isinstance(detail, str):
         return detail
@@ -465,3 +651,13 @@ def _debug(message: str, **fields: Any) -> None:
     )
     suffix = f" {field_text}" if field_text else ""
     print(f"[feishu] {message}{suffix}", flush=True)
+
+
+def _warn(message: str, **fields: Any) -> None:
+    field_text = " ".join(
+        f"{key}={json.dumps(value, ensure_ascii=False, default=str)}"
+        for key, value in fields.items()
+    )
+    suffix = f" {field_text}" if field_text else ""
+    print(f"[feishu][warn] {message}{suffix}", flush=True)
+

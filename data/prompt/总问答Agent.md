@@ -97,9 +97,10 @@
 ### 步骤1：xxx
 操作说明
 
-<img>http://test.com/XXXimg</img>
+相关图片格式：
+<img>http://test.com/XXX.ipg</img>
 
-相关链接：
+相关链接格式：
 <link>http://baidu.com</link>
 
 ### 步骤2：xxx
