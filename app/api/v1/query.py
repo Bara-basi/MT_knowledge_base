@@ -18,8 +18,22 @@ router = APIRouter(prefix="/query", tags=["query"])
     response_model_exclude_none=True,
 )
 async def query_knowledge_base(request: QueryRequest) -> QueryResponse:
+    return await ask_knowledge_base(request)
+
+
+async def ask_knowledge_base(request: QueryRequest) -> QueryResponse:
     """Forward a user question to the n8n QA agent and normalize its answer."""
     payload = N8nQueryRequest(**request.model_dump()).model_dump()
+    print(
+        "[query] n8n request "
+        f"url={settings.n8n_query_webhook_url!r} "
+        f"question={request.question!r} "
+        f"user_id={request.user_id!r} "
+        f"session_id={request.session_id!r} "
+        f"conversation_id={request.conversation_id!r} "
+        f"metadata_keys={list(request.metadata.keys())}",
+        flush=True,
+    )
     timeout = httpx.Timeout(
         timeout=settings.n8n_query_timeout,
         connect=settings.n8n_query_connect_timeout,
@@ -30,6 +44,12 @@ async def query_knowledge_base(request: QueryRequest) -> QueryResponse:
             response = await client.post(
                 settings.n8n_query_webhook_url,
                 json=payload,
+            )
+            print(
+                "[query] n8n response "
+                f"status={response.status_code} "
+                f"body_preview={_response_text(response)!r}",
+                flush=True,
             )
             response.raise_for_status()
     except httpx.TimeoutException as exc:
@@ -96,7 +116,7 @@ def _extract_answer(raw_response: Any) -> str:
 
 def _response_text(response: httpx.Response) -> str:
     text = response.text.strip()
-    return text[:500] if text else "<empty response>"
+    return text[:2000] if text else "<empty response>"
 
 
 def _missing_answer_detail(raw_response: Any) -> str:

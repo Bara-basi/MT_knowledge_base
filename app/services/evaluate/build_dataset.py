@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -20,6 +21,7 @@ DEFAULT_OUTPUT_FILE = Path("data") / "dataset" / "test.json"
 DEFAULT_PDF_SOURCE_DIR = Path("data") / "dataset" / "pdf_sources"
 SUPPORTED_SUFFIXES = {".txt", ".md", ".markdown", ".json", ".csv", ".docx", ".pdf"}
 TEXT_SUFFIXES = {".txt", ".md", ".markdown", ".json", ".csv"}
+DOCX_PDF_CONVERTERS = {"auto", "word", "libreoffice"}
 
 
 def log(message: str, *, verbose: bool = True) -> None:
@@ -86,6 +88,8 @@ def build_dataset(
     max_document_chars: int = 30000,
     model: str | None = None,
     pdf_dir: str | Path | None = None,
+    docx_pdf_converter: str = "auto",
+    rebuild_pdf: bool = False,
     verbose: bool = True,
     pdf_only: bool = False,
     dry_run: bool = False,
@@ -130,6 +134,8 @@ def build_dataset(
             document_path,
             document_root=input_path,
             pdf_output_dir=pdf_output_dir,
+            docx_pdf_converter=docx_pdf_converter,
+            rebuild_pdf=rebuild_pdf,
             verbose=verbose,
         )
         if not source.text.strip():
@@ -208,6 +214,8 @@ def convert_docx_folder_to_pdf(
     input_dir: str | Path,
     output_dir: str | Path = DEFAULT_PDF_SOURCE_DIR,
     *,
+    converter: str = "auto",
+    rebuild: bool = False,
     verbose: bool = True,
 ) -> list[Path]:
     """Convert all docx files under input_dir to mirrored PDF files under output_dir."""
@@ -229,8 +237,19 @@ def convert_docx_folder_to_pdf(
         relative = docx_path.relative_to(input_path)
         pdf_path = output_path / relative.with_suffix(".pdf")
         pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        if pdf_path.exists() and not rebuild:
+            log(f"[{index}/{len(docx_files)}] using existing PDF: {pdf_path}", verbose=verbose)
+            converted_files.append(pdf_path)
+            continue
         log(f"[{index}/{len(docx_files)}] converting docx to PDF: {docx_path}", verbose=verbose)
-        converted_files.append(convert_docx_to_pdf(docx_path, pdf_path, verbose=verbose))
+        converted_files.append(
+            convert_docx_to_pdf(
+                docx_path,
+                pdf_path,
+                converter=converter,
+                verbose=verbose,
+            )
+        )
     return converted_files
 
 
@@ -278,12 +297,16 @@ def load_document_source(
     *,
     document_root: Path,
     pdf_output_dir: Path,
+    docx_pdf_converter: str = "auto",
+    rebuild_pdf: bool = False,
     verbose: bool = True,
 ) -> DocumentSource:
     source_path = ensure_pdf_source(
         path,
         document_root=document_root,
         pdf_output_dir=pdf_output_dir,
+        docx_pdf_converter=docx_pdf_converter,
+        rebuild_pdf=rebuild_pdf,
         verbose=verbose,
     )
     source_kind = "original_pdf" if path.suffix.lower() == ".pdf" else "converted_pdf"
@@ -302,6 +325,8 @@ def ensure_pdf_source(
     *,
     document_root: Path,
     pdf_output_dir: Path,
+    docx_pdf_converter: str = "auto",
+    rebuild_pdf: bool = False,
     verbose: bool = True,
 ) -> Path:
     if path.suffix.lower() == ".pdf":
@@ -313,36 +338,141 @@ def ensure_pdf_source(
     candidates.append(pdf_output_dir / relative.with_suffix(".pdf"))
 
     for candidate in candidates:
-        if candidate.exists() and candidate.is_file():
+        if candidate.exists() and candidate.is_file() and not rebuild_pdf:
             log(f"found existing PDF for {path.name}: {candidate}", verbose=verbose)
             return candidate
 
     output_path = pdf_output_dir / relative.with_suffix(".pdf")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if path.suffix.lower() == ".docx":
-        return convert_docx_to_pdf(path, output_path, verbose=verbose)
+        return convert_docx_to_pdf(
+            path,
+            output_path,
+            converter=docx_pdf_converter,
+            verbose=verbose,
+        )
     if path.suffix.lower() in TEXT_SUFFIXES:
         return convert_text_to_pdf(path, output_path, verbose=verbose)
     raise ValueError(f"Unsupported document type for PDF conversion: {path.suffix}")
 
 
-def convert_docx_to_pdf(source_path: Path, output_path: Path, *, verbose: bool = True) -> Path:
+def convert_docx_to_pdf(
+    source_path: Path,
+    output_path: Path,
+    *,
+    converter: str = "auto",
+    verbose: bool = True,
+) -> Path:
+    converter = converter.lower().strip()
+    if converter not in DOCX_PDF_CONVERTERS:
+        raise ValueError(
+            f"Unsupported DOCX PDF converter: {converter}. "
+            f"Choose from: {', '.join(sorted(DOCX_PDF_CONVERTERS))}"
+        )
+
+    if converter in {"auto", "word"}:
+        try:
+            return convert_docx_to_pdf_with_word(source_path, output_path, verbose=verbose)
+        except Exception as exc:
+            if converter == "word":
+                raise
+            log(f"MS Word PDF conversion unavailable, falling back to LibreOffice: {exc}", verbose=verbose)
+
+    return convert_docx_to_pdf_with_libreoffice(source_path, output_path, verbose=verbose)
+
+
+def convert_docx_to_pdf_with_word(
+    source_path: Path,
+    output_path: Path,
+    *,
+    verbose: bool = True,
+) -> Path:
+    if platform.system().lower() != "windows":
+        raise RuntimeError("MS Word PDF conversion is only available on Windows.")
+
+    try:
+        import pythoncom
+        import win32com.client
+    except ImportError as exc:
+        raise RuntimeError(
+            "MS Word PDF conversion requires pywin32. Install it with: pip install pywin32"
+        ) from exc
+
+    source_path = source_path.resolve()
+    output_path = output_path.resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    log("running converter: Microsoft Word COM", verbose=verbose)
+    started = time.perf_counter()
+
+    word = None
+    document = None
+    pythoncom.CoInitialize()
+    try:
+        word = win32com.client.DispatchEx("Word.Application")
+        word.Visible = False
+        word.DisplayAlerts = 0
+        document = word.Documents.Open(
+            str(source_path),
+            ConfirmConversions=False,
+            ReadOnly=True,
+            AddToRecentFiles=False,
+            Revert=False,
+            NoEncodingDialog=True,
+        )
+        document.ExportAsFixedFormat(
+            OutputFileName=str(output_path),
+            ExportFormat=17,
+            OpenAfterExport=False,
+            OptimizeFor=0,
+            Range=0,
+            Item=0,
+            IncludeDocProps=True,
+            KeepIRM=True,
+            CreateBookmarks=1,
+            DocStructureTags=True,
+            BitmapMissingFonts=True,
+            UseISO19005_1=False,
+        )
+    finally:
+        if document is not None:
+            document.Close(False)
+        if word is not None:
+            word.Quit()
+        pythoncom.CoUninitialize()
+
+    if not output_path.exists():
+        raise RuntimeError(f"MS Word did not create expected PDF: {output_path}")
+    log(
+        f"MS Word conversion finished in {time.perf_counter() - started:.1f}s",
+        verbose=verbose,
+    )
+    log(f"created PDF: {output_path}", verbose=verbose)
+    return output_path
+
+
+def convert_docx_to_pdf_with_libreoffice(
+    source_path: Path,
+    output_path: Path,
+    *,
+    verbose: bool = True,
+) -> Path:
     converter = find_libreoffice_converter()
     if converter is None:
         raise RuntimeError(
-            "DOCX to PDF conversion requires LibreOffice/soffice. "
-            f"Please install it, add soffice to PATH, set LIBREOFFICE_PATH/SOFFICE_PATH, "
+            "DOCX to PDF conversion requires MS Word on Windows or LibreOffice/soffice. "
+            f"Please install one converter, add soffice to PATH, set LIBREOFFICE_PATH/SOFFICE_PATH, "
             f"or provide an existing PDF beside {source_path}."
         )
 
-    log(f"running converter: {converter}", verbose=verbose)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    log(f"running converter: LibreOffice ({converter})", verbose=verbose)
     started = time.perf_counter()
     subprocess.run(
         [
             converter,
             "--headless",
             "--convert-to",
-            "pdf",
+            "pdf:writer_pdf_Export",
             "--outdir",
             str(output_path.parent),
             str(source_path),
@@ -633,13 +763,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target-count",
         type=int,
-        default=10,
+        default=5,
         help="Approximate number of QA pairs per document.",
     )
     parser.add_argument(
         "--max-document-chars",
         type=int,
-        default=30000,
+        default=300000,
         help="Maximum document characters sent to the generator model.",
     )
     parser.add_argument(
@@ -654,6 +784,20 @@ def parse_args() -> argparse.Namespace:
             "Folder used to find or store PDF versions of source documents. "
             f"Default: {DEFAULT_PDF_SOURCE_DIR}"
         ),
+    )
+    parser.add_argument(
+        "--docx-pdf-converter",
+        choices=sorted(DOCX_PDF_CONVERTERS),
+        default="auto",
+        help=(
+            "DOCX to PDF converter. 'auto' uses Microsoft Word on Windows first, "
+            "then falls back to LibreOffice. Default: auto."
+        ),
+    )
+    parser.add_argument(
+        "--rebuild-pdf",
+        action="store_true",
+        help="Regenerate cached converted PDFs instead of reusing existing files.",
     )
     parser.add_argument(
         "--convert-only",
@@ -685,6 +829,8 @@ def main() -> None:
         converted_files = convert_docx_folder_to_pdf(
             args.input_dir,
             args.pdf_dir,
+            converter=args.docx_pdf_converter,
+            rebuild=args.rebuild_pdf,
             verbose=verbose,
         )
         log(f"converted {len(converted_files)} docx files to PDF under {args.pdf_dir}", verbose=verbose)
@@ -697,6 +843,8 @@ def main() -> None:
         max_document_chars=args.max_document_chars,
         model=args.model,
         pdf_dir=args.pdf_dir,
+        docx_pdf_converter=args.docx_pdf_converter,
+        rebuild_pdf=args.rebuild_pdf,
         verbose=verbose,
         pdf_only=args.pdf_only,
         dry_run=args.dry_run,

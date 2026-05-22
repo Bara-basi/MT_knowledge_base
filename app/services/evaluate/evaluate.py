@@ -18,7 +18,8 @@ from app.services.llm import LLMAPIError, LLMClient
 
 DEFAULT_DATASET_FILE = Path("data") / "dataset" / "test.json"
 DEFAULT_OUTPUT_FILE = Path("data") / "dataset" / "evaluation.json"
-DEFAULT_QUERY_URL = "http://localhost:8000/query"
+DEFAULT_TABLE_FILE = Path("data") / "dataset" / "evaluation_table.png"
+DEFAULT_QUERY_URL = "http://localhost:8000/api/v1/query"
 DEFAULT_RETRIEVAL_PATH = "/retrieval/flow"
 DEFAULT_RETRIEVAL_LIMIT = 15
 
@@ -42,14 +43,19 @@ class RecallResult:
 def log(message: str, *, verbose: bool = True) -> None:
     if verbose:
         timestamp = datetime.now().strftime("%H:%M:%S")
-        print(f"[{timestamp}] [evaluate] {message}", flush=True)
+        try:
+            from tqdm import tqdm
+
+            tqdm.write(f"[{timestamp}] [评测] {message}")
+        except ImportError:
+            print(f"[{timestamp}] [评测] {message}", flush=True)
 
 
 JUDGE_SYSTEM_PROMPT = """你是企业内部知识库回答质量评测员。你需要基于题目、标准答案、文档依据和系统实际回答，给出严格但实用的评分。
 
 评分维度：
 1. readability 可读性：站在普通员工视角，预测用户愿意完整读完回答的概率。回答应清楚、简洁、有结构。图片等内容目前可能仍是占位符，不应因占位符本身扣太多分，但如果回答把占位符当成最终内容则应扣分。
-2. correctness 正确性：回答是否与参考答案和文档依据一致，是否存在幻觉，是否纠正了问题里的错误前提。
+2. correctness 正确性：回答是否与参考答案和文档依据一致，由于回答的模型可能能比出题模型看到更多的信息，仅可以通过参考答案和实际回答重叠部分判断是否正确，以及是否有幻觉。如果实际回答涵盖更多内容，不能直接判定为幻觉。关于隐私信息：目前暂不考虑此合规性问题，数据库中出现的账密等均为公司内部公开信息，不存在隐私泄露风险。
 3. completeness 完整性：回答是否覆盖参考答案的核心内容；回答多于参考答案但不矛盾，可以视为完整。
 
 输出必须是 JSON，不要输出 Markdown 代码块。"""
@@ -84,6 +90,7 @@ def evaluate_dataset(
     dataset_file: str | Path = DEFAULT_DATASET_FILE,
     output_file: str | Path = DEFAULT_OUTPUT_FILE,
     *,
+    table_output_file: str | Path = DEFAULT_TABLE_FILE,
     query_url: str = DEFAULT_QUERY_URL,
     retrieval_url: str | None = None,
     retrieval_limit: int = DEFAULT_RETRIEVAL_LIMIT,
@@ -95,35 +102,37 @@ def evaluate_dataset(
     verbose: bool = True,
 ) -> dict[str, Any]:
     dataset_path = Path(dataset_file)
-    log(f"loading dataset: {dataset_path}", verbose=verbose)
+    log(f"正在加载测试数据集：{dataset_path}", verbose=verbose)
     dataset = load_dataset(dataset_path)
     if limit is not None:
         original_count = len(dataset)
         dataset = random_sample_dataset(dataset, limit, seed=seed)
         log(
-            f"random sampled {len(dataset)} of {original_count} item(s)"
-            + (f" with seed={seed}" if seed is not None else ""),
+            f"已随机抽样 {len(dataset)} 条，共 {original_count} 条"
+            + (f"，随机种子={seed}" if seed is not None else ""),
             verbose=verbose,
         )
     else:
-        log(f"loaded {len(dataset)} dataset item(s)", verbose=verbose)
+        log(f"已加载 {len(dataset)} 条测试用例", verbose=verbose)
 
     retrieval_url = retrieval_url or default_retrieval_url(query_url)
-    log(f"query url: {query_url}", verbose=verbose)
-    log(f"retrieval url: {retrieval_url}", verbose=verbose)
-    log("initializing judge LLM client", verbose=verbose)
+    log(f"问答接口地址：{query_url}", verbose=verbose)
+    log(f"召回接口地址：{retrieval_url}", verbose=verbose)
+    log("正在初始化裁判模型客户端", verbose=verbose)
     llm = LLMClient()
-    log(f"judge model: {model or llm.settings.model}", verbose=verbose)
+    log(f"裁判模型：{model or llm.settings.model}", verbose=verbose)
     results: list[dict[str, Any]] = []
 
+    progress = build_progress_bar(total=len(dataset), verbose=verbose)
     for index, item in enumerate(dataset, start=1):
         question = str(item.get("question", "")).strip()
         if not question:
-            log(f"[{index}/{len(dataset)}] skipped empty question", verbose=verbose)
+            log(f"[{index}/{len(dataset)}] 跳过空问题", verbose=verbose)
+            progress.update(1)
             continue
 
         log(
-            f"[{index}/{len(dataset)}] querying: {shorten(question, 80)}",
+            f"[{index}/{len(dataset)}] 开始测试：{shorten(question, 80)}",
             verbose=verbose,
         )
         started = time.perf_counter()
@@ -150,16 +159,16 @@ def evaluate_dataset(
         latency_ms = round((time.perf_counter() - started) * 1000, 2)
         if query_error:
             log(
-                f"[{index}/{len(dataset)}] query failed in {latency_ms}ms: {query_error}",
+                f"[{index}/{len(dataset)}] 问答接口失败，耗时 {latency_ms}ms：{query_error}",
                 verbose=verbose,
             )
         else:
             log(
-                f"[{index}/{len(dataset)}] query returned in {latency_ms}ms, answer_chars={len(actual_answer)}",
+                f"[{index}/{len(dataset)}] 问答接口返回成功，耗时 {latency_ms}ms，答案长度 {len(actual_answer)} 字符",
                 verbose=verbose,
             )
 
-        log(f"[{index}/{len(dataset)}] checking approximate recall", verbose=verbose)
+        log(f"[{index}/{len(dataset)}] 正在检查近似召回", verbose=verbose)
         recall = evaluate_recall(
             item=item,
             question=question,
@@ -169,12 +178,12 @@ def evaluate_dataset(
             verbose=verbose,
         )
         log(
-            f"[{index}/{len(dataset)}] recall={recall.score}, chunks={recall.chunk_count}, "
-            f"latency={recall.latency_ms}ms, reason={recall.reason}",
+            f"[{index}/{len(dataset)}] 召回结果={recall.score}，片段数={recall.chunk_count}，"
+            f"耗时={recall.latency_ms}ms，原因={recall.reason}",
             verbose=verbose,
         )
 
-        log(f"[{index}/{len(dataset)}] judging answer quality", verbose=verbose)
+        log(f"[{index}/{len(dataset)}] 正在评估答案质量", verbose=verbose)
         judge_started = time.perf_counter()
         try:
             judgment = judge_answer_logged(
@@ -186,46 +195,50 @@ def evaluate_dataset(
                 verbose=verbose,
             )
         except Exception as exc:  # noqa: BLE001 - keep batch evaluation moving.
-            judgment = failed_judgment(f"judge failed: {exc}")
-            log(f"[{index}/{len(dataset)}] judge failed: {exc}", verbose=verbose)
+            judgment = failed_judgment(f"裁判模型评估失败：{exc}")
+            log(f"[{index}/{len(dataset)}] 裁判模型评估失败：{exc}", verbose=verbose)
         log(
-            f"[{index}/{len(dataset)}] judge finished in "
+            f"[{index}/{len(dataset)}] 答案质量评估完成，耗时 "
             f"{round((time.perf_counter() - judge_started) * 1000, 2)}ms",
             verbose=verbose,
         )
 
-        results.append(
-            {
-                "item_id": item.get("id"),
-                "document_name": item.get("document_name"),
-                "document_path": item.get("document_path"),
-                "question_types": item.get("question_types", []),
-                "question": question,
-                "reference_answer": item.get("reference_answer", ""),
-                "evidence": item.get("evidence", ""),
-                "actual_answer": actual_answer,
-                "query_error": query_error,
-                "latency_ms": latency_ms,
-                "recall": {
-                    "score": recall.score,
-                    "reason": recall.reason,
-                    "matched_chunk_index": recall.matched_chunk_index,
-                    "chunk_count": recall.chunk_count,
-                    "latency_ms": recall.latency_ms,
-                    "error": recall.error,
-                },
-                "judgment": judgment,
-            }
-        )
+        result = {
+            "item_id": item.get("id"),
+            "document_name": item.get("document_name"),
+            "document_path": item.get("document_path"),
+            "question_types": item.get("question_types", []),
+            "question": question,
+            "reference_answer": item.get("reference_answer", ""),
+            "evidence": item.get("evidence", ""),
+            "actual_answer": actual_answer,
+            "query_error": query_error,
+            "latency_ms": latency_ms,
+            "recall": {
+                "score": recall.score,
+                "reason": recall.reason,
+                "matched_chunk_index": recall.matched_chunk_index,
+                "chunk_count": recall.chunk_count,
+                "latency_ms": recall.latency_ms,
+                "error": recall.error,
+            },
+            "judgment": judgment,
+        }
+        results.append(result)
+        log(format_item_result(index, len(dataset), result), verbose=verbose)
+        update_progress_bar(progress, result)
 
         if sleep_seconds > 0 and index < len(dataset):
-            log(f"[{index}/{len(dataset)}] sleeping {sleep_seconds}s", verbose=verbose)
+            log(f"[{index}/{len(dataset)}] 等待 {sleep_seconds}s 后继续", verbose=verbose)
             time.sleep(sleep_seconds)
 
-    log(f"building summary for {len(results)} result(s)", verbose=verbose)
+    progress.close()
+    log(f"正在汇总 {len(results)} 条测试结果", verbose=verbose)
+    table_path = Path(table_output_file)
     report = {
         "metadata": {
             "dataset_file": str(dataset_path),
+            "table_output_file": str(table_path),
             "query_url": query_url,
             "retrieval_url": retrieval_url,
             "evaluated_at": datetime.now(timezone.utc).isoformat(),
@@ -238,13 +251,231 @@ def evaluate_dataset(
 
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    log(f"writing evaluation report: {output_path}", verbose=verbose)
+    log(f"正在写入 JSON 评测报告：{output_path}", verbose=verbose)
     output_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    log("evaluation complete", verbose=verbose)
+    try:
+        render_evaluation_table(report, table_path)
+        log(f"已生成 matplotlib 评测图表：{table_path}", verbose=verbose)
+    except Exception as exc:  # noqa: BLE001 - table rendering should not hide JSON output.
+        log(f"生成 matplotlib 评测图表失败：{exc}", verbose=verbose)
+    log("评测完成", verbose=verbose)
     return report
+
+
+def build_progress_bar(*, total: int, verbose: bool) -> Any:
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        return NullProgressBar()
+    return tqdm(
+        total=total,
+        desc="评测进度",
+        unit="条",
+        dynamic_ncols=True,
+        disable=not verbose,
+    )
+
+
+class NullProgressBar:
+    def update(self, amount: int) -> None:
+        return None
+
+    def set_postfix(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def update_progress_bar(progress: Any, result: dict[str, Any]) -> None:
+    scores = result.get("judgment", {}).get("scores", {})
+    progress.set_postfix(
+        {
+            "通过": "是" if result.get("judgment", {}).get("pass") else "否",
+            "召回": result.get("recall", {}).get("score", 0),
+            "正确性": scores.get("correctness", 0.0),
+        }
+    )
+    progress.update(1)
+
+
+def format_item_result(index: int, total: int, result: dict[str, Any]) -> str:
+    judgment = result.get("judgment", {})
+    scores = judgment.get("scores", {})
+    status = "通过" if judgment.get("pass") else "未通过"
+    query_status = "成功" if not result.get("query_error") else "失败"
+    return (
+        f"[{index}/{total}] 当前用例结果：{status}；"
+        f"问答={query_status}；"
+        f"召回={result.get('recall', {}).get('score', 0)}；"
+        f"可读性={scores.get('readability', 0.0)}；"
+        f"正确性={scores.get('correctness', 0.0)}；"
+        f"完整性={scores.get('completeness', 0.0)}；"
+        f"耗时={result.get('latency_ms', 0.0)}ms"
+    )
+
+
+def render_evaluation_table(report: dict[str, Any], output_file: str | Path) -> None:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise RuntimeError("未安装 matplotlib，请先安装项目依赖。") from exc
+
+    output_path = Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    results = report.get("results", [])
+    summary = report.get("summary", {})
+    average_scores = summary.get("average_scores", {})
+
+    percent_metrics = [
+        ("Pass Rate", clamp_percentage(summary.get("pass_rate", 0.0) * 100)),
+        ("Recall Rate", clamp_percentage(summary.get("average_recall", 0.0) * 100)),
+        ("Accuracy Rate", clamp_percentage(float(average_scores.get("correctness", 0.0)) / 5 * 100)),
+        ("Readability Rate", clamp_percentage(float(average_scores.get("readability", 0.0)) / 5 * 100)),
+        ("Completeness Rate", clamp_percentage(float(average_scores.get("completeness", 0.0)) / 5 * 100)),
+    ]
+
+    max_latency = max(
+        [float(result.get("latency_ms", 0.0) or 0.0) for result in results] + [1.0]
+    )
+    x_labels = ["Readability", "Correctness", "Completeness", "Latency"]
+    average_line = [
+        clamp_percentage(float(average_scores.get("readability", 0.0)) / 5 * 100),
+        clamp_percentage(float(average_scores.get("correctness", 0.0)) / 5 * 100),
+        clamp_percentage(float(average_scores.get("completeness", 0.0)) / 5 * 100),
+        clamp_percentage(float(summary.get("average_latency_ms", 0.0)) / max_latency * 100),
+    ]
+
+    case_lines: list[list[float]] = []
+    for result in results:
+        scores = result.get("judgment", {}).get("scores", {})
+        case_lines.append(
+            [
+                clamp_percentage(float(scores.get("readability", 0.0)) / 5 * 100),
+                clamp_percentage(float(scores.get("correctness", 0.0)) / 5 * 100),
+                clamp_percentage(float(scores.get("completeness", 0.0)) / 5 * 100),
+                clamp_percentage(float(result.get("latency_ms", 0.0) or 0.0) / max_latency * 100),
+            ]
+        )
+
+    fig = plt.figure(figsize=(14, 8.4), dpi=180)
+    fig.patch.set_facecolor("#f7f8fb")
+    grid = fig.add_gridspec(2, 5, height_ratios=[1.0, 1.35], hspace=0.32, wspace=0.28)
+    fig.suptitle(
+        "Knowledge Base QA Evaluation",
+        fontsize=20,
+        fontweight="bold",
+        color="#111827",
+        y=0.975,
+    )
+
+    pie_colors = ("#2563eb", "#e5e7eb")
+    for index, (label, value) in enumerate(percent_metrics):
+        ax = fig.add_subplot(grid[0, index])
+        ax.pie(
+            [value, 100 - value],
+            startangle=90,
+            counterclock=False,
+            colors=pie_colors,
+            wedgeprops={"width": 0.34, "edgecolor": "white", "linewidth": 2},
+        )
+        ax.text(
+            0,
+            0.06,
+            f"{value:.1f}%",
+            ha="center",
+            va="center",
+            fontsize=16,
+            fontweight="bold",
+            color="#111827",
+        )
+        ax.text(
+            0,
+            -0.18,
+            label,
+            ha="center",
+            va="center",
+            fontsize=9.2,
+            color="#374151",
+        )
+        ax.set_aspect("equal")
+
+    line_ax = fig.add_subplot(grid[1, :])
+    line_ax.set_facecolor("#ffffff")
+    x_positions = list(range(len(x_labels)))
+    for case_index, values in enumerate(case_lines, start=1):
+        line_ax.plot(
+            x_positions,
+            values,
+            color="#93c5fd",
+            linewidth=1.1,
+            alpha=0.38,
+            marker="o",
+            markersize=3,
+        )
+    line_ax.plot(
+        x_positions,
+        average_line,
+        color="#dc2626",
+        linewidth=2.8,
+        marker="o",
+        markersize=7,
+        label="Average",
+    )
+    for x_pos, value in zip(x_positions, average_line, strict=True):
+        line_ax.annotate(
+            f"{value:.1f}%",
+            xy=(x_pos, value),
+            xytext=(0, 9),
+            textcoords="offset points",
+            ha="center",
+            fontsize=9,
+            color="#991b1b",
+            fontweight="bold",
+        )
+
+    line_ax.set_title(
+        "Case Metrics Trend",
+        fontsize=14,
+        fontweight="bold",
+        color="#111827",
+        pad=12,
+    )
+    line_ax.set_xticks(x_positions)
+    line_ax.set_xticklabels(x_labels, fontsize=10)
+    line_ax.set_ylabel("Normalized Value (%)", fontsize=10, color="#374151")
+    line_ax.set_ylim(0, 108)
+    line_ax.grid(axis="y", color="#e5e7eb", linewidth=0.8)
+    line_ax.spines["top"].set_visible(False)
+    line_ax.spines["right"].set_visible(False)
+    line_ax.spines["left"].set_color("#d1d5db")
+    line_ax.spines["bottom"].set_color("#d1d5db")
+    line_ax.legend(loc="upper left", frameon=False)
+    line_ax.text(
+        0.99,
+        -0.22,
+        "Latency is normalized against the slowest evaluated case.",
+        transform=line_ax.transAxes,
+        ha="right",
+        va="center",
+        fontsize=8.5,
+        color="#6b7280",
+    )
+
+    fig.subplots_adjust(left=0.055, right=0.985, top=0.905, bottom=0.12)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def clamp_percentage(value: float) -> float:
+    return max(0.0, min(100.0, float(value)))
 
 
 def load_dataset(path: Path) -> list[dict[str, Any]]:
@@ -284,7 +515,7 @@ def call_query_api(
         "metadata": metadata,
     }
     timeout = httpx.Timeout(timeout=180.0, connect=10.0)
-    log("posting query request", verbose=verbose)
+    log("正在发送问答请求", verbose=verbose)
     with httpx.Client(timeout=timeout) as client:
         response = client.post(query_url, json=payload)
         response.raise_for_status()
@@ -389,7 +620,7 @@ def call_retrieval_api(
         payload["document_name"] = document_name
     timeout = httpx.Timeout(timeout=180.0, connect=10.0)
     log(
-        f"posting retrieval request, limit={limit}, document_name={document_name or '<auto>'}",
+        f"正在发送召回请求，数量上限={limit}，文档名={document_name or '<自动>'}",
         verbose=verbose,
     )
     with httpx.Client(timeout=timeout) as client:
@@ -539,7 +770,7 @@ def judge_answer_logged(
         {"role": "user", "content": prompt},
     ]
     try:
-        log("sending judge LLM request with JSON response_format", verbose=verbose)
+        log("正在发送裁判模型请求，优先使用 JSON 输出模式", verbose=verbose)
         reply = llm.chat(
             messages,
             model=model,
@@ -549,10 +780,10 @@ def judge_answer_logged(
         )
     except LLMAPIError as exc:
         if not looks_like_response_format_error(exc):
-            log(f"judge LLM request failed before JSON fallback: {exc}", verbose=verbose)
+            log(f"裁判模型请求失败，无法降级重试：{exc}", verbose=verbose)
             raise
         log(
-            f"judge JSON-mode request failed, retrying without response_format: {exc}",
+            f"裁判模型 JSON 模式失败，正在不带 response_format 重试：{exc}",
             verbose=verbose,
         )
         reply = llm.chat(
@@ -758,7 +989,7 @@ def summarize_results(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate FastAPI /query answers with a QA dataset.")
+    parser = argparse.ArgumentParser(description="Evaluate FastAPI query answers with a QA dataset.")
     parser.add_argument(
         "--dataset",
         default=str(DEFAULT_DATASET_FILE),
@@ -768,6 +999,11 @@ def parse_args() -> argparse.Namespace:
         "--output",
         default=str(DEFAULT_OUTPUT_FILE),
         help=f"Evaluation report output JSON file. Default: {DEFAULT_OUTPUT_FILE}",
+    )
+    parser.add_argument(
+        "--table-output",
+        default=str(DEFAULT_TABLE_FILE),
+        help=f"Evaluation chart PNG file. Default: {DEFAULT_TABLE_FILE}",
     )
     parser.add_argument(
         "--query-url",
@@ -821,6 +1057,7 @@ def main() -> None:
     report = evaluate_dataset(
         args.dataset,
         args.output,
+        table_output_file=args.table_output,
         query_url=args.query_url,
         retrieval_url=args.retrieval_url,
         retrieval_limit=args.retrieval_limit,
@@ -833,12 +1070,12 @@ def main() -> None:
     )
     summary = report["summary"]
     print(
-        "Evaluation complete: "
-        f"{summary.get('passed_count', 0)}/{summary.get('total_count', 0)} passed, "
-        f"pass_rate={summary.get('pass_rate', 0.0)}, "
-        f"average_recall={summary.get('average_recall', 0.0)}, "
-        f"average_scores={summary.get('average_scores', {})}. "
-        f"Wrote report to {args.output}"
+        "评测完成："
+        f"{summary.get('passed_count', 0)}/{summary.get('total_count', 0)} 通过，"
+        f"通过率={summary.get('pass_rate', 0.0)}，"
+        f"平均召回={summary.get('average_recall', 0.0)}，"
+        f"平均评分={summary.get('average_scores', {})}。"
+        f"JSON 报告：{args.output}；图表图片：{args.table_output}"
     )
 
 

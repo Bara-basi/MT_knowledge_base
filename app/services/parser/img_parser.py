@@ -4,7 +4,9 @@ import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import mimetypes
+import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -34,12 +36,16 @@ def enrich_image_descriptions(
     max_concurrency: int = DEFAULT_IMAGE_ANALYSIS_WORKERS,
 ) -> list[dict[str, str]]:
     """Classify and describe image items with bounded concurrent LLM requests."""
+    started_at = time.perf_counter()
     client = _get_optional_client(llm_client)
     tasks = _build_analysis_tasks(items)
+    _log(f"image analysis tasks: {len(tasks)}")
 
     if client is None:
+        _log("LLM client unavailable; using fallback image descriptions")
         for task in tasks:
             _apply_fallback_description(items[task["item_index"]], task["fallback_text"])
+        _log(f"finished fallback image descriptions ({time.perf_counter() - started_at:.2f}s)")
         return items
 
     api_tasks = []
@@ -47,13 +53,18 @@ def enrich_image_descriptions(
         item = items[task["item_index"]]
         if _is_video_like_item(item):
             _apply_fallback_description(item, task["fallback_text"])
+            _log(f"skipped video-like image: {item.get('path') or item.get('text')}")
         else:
             api_tasks.append(task)
 
     worker_count = _resolve_worker_count(max_concurrency, len(api_tasks))
+    _log(f"image API tasks: {len(api_tasks)}, workers={worker_count}")
     if worker_count <= 1:
-        for task in api_tasks:
+        for done_count, task in enumerate(api_tasks, start=1):
             _analyze_and_apply_image(items, task, client=client, model=model)
+            item = items[task["item_index"]]
+            _log(f"image analysis progress: {done_count}/{len(api_tasks)} {item.get('path') or item.get('text')}")
+        _log(f"finished image analysis ({time.perf_counter() - started_at:.2f}s)")
         return items
 
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -69,17 +80,24 @@ def enrich_image_descriptions(
             ): task
             for task in api_tasks
         }
-        for future in as_completed(future_to_task):
+        for done_count, future in enumerate(as_completed(future_to_task), start=1):
             task = future_to_task[future]
             item = items[task["item_index"]]
             try:
                 analysis = future.result()
             except (LLMAPIError, LLMConfigError, OSError, ValueError):
                 _apply_fallback_description(item, task["fallback_text"])
+                _log(f"image analysis fallback: {done_count}/{len(api_tasks)} {item.get('path') or item.get('text')}")
                 continue
             _apply_analysis(item, analysis, task["fallback_text"])
+            _log(f"image analysis progress: {done_count}/{len(api_tasks)} {item.get('path') or item.get('text')}")
 
+    _log(f"finished image analysis ({time.perf_counter() - started_at:.2f}s)")
     return items
+
+
+def _log(message: str) -> None:
+    print(f"[img_parser] {message}", flush=True)
 
 
 def _build_analysis_tasks(items: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -210,12 +228,25 @@ def _analyze_image(
             "image_url": {"url": _image_to_data_url(Path(item["path"]))},
         },
     ]
-    response = client.chat(
-        [{"role": "user", "content": content}],
-        model=model,
-        temperature=0,
-        max_tokens=1200,
-    )
+    messages = [{"role": "user", "content": content}]
+    try:
+        response = client.chat(
+            messages,
+            model=model,
+            temperature=0,
+            max_tokens=1200,
+            extra_body={
+                "response_format": {"type": "json_object"},
+                "enable_thinking": False,
+            },
+        )
+    except LLMAPIError:
+        response = client.chat(
+            messages,
+            model=model,
+            temperature=0,
+            max_tokens=1200,
+        )
     return _parse_analysis(response)
 
 
@@ -282,7 +313,7 @@ def _normalize_for_compare(text: str) -> str:
 
 def _format_table_data(table_data: Any, fallback_text: str) -> str:
     if table_data not in (None, ""):
-        return json.dumps(table_data, ensure_ascii=False, indent=2)
+        return json.dumps(table_data, ensure_ascii=False, separators=(",", ":"))
     return fallback_text or "图片表格未能结构化提取。"
 
 
@@ -296,13 +327,13 @@ def _image_to_data_url(path: Path) -> str:
 
 
 def _parse_analysis(response: str) -> dict[str, Any]:
-    cleaned = _strip_json_code_fence(response)
+    cleaned = _extract_json_payload(response)
     try:
         parsed = json.loads(cleaned)
     except json.JSONDecodeError:
         return {
             "image_type": IMAGE_TYPE_SCREENSHOT,
-            "description": response.strip(),
+            "description": _strip_model_artifacts(response).strip(),
             "table_data": None,
         }
 
@@ -324,3 +355,58 @@ def _strip_json_code_fence(text: str) -> str:
     if lines and lines[-1].startswith("```"):
         lines = lines[:-1]
     return "\n".join(lines).strip()
+
+
+def _extract_json_payload(text: str) -> str:
+    stripped = _strip_json_code_fence(_strip_model_artifacts(text))
+    direct_json = _slice_balanced_json(stripped)
+    if direct_json is not None:
+        return direct_json
+    return stripped
+
+
+def _strip_model_artifacts(text: str) -> str:
+    cleaned = re.sub(r"(?is)<think>.*?</think>", "", text)
+    cleaned = re.sub(r"(?is).*?</think>", "", cleaned)
+    cleaned = re.sub(r"(?im)^```(?:json)?\s*$", "", cleaned)
+    return cleaned.strip()
+
+
+def _slice_balanced_json(text: str) -> str | None:
+    for start in (index for index, char in enumerate(text) if char in "[{"):
+        candidate = _balanced_json_from(text, start)
+        if candidate is not None:
+            return candidate
+    return None
+
+
+def _balanced_json_from(text: str, start: int) -> str | None:
+    opening = text[start]
+    closing = "}" if opening == "{" else "]"
+    stack = [closing]
+    in_string = False
+    escaped = False
+
+    for index in range(start + 1, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append("}" if char == "{" else "]")
+        elif char in "}]":
+            if not stack or char != stack[-1]:
+                return None
+            stack.pop()
+            if not stack:
+                return text[start : index + 1].strip()
+
+    return None

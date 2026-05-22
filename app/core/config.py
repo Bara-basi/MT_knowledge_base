@@ -87,8 +87,17 @@ class Settings:
         "N8N_QUERY_WEBHOOK_URL",
         "http://n8n:5678/webhook/fastapi-test",
     )
-    n8n_query_timeout: float = float(os.getenv("N8N_QUERY_TIMEOUT", "180"))
+    n8n_query_timeout: float = float(os.getenv("N8N_QUERY_TIMEOUT", "600"))
     n8n_query_connect_timeout: float = float(os.getenv("N8N_QUERY_CONNECT_TIMEOUT", "10"))
+
+    feishu_app_id: str = _get_first_env("FEISHU_APP_ID", "LARK_APP_ID")
+    feishu_app_secret: str = _get_first_env("FEISHU_APP_SECRET", "LARK_APP_SECRET")
+    feishu_verification_token: str = _get_first_env(
+        "FEISHU_VERIFICATION_TOKEN",
+        "LARK_VERIFICATION_TOKEN",
+    )
+    feishu_base_url: str = os.getenv("FEISHU_BASE_URL", "https://open.feishu.cn").rstrip("/")
+    feishu_timeout: float = float(os.getenv("FEISHU_TIMEOUT", "30"))
 
 
 settings = Settings()

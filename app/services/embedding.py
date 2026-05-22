@@ -267,7 +267,7 @@ class EmbeddingService:
         parts = []
         if metadata_lines:
             parts.append("metadata:\n" + "\n".join(metadata_lines))
-        parts.append("content:\n" + chunk.content.strip())
+        parts.append("content:\n" + _format_content_for_embedding(chunk.content))
         return "\n\n".join(parts)
 
     def embed_chunks(self, chunks: Iterable[Chunk]) -> list[dict[str, Any]]:
@@ -484,6 +484,78 @@ def _format_metadata_value(value: Any) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
     return str(value)
+
+
+def _format_content_for_embedding(content: str) -> str:
+    text = content.strip()
+    if not text:
+        return text
+
+    table_data = _parse_json_table_content(text)
+    if table_data is None:
+        return text
+    return _format_table_data_for_embedding(table_data)
+
+
+def _parse_json_table_content(text: str) -> Any | None:
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+    if _looks_like_table_data(parsed):
+        return parsed
+    if isinstance(parsed, dict):
+        for key in ("table_data", "data", "rows"):
+            value = parsed.get(key)
+            if _looks_like_table_data(value):
+                return value
+    return None
+
+
+def _looks_like_table_data(value: Any) -> bool:
+    if not isinstance(value, list) or not value:
+        return False
+    return all(isinstance(row, dict) for row in value) or all(
+        isinstance(row, list) for row in value
+    )
+
+
+def _format_table_data_for_embedding(table_data: Any) -> str:
+    if all(isinstance(row, dict) for row in table_data):
+        headers = _ordered_table_headers(table_data)
+        lines = ["table_headers: " + " | ".join(headers)]
+        for index, row in enumerate(table_data, start=1):
+            values = [_stringify_table_cell(row.get(header, "")) for header in headers]
+            lines.append(f"row_{index}: " + " | ".join(values))
+        return "\n".join(lines)
+
+    lines = []
+    rows = list(table_data)
+    if rows and all(isinstance(cell, str) for cell in rows[0]):
+        lines.append("table_headers: " + " | ".join(_stringify_table_cell(cell) for cell in rows[0]))
+        rows = rows[1:]
+    for index, row in enumerate(rows, start=1):
+        lines.append(f"row_{index}: " + " | ".join(_stringify_table_cell(cell) for cell in row))
+    return "\n".join(lines)
+
+
+def _ordered_table_headers(rows: list[dict[str, Any]]) -> list[str]:
+    headers: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        for key in row:
+            header = str(key)
+            if header not in seen:
+                seen.add(header)
+                headers.append(header)
+    return headers
+
+
+def _stringify_table_cell(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value).strip()
 
 
 def _has_value(value: Any) -> bool:

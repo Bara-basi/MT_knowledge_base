@@ -18,6 +18,7 @@ router = APIRouter(prefix="/retrieval", tags=["retrieval"])
 STRUCTURE_METADATA_KEYS = (
     "title",
     "chapter",
+    "heading_2",
     "heading_3",
     "heading_4",
     "heading_5",
@@ -33,6 +34,18 @@ STRUCTURE_METADATA_KEYS = (
 )
 def retrieve_flow_chunks(request: FlowRetrievalRequest) -> FlowRetrievalResponse:
     """Recall and rerank chunks for process-style QA contexts."""
+    return _retrieve_flow_chunks(request)
+
+
+def _retrieve_flow_chunks(request: FlowRetrievalRequest) -> FlowRetrievalResponse:
+    print(
+        "[retrieval] flow request "
+        f"query={request.query!r} limit={request.limit} "
+        f"document_name={request.document_name!r} "
+        f"bm25_model_file={request.bm25_model_file!r} "
+        f"recall_limit={request.recall_limit} rerank={request.rerank}",
+        flush=True,
+    )
     bm25_model_file = _resolve_bm25_model_file(request)
 
     try:
@@ -44,16 +57,23 @@ def retrieve_flow_chunks(request: FlowRetrievalRequest) -> FlowRetrievalResponse
             rerank=request.rerank,
         )
     except FileNotFoundError as exc:
+        print(f"[retrieval] flow failed status=404 error={exc}", flush=True)
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
+        print(f"[retrieval] flow failed status=400 error={exc}", flush=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
+        print(f"[retrieval] flow failed status=500 error={exc}", flush=True)
         raise HTTPException(status_code=500, detail=f"Retrieval failed: {exc}") from exc
 
     chunks = [
         _to_flow_chunk(index, result)
         for index, result in enumerate(_sort_flow_results(results), start=1)
     ]
+    print(
+        f"[retrieval] flow success query={request.query!r} count={len(chunks)}",
+        flush=True,
+    )
     return FlowRetrievalResponse(
         query=request.query,
         count=len(chunks),

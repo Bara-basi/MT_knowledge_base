@@ -97,10 +97,10 @@
 ### 步骤1：xxx
 操作说明
 
-【相关图片：data/image_xxx.png】
+<img>http://test.com/XXXimg</img>
 
 相关链接：
-xxx
+<link>http://baidu.com</link>
 
 ### 步骤2：xxx
 操作说明

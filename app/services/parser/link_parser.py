@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import sys
+import time
 from pathlib import Path
 
 try:
@@ -12,6 +13,7 @@ except ModuleNotFoundError:
 
 
 URL_PATTERN = re.compile(r"https?://[^\s<>()，。；;、\"'）】]+", re.IGNORECASE)
+PPT_LINK_PATTERN = re.compile(r"\[[^\[\]\r\n]*\.pptx?\]", re.IGNORECASE)
 
 
 def enrich_links(
@@ -21,9 +23,14 @@ def enrich_links(
     model: str | None = None,
 ) -> list[dict[str, str]]:
     """Replace URLs with readable markers and emit link metadata items."""
+    started_at = time.perf_counter()
     client = _get_optional_client(llm_client)
     output: list[dict[str, str]] = []
     nearest_body_text = ""
+    url_count = 0
+    link_ref_count = 0
+
+    _log(f"start link enrichment: items={len(items)}")
 
     for item in items:
         if item.get("type") == "image":
@@ -35,7 +42,9 @@ def enrich_links(
             nearest_body_text = item.get("text", "").strip() or nearest_body_text
             continue
 
-        text = item.get("text", "")
+        text = _clean_dirty_links(item.get("text", ""))
+        if text != item.get("text", ""):
+            item = {**item, "text": text}
         matches = list(URL_PATTERN.finditer(text))
         if not matches:
             output.append(item)
@@ -50,6 +59,8 @@ def enrich_links(
             client=client,
             model=model,
         )
+        url_count += len(matches)
+        link_ref_count += len(link_items)
         output.append(enriched_item)
         output.extend(link_items)
 
@@ -57,7 +68,20 @@ def enrich_links(
         if remaining_text and _can_be_link_context(item):
             nearest_body_text = remaining_text
 
+    _log(
+        "finished link enrichment: "
+        f"urls={url_count}, link_refs={link_ref_count}, output_items={len(output)} "
+        f"({time.perf_counter() - started_at:.2f}s)"
+    )
     return output
+
+
+def _log(message: str) -> None:
+    print(f"[link_parser] {message}", flush=True)
+
+
+def _clean_dirty_links(text: str) -> str:
+    return PPT_LINK_PATTERN.sub("", text).strip()
 
 
 def _get_optional_client(llm_client: LLMClient | None) -> LLMClient | None:
@@ -149,7 +173,8 @@ def _describe_link(url: str, context: str, *, client: LLMClient, model: str | No
 2. 描述它在教程中的用途，例如“秀米编辑器网站链接”“飞书订阅号操作手册链接”。
 3. 如果上文已明确说明用途，直接提炼上文，不要增加未知信息。
 4. 只输出描述本身，不要标点包裹，不要解释。
-
+5. 允许根据已有知识判断实际网站，但不可捏造，比如将www.tetao.com直接翻译成“特陶网”就是不对的，但将baidu.com翻译成“百度”是没问题的。
+6. 无法确定时，直接返回“链接”2字即可。
 最近上文：{context or "无"}
 链接：{url}
 """.strip()

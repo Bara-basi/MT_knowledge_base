@@ -7,7 +7,8 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir .
+    && pip install --no-cache-dir . \
+    && python -c "import nltk.chunk.util as u; assert hasattr(u, 'ChunkScore'); from pymilvus.model.sparse import BM25EmbeddingFunction; from pymilvus.model.sparse.bm25.tokenizers import build_default_analyzer; BM25EmbeddingFunction(build_default_analyzer(language='zh'))"
 
 COPY app ./app
 

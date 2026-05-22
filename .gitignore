@@ -39,16 +39,8 @@ temp/
 *.pid
 
 # Local knowledge-base data and generated artifacts
-data/raw/
-data/uploads/
-data/processing/
-data/cache/
-data/index/
-data/vector_store/
-data/minio/
-data/milvus/
-data/postgres/
-data/redis/
+data/
+
 n8n-files/
 
 # Docker/local service volumes
@@ -59,3 +51,5 @@ volumes/
 # Keep prompt assets trackable
 !data/prompt/
 !data/prompt/**
+
+test.json

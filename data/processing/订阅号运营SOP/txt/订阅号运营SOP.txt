@@ -11,21 +11,21 @@
 [paragraph] [正文] ②秀米排版功能很丰富，可根据实际需求进行编辑
 [image] [图片] data\processing\订阅号运营SOP\img\image_0002.gif（already satisfied）
 [paragraph] [正文] 编辑区功能：
-[image] [图片] data\processing\订阅号运营SOP\img\image_0003.png（图片详细标注了秀米编辑区的各功能模块：左侧栏提供图文模板、图文收藏（全库通用）、剪贴板（单篇通用）及我的图库；顶部栏包含主题色选择、预览、保存（强调多按保存）、导出（导入公众号后台）等操作；中间编辑区涵盖封面图、标题摘要（支持分享审核）及正文主干；右侧及底部工具栏提供撤销/重做、布局模式调整、基础布局/背景图设置以及SVG动画编辑辅助功能。）
+[image] [图片] data\processing\订阅号运营SOP\img\image_0003.png（图片展示了秀米编辑器的详细功能分区与操作提示：左侧为模板库（含图文模板、收藏、剪贴板、图库）；顶部工具栏包含主题色设置、打开、预览、保存、导出等功能，并提示多按保存；中间编辑区分为封面图、标题摘要、推文主干，右侧工具栏提供布局模式调整、基础布局设置及撤销/重做功能；底部提示编辑辅助功能用于SVG动画制作。）
 [paragraph] [标题 4] 2、外部推文直接使用
 [table:2:row:1:column:1] [正文] 秀米需要会员才能实现这个功能；135编辑器不需要会员，但排版不便捷
 [paragraph] [正文] 新建一个图文并复制链接导入
 [image] [图片] data\processing\订阅号运营SOP\img\image_0004.gif（already satisfied）
 [paragraph] [标题 2] 二、如何制作封面图
 [table:3:row:1:column:1] [正文] 建议使用国内版可画
-[table:3:row:1:column:1] [正文] 网址：{{Canva设计工具官网链接}}
-[link_ref] [链接] https://www.canva.cn/（Canva设计工具官网链接）
+[table:3:row:1:column:1] [正文] 网址：{{Canva可画官网链接}}
+[link_ref] [链接] https://www.canva.cn/（Canva可画官网链接）
 [paragraph] [正文] 截止目前订阅号做过的封面图：
 [paragraph] [正文] {{截止目前订阅号做过的封面图网站链接}}
 [link_ref] [链接] https://www.canva.cn/design/DAGPBy59wjg/pALzXbnBLSUME9bN8phFWQ/edit?utm_content=DAGPBy59wjg&utm_campaign=designshare&utm_medium=link2&utm_source=sharebutton（截止目前订阅号做过的封面图网站链接）
 [table:4:row:1:column:1] [正文] 可点开链接后复制到自己的可画账号中继续往后编辑
 [table:4:row:1:column:1] [正文] 飞书订阅号封面图尺寸：640*360
-[image] [图片] data\processing\订阅号运营SOP\img\image_0005.png（图片展示了设计工具的操作界面，顶部红框重点标注了当前模板的尺寸信息“(640 x 360 像素)”，与上文提到的封面图尺寸一致；主体内容为蓝白色调的卡通人物手持喇叭的封面设计模板，包含“必看！”、“这条消息很重要”等文案占位，直观展示了符合尺寸要求的封面图样式。）
+[image] [图片] data\processing\订阅号运营SOP\img\image_0005.png（图片展示了设计工具中的封面图模板预览界面。右上角红框标注了当前画布尺寸为“640 x 360 像素”，与上文提到的飞书订阅号封面图尺寸一致。界面左上角显示“第1页 - 添加页面标题”，表明这是模板的第一页，用户可在此处修改标题。）
 [paragraph] [标题 4] 操作流程：
 [paragraph] [正文] 1、挑选合适的模板进行编辑
 [image] [图片] data\processing\订阅号运营SOP\img\image_0006.gif（already satisfied）
@@ -41,7 +41,7 @@
 [table:6:row:1:column:1] [正文] {{飞书订阅号操作手册网站链接}}
 [link_ref] [链接] https://www.feishu.cn/hc/zh-CN/articles/360049067518-%E8%AE%A2%E9%98%85%E5%8F%B7%E6%93%8D%E4%BD%9C%E6%89%8B%E5%86%8C（飞书订阅号操作手册网站链接）
 [paragraph] [正文] 1、打开管理后台并新建图文
-[image] [图片] data\processing\订阅号运营SOP\img\image_0010.png（在飞书顶部搜索框输入“订阅号”，在搜索结果中点击“订阅号”应用进入。）
+[image] [图片] data\processing\订阅号运营SOP\img\image_0010.png（在飞书顶部搜索栏输入“订阅号”，点击搜索结果中的“订阅号”应用进入。）
 [image] [图片] data\processing\订阅号运营SOP\img\image_0011.gif（already satisfied）
 [paragraph] [正文] 2、将在秀米上排版好的文章导出同步到订阅号中
 [image] [图片] data\processing\订阅号运营SOP\img\image_0012.gif（already satisfied）
@@ -53,5 +53,5 @@
 [paragraph] [正文] 1、发送时间及频次
 [paragraph] [正文] 每周三篇，每次在17:30定时发送
 [table:8:row:1:column:1] [正文] 文章在审批通过后可以后台设置定时发送
-[image] [图片] data\processing\订阅号运营SOP\img\image_0014.png（在文章列表中找到状态显示为“审批通过”的条目，点击右侧操作栏的“更多”按钮，在展开的下拉菜单中选择“定时发送”。）
+[image] [图片] data\processing\订阅号运营SOP\img\image_0014.png（在文章列表页，找到状态为“审批通过”的文章，点击右侧“更多”按钮，在下拉菜单中选择“定时发送”即可设置发送时间。）
 [paragraph] [正文] 2、审批前可先发布预览给自己，检查错字、错行等问题

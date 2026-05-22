@@ -92,6 +92,7 @@ def split_items(items: list[dict[str, str]], *, source_file: Path | None = None)
     chunks: list[Chunk] = []
     state = ChunkState()
     structure: dict[str, str] = {}
+    is_process_guide = _is_process_guide_source(source_file)
 
     for item in items:
         item_type = item.get("type", "")
@@ -103,10 +104,10 @@ def split_items(items: list[dict[str, str]], *, source_file: Path | None = None)
 
         if _is_heading(style):
             _flush_chunk(chunks, state, source_file)
-            _update_heading_structure(structure, style, text)
+            _update_heading_structure(structure, style, text, is_process_guide=is_process_guide)
             continue
 
-        step = _extract_step(text)
+        step = _extract_step(text) if is_process_guide else None
         if step:
             _flush_chunk(chunks, state, source_file)
             structure["step"] = step
@@ -120,8 +121,8 @@ def split_items(items: list[dict[str, str]], *, source_file: Path | None = None)
             _append_link_ref(state, item)
         elif item_type == "link":
             _append_link(state, item)
-        elif item_type == "image_table":
-            state.lines.append(f"图片表格：{text}")
+        elif item_type in {"table", "image_table"}:
+            _append_table_chunk(chunks, state, item, structure, source_file)
         else:
             state.lines.append(text)
 
@@ -155,14 +156,24 @@ def _is_heading(style: str) -> bool:
     return style == "标题" or style.startswith("标题 ")
 
 
-def _update_heading_structure(structure: dict[str, str], style: str, text: str) -> None:
+def _is_process_guide_source(source_file: Path | None) -> bool:
+    return source_file is not None and Path(source_file).parent.name == "process_guide"
+
+
+def _update_heading_structure(
+    structure: dict[str, str],
+    style: str,
+    text: str,
+    *,
+    is_process_guide: bool,
+) -> None:
     if style == "标题":
         structure.clear()
         structure["title"] = text
         return
 
     level = _heading_level(style)
-    key = "chapter" if level <= 2 else f"heading_{level}"
+    key = "chapter" if is_process_guide and level <= 2 else f"heading_{level}"
     structure[key] = text
 
     for old_key in list(structure):
@@ -203,6 +214,27 @@ def _append_link_ref(state: ChunkState, item: dict[str, str]) -> None:
     description = item.get("description") or item.get("text", "")
     if description and item.get("url"):
         state.links[description] = item["url"]
+
+
+def _append_table_chunk(
+    chunks: list[Chunk],
+    state: ChunkState,
+    item: dict[str, Any],
+    structure: dict[str, str],
+    source_file: Path | None,
+) -> None:
+    _flush_chunk(chunks, state, source_file)
+    state.metadata = dict(structure)
+    if isinstance(item.get("links"), dict):
+        state.links.update(
+            {
+                str(description): str(url)
+                for description, url in item["links"].items()
+                if str(description).strip() and str(url).strip()
+            }
+        )
+    state.lines.append(str(item.get("text", "")).strip())
+    _flush_chunk(chunks, state, source_file)
 
 
 def _flush_chunk(chunks: list[Chunk], state: ChunkState, source_file: Path | None) -> None:
