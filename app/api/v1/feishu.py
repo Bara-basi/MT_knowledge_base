@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import mimetypes
@@ -14,6 +15,8 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from app.api.v1.query import ask_knowledge_base
 from app.core.config import settings
 from app.schemas.query import QueryRequest
+from app.services.chat_records import create_chat_record, record_chat_answer
+from app.services.evaluate.evaluate import evaluate_answer_fallback
 
 
 router = APIRouter(prefix="/feishu", tags=["feishu"])
@@ -146,6 +149,29 @@ async def _answer_feishu_message(
     )
 
     try:
+        await create_chat_record(
+            user_id=sender_id,
+            session_id=chat_id,
+            conversation_id=chat_id,
+            question=question,
+        )
+        _debug(
+            "chat record created",
+            event_id=event_id,
+            message_id=message_id,
+            dedupe_key=dedupe_key,
+        )
+    except Exception as exc:  # noqa: BLE001 - logging must not block user replies.
+        logger.exception("Failed to create chat record for Feishu message: %s", exc)
+        _warn(
+            "chat record create failed",
+            event_id=event_id,
+            message_id=message_id,
+            dedupe_key=dedupe_key,
+            error=str(exc),
+        )
+
+    try:
         _debug(
             "query start",
             event_id=event_id,
@@ -177,6 +203,59 @@ async def _answer_feishu_message(
             answer_len=len(response.answer),
             answer_preview=_preview(response.answer),
         )
+        try:
+            await record_chat_answer(
+                user_id=sender_id,
+                session_id=chat_id,
+                conversation_id=chat_id,
+                question=question,
+                answer=response.answer,
+            )
+            _debug(
+                "chat answer recorded",
+                event_id=event_id,
+                message_id=message_id,
+                dedupe_key=dedupe_key,
+            )
+        except Exception as exc:  # noqa: BLE001 - logging must not block user replies.
+            logger.exception("Failed to record chat answer for Feishu message: %s", exc)
+            _warn(
+                "chat answer record failed",
+                event_id=event_id,
+                message_id=message_id,
+                dedupe_key=dedupe_key,
+                error=str(exc),
+            )
+
+        try:
+            fallback_result = await asyncio.to_thread(
+                evaluate_answer_fallback,
+                question=question,
+                answer=response.answer,
+                user_id=sender_id,
+                session_id=chat_id,
+                conversation_id=chat_id,
+                reference_answer=None,
+                persist=True,
+                verbose=False,
+            )
+            _debug(
+                "fallback evaluation recorded",
+                event_id=event_id,
+                message_id=message_id,
+                dedupe_key=dedupe_key,
+                fallback=fallback_result.get("fallback"),
+                reason=_preview(fallback_result.get("reason", "")),
+            )
+        except Exception as exc:  # noqa: BLE001 - evaluation must not block user replies.
+            logger.exception("Failed to evaluate fallback for Feishu message: %s", exc)
+            _warn(
+                "fallback evaluation failed",
+                event_id=event_id,
+                message_id=message_id,
+                dedupe_key=dedupe_key,
+                error=str(exc),
+            )
     except HTTPException as exc:
         detail = _detail_to_text(exc.detail)
         logger.exception("Failed to query knowledge base for Feishu message: %s", detail)

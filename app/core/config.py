@@ -39,6 +39,33 @@ class Settings:
         os.getenv("MILVUS_INDEX_EF_CONSTRUCTION", "200")
     )
 
+    postgres_host: str = os.getenv("POSTGRES_HOST", "localhost")
+    postgres_port: int = int(os.getenv("POSTGRES_PORT", "5432"))
+    postgres_db: str = os.getenv("POSTGRES_DB", "mtsco_knowledge_base")
+    postgres_user: str = os.getenv("POSTGRES_USER", "mtsco")
+    postgres_password: str = os.getenv("POSTGRES_PASSWORD", "")
+    database_url: str = os.getenv("DATABASE_URL", "")
+    postgres_chat_table: str = os.getenv("POSTGRES_CHAT_TABLE", "chat_messages")
+
+    minio_endpoint: str = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
+    minio_public_endpoint: str = os.getenv("MINIO_PUBLIC_ENDPOINT", minio_endpoint)
+    minio_access_key_id: str = _get_first_env(
+        "MINIO_ACCESS_KEY_ID",
+        "MINIO_ROOT_USER",
+        default="minioadmin",
+    )
+    minio_secret_access_key: str = _get_first_env(
+        "MINIO_SECRET_ACCESS_KEY",
+        "MINIO_ROOT_PASSWORD",
+        default="minioadmin",
+    )
+    minio_bucket: str = _get_first_env(
+        "MINIO_BUCKET",
+        "APP_MINIO_BUCKET",
+        default="knowledge-raw-docs",
+    )
+    minio_secure: bool = _env_bool("MINIO_SECURE", False)
+
     embedding_model_name: str = os.getenv(
         "EMBEDDING_MODEL_NAME",
         "BAAI/bge-large-zh-v1.5",

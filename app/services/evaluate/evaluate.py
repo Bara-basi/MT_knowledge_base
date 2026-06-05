@@ -746,6 +746,11 @@ def shorten(text: str, max_chars: int) -> str:
     return f"{text[:max_chars]}..."
 
 
+def format_optional_reference_answer(reference_answer: Any) -> str:
+    text = str(reference_answer or "").strip()
+    return text or "未提供标准答案，请仅根据用户问题、文档依据和实际回答评估回答质量。"
+
+
 def judge_answer_logged(
     llm: LLMClient,
     *,
@@ -761,7 +766,7 @@ def judge_answer_logged(
     prompt = JUDGE_USER_PROMPT_TEMPLATE.format(
         question_types=", ".join(item.get("question_types", [])),
         question=item.get("question", ""),
-        reference_answer=item.get("reference_answer", ""),
+        reference_answer=format_optional_reference_answer(item.get("reference_answer")),
         evidence=item.get("evidence", ""),
         actual_answer=actual_answer,
     )
@@ -804,6 +809,7 @@ def failed_judgment(reason: str) -> dict[str, Any]:
             "completeness": 0,
         },
         "pass": False,
+        "reason": reason,
         "reasons": {
             "readability": reason,
             "correctness": reason,
@@ -842,6 +848,7 @@ def judge_answer(
                 "completeness": 0,
             },
             "pass": False,
+            "reason": "查询接口调用失败，用户无法获得可读答案。",
             "reasons": {
                 "readability": "查询接口调用失败，用户无法获得可读答案。",
                 "correctness": "查询接口调用失败，无法验证答案正确性。",
@@ -855,7 +862,7 @@ def judge_answer(
     prompt = JUDGE_USER_PROMPT_TEMPLATE.format(
         question_types=", ".join(item.get("question_types", [])),
         question=item.get("question", ""),
-        reference_answer=item.get("reference_answer", ""),
+        reference_answer=format_optional_reference_answer(item.get("reference_answer")),
         evidence=item.get("evidence", ""),
         actual_answer=actual_answer,
     )
@@ -916,11 +923,18 @@ def normalize_judgment(data: dict[str, Any]) -> dict[str, Any]:
         and scores["correctness"] >= 4
         and scores["completeness"] >= 4
     )
+    reasons = ensure_dict(data.get("reasons"))
+    reason = str(data.get("reason") or "").strip() or summarize_judgment_reason(
+        reasons=reasons,
+        missing_points=ensure_str_list(data.get("missing_points")),
+        hallucinations=ensure_str_list(data.get("hallucinations")),
+    )
 
     return {
         "scores": scores,
         "pass": bool(data.get("pass", default_pass)),
-        "reasons": ensure_dict(data.get("reasons")),
+        "reason": reason,
+        "reasons": reasons,
         "missing_points": ensure_str_list(data.get("missing_points")),
         "hallucinations": ensure_str_list(data.get("hallucinations")),
         "suggested_answer": str(data.get("suggested_answer", "")).strip(),
@@ -939,6 +953,24 @@ def ensure_dict(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
     return {str(key): str(val) for key, val in value.items()}
+
+
+def summarize_judgment_reason(
+    *,
+    reasons: dict[str, str],
+    missing_points: list[str],
+    hallucinations: list[str],
+) -> str:
+    parts: list[str] = []
+    for key in ("readability", "correctness", "completeness"):
+        value = reasons.get(key)
+        if value:
+            parts.append(f"{key}: {value}")
+    if missing_points:
+        parts.append(f"missing_points: {'; '.join(missing_points)}")
+    if hallucinations:
+        parts.append(f"hallucinations: {'; '.join(hallucinations)}")
+    return " | ".join(parts)
 
 
 def ensure_str_list(value: Any) -> list[str]:
@@ -986,6 +1018,72 @@ def summarize_results(results: list[dict[str, Any]]) -> dict[str, Any]:
         "average_latency_ms": round(statistics.mean(latencies), 2),
         "failed_query_count": sum(1 for result in results if result.get("query_error")),
     }
+
+
+def evaluate_answer_fallback(
+    *,
+    question: str,
+    answer: str,
+    user_id: str | None = None,
+    session_id: str | None = None,
+    conversation_id: str | None = None,
+    reference_answer: str | None = None,
+    evidence: str | None = None,
+    question_types: list[str] | None = None,
+    model: str | None = None,
+    persist: bool = True,
+    verbose: bool = False,
+) -> dict[str, Any]:
+    """Evaluate a live QA answer and optionally persist fallback metadata."""
+
+    llm = LLMClient()
+    item = {
+        "question": question,
+        "reference_answer": reference_answer,
+        "evidence": evidence or "",
+        "question_types": question_types or [],
+    }
+    try:
+        judgment = judge_answer_logged(
+            llm,
+            item=item,
+            actual_answer=answer,
+            query_error="",
+            model=model,
+            verbose=verbose,
+        )
+    except Exception as exc:  # noqa: BLE001 - fallback evaluation must not break replies.
+        judgment = failed_judgment(f"fallback evaluation failed: {exc}")
+
+    passed = bool(judgment.get("pass"))
+    fallback = not passed
+    reason = str(judgment.get("reason") or "").strip()
+
+    result = {
+        "fallback": fallback,
+        "reason": reason,
+        "judgment": judgment,
+    }
+    if persist:
+        from app.db.postgres import ensure_chat_messages_table, update_chat_fallback
+        from app.services.chat_records import normalize_record_ids
+
+        ids = normalize_record_ids(
+            user_id=user_id,
+            session_id=session_id,
+            conversation_id=conversation_id,
+        )
+        ensure_chat_messages_table()
+        result["stored_row"] = update_chat_fallback(
+            user_id=ids["user_id"],
+            session_id=ids["session_id"],
+            conversation_id=ids["conversation_id"],
+            question=question,
+            fallback=fallback,
+            reason=reason,
+        )
+
+    return result
 
 
 def parse_args() -> argparse.Namespace:
