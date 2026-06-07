@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request
 
 from app.api.v1.feishu import router as feishu_router
 from app.api.v1.router import router as api_v1_router
+from app.core.config import settings
 from app.services.retrieval import get_retrieval_service
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,9 @@ async def log_requests(request: Request, call_next):
 
 @app.on_event("startup")
 def warmup_retrieval_models() -> None:
+    if settings.skip_retrieval_warmup:
+        logger.warning("Skipping retrieval warmup because SKIP_RETRIEVAL_WARMUP=true")
+        return
     get_retrieval_service().warmup_models()
 
 

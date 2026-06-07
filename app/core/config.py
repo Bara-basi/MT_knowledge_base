@@ -3,6 +3,11 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
 
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
@@ -90,6 +95,7 @@ class Settings:
     retrieval_recall_multiplier: int = int(
         os.getenv("RETRIEVAL_RECALL_MULTIPLIER", "5")
     )
+    skip_retrieval_warmup: bool = _env_bool("SKIP_RETRIEVAL_WARMUP", False)
 
     siliconflow_api_key: str = _get_first_env(
         "SILICONFLOW_API_KEY",

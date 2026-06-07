@@ -27,6 +27,7 @@ services:
       MINIO_SECURE: "false"
       USE_LOCAL_EMBEDDING_MODEL: ${USE_LOCAL_EMBEDDING_MODEL:-true}
       USE_LOCAL_RERANK_MODEL: ${USE_LOCAL_RERANK_MODEL:-true}
+      SKIP_RETRIEVAL_WARMUP: ${SKIP_RETRIEVAL_WARMUP:-true}
       EMBEDDING_CACHE_DIR: /models
       RERANKER_CACHE_DIR: /models
       NLTK_DATA: /models/nltk_data
