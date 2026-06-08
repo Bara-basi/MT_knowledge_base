@@ -13,7 +13,7 @@ except ModuleNotFoundError:
 
 
 URL_PATTERN = re.compile(r"https?://[^\s<>()，。；;、\"'）】]+", re.IGNORECASE)
-PPT_LINK_PATTERN = re.compile(r"\[[^\[\]\r\n]*\.pptx?\]", re.IGNORECASE)
+ATTACHMENT_LINK_PATTERN = re.compile(r"\[[^\[\]\r\n]*\.(?:pptx?|xlsx?|mp4)\]", re.IGNORECASE)
 
 
 def enrich_links(
@@ -37,9 +37,9 @@ def enrich_links(
             output.append(item)
             continue
 
-        if item.get("type") == "image_table":
-            output.append(item)
-            nearest_body_text = item.get("text", "").strip() or nearest_body_text
+        if item.get("type") in {"table", "image_table"}:
+            text = _clean_dirty_links(item.get("text", ""))
+            output.append({**item, "text": text} if text != item.get("text", "") else item)
             continue
 
         text = _clean_dirty_links(item.get("text", ""))
@@ -81,7 +81,7 @@ def _log(message: str) -> None:
 
 
 def _clean_dirty_links(text: str) -> str:
-    return PPT_LINK_PATTERN.sub("", text).strip()
+    return ATTACHMENT_LINK_PATTERN.sub("", text).strip()
 
 
 def _get_optional_client(llm_client: LLMClient | None) -> LLMClient | None:
@@ -95,7 +95,7 @@ def _get_optional_client(llm_client: LLMClient | None) -> LLMClient | None:
 
 def _can_be_link_context(item: dict[str, str]) -> bool:
     style = item.get("style", "")
-    return style == "正文" or item.get("type", "").startswith("table")
+    return style == "正文"
 
 
 def _replace_urls_with_link_markers(

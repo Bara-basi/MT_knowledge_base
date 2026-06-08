@@ -57,6 +57,8 @@ services:
     networks:
       - ai-net
     depends_on:
+      milvus-minio:
+        condition: service_healthy
       milvus-standalone:
         condition: service_healthy
       postgres:

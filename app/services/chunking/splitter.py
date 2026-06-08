@@ -20,6 +20,7 @@ DESCRIPTION_PATTERN = re.compile(r"^(?P<value>.*?)（(?P<description>.*)）$")
 STEP_PATTERN = re.compile(
     r"^(?P<marker>(?:第[一二三四五六七八九十百]+步)|(?:[一二三四五六七八九十]+、)|(?:\d+[、.．)])|(?:[①②③④⑤⑥⑦⑧⑨⑩]))"
 )
+MIN_CHUNK_CHARS = 10
 
 
 @dataclass
@@ -239,7 +240,7 @@ def _append_table_chunk(
 
 def _flush_chunk(chunks: list[Chunk], state: ChunkState, source_file: Path | None) -> None:
     content = "\n".join(line for line in state.lines if line).strip()
-    if not content:
+    if not content or _non_space_length(content) < MIN_CHUNK_CHARS:
         state.lines.clear()
         state.links.clear()
         state.images.clear()
@@ -259,6 +260,10 @@ def _flush_chunk(chunks: list[Chunk], state: ChunkState, source_file: Path | Non
     state.links.clear()
     state.images.clear()
     state.metadata = {}
+
+
+def _non_space_length(text: str) -> int:
+    return len(re.sub(r"\s+", "", text))
 
 
 if __name__ == "__main__":

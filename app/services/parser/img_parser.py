@@ -17,7 +17,7 @@ except ModuleNotFoundError:
     from llm import LLMAPIError, LLMConfigError, LLMClient, get_llm_client
 
 
-IMAGE_ANALYSIS_MODEL = "Qwen/Qwen3.5-397B-A17B"
+IMAGE_ANALYSIS_MODEL = "Pro/moonshotai/Kimi-K2.5"
 ALREADY_SATISFIED = "already satisfied"
 VIDEO_LIKE_SUFFIXES = {".gif", ".git"}
 
@@ -42,9 +42,10 @@ def enrich_image_descriptions(
     _log(f"image analysis tasks: {len(tasks)}")
 
     if client is None:
-        _log("LLM client unavailable; using fallback image descriptions")
+        reason = "LLM client unavailable"
+        _log(f"image analysis warning: {reason}; using fallback image descriptions")
         for task in tasks:
-            _apply_fallback_description(items[task["item_index"]], task["fallback_text"])
+            _apply_fallback_description(items[task["item_index"]], task["fallback_text"], reason=reason)
         _log(f"finished fallback image descriptions ({time.perf_counter() - started_at:.2f}s)")
         return items
 
@@ -64,6 +65,7 @@ def enrich_image_descriptions(
             _analyze_and_apply_image(items, task, client=client, model=model)
             item = items[task["item_index"]]
             _log(f"image analysis progress: {done_count}/{len(api_tasks)} {item.get('path') or item.get('text')}")
+        _log_all_satisfied_warning(items, api_tasks)
         _log(f"finished image analysis ({time.perf_counter() - started_at:.2f}s)")
         return items
 
@@ -85,19 +87,32 @@ def enrich_image_descriptions(
             item = items[task["item_index"]]
             try:
                 analysis = future.result()
-            except (LLMAPIError, LLMConfigError, OSError, ValueError):
-                _apply_fallback_description(item, task["fallback_text"])
-                _log(f"image analysis fallback: {done_count}/{len(api_tasks)} {item.get('path') or item.get('text')}")
+            except (LLMAPIError, LLMConfigError, OSError, ValueError) as exc:
+                reason = f"{type(exc).__name__}: {exc}"
+                _apply_fallback_description(item, task["fallback_text"], reason=reason)
+                _log(
+                    f"image analysis fallback: {done_count}/{len(api_tasks)} "
+                    f"{item.get('path') or item.get('text')} reason={reason}"
+                )
                 continue
             _apply_analysis(item, analysis, task["fallback_text"])
             _log(f"image analysis progress: {done_count}/{len(api_tasks)} {item.get('path') or item.get('text')}")
 
+    _log_all_satisfied_warning(items, api_tasks)
     _log(f"finished image analysis ({time.perf_counter() - started_at:.2f}s)")
     return items
 
 
 def _log(message: str) -> None:
     print(f"[img_parser] {message}", flush=True)
+
+
+def _log_all_satisfied_warning(items: list[dict[str, str]], tasks: list[dict[str, Any]]) -> None:
+    if not tasks:
+        return
+    analyzed_items = [items[task["item_index"]] for task in tasks]
+    if analyzed_items and all(item.get("description", "").strip().lower() == ALREADY_SATISFIED for item in analyzed_items):
+        _log("image analysis warning: all analyzed images returned already satisfied; check visual model output quality")
 
 
 def _build_analysis_tasks(items: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -140,8 +155,10 @@ def _analyze_and_apply_image(
             group_position=task["group_position"],
             group_size=task["group_size"],
         )
-    except (LLMAPIError, LLMConfigError, OSError, ValueError):
-        _apply_fallback_description(item, task["fallback_text"])
+    except (LLMAPIError, LLMConfigError, OSError, ValueError) as exc:
+        reason = f"{type(exc).__name__}: {exc}"
+        _apply_fallback_description(item, task["fallback_text"], reason=reason)
+        _log(f"image analysis fallback: {item.get('path') or item.get('text')} reason={reason}")
         return
     _apply_analysis(item, analysis, task["fallback_text"])
 
@@ -185,11 +202,11 @@ def _build_context(items: list[dict[str, str]], image_index: int) -> dict[str, s
             continue
 
         style = item.get("style", "")
-        if style == "标题" and not document_title:
+        if _is_title_style(style) and not document_title:
             document_title = text
-        elif style.startswith("标题"):
+        elif _is_heading_style(style):
             heading_path.append(text)
-        elif style == "正文" or item.get("type", "").startswith("table"):
+        elif _is_body_style(style) or item.get("type", "").startswith("table"):
             nearest_body_text = text
 
     return {
@@ -204,8 +221,33 @@ def _is_video_like_item(item: dict[str, str]) -> bool:
     return Path(path).suffix.lower() in VIDEO_LIKE_SUFFIXES
 
 
-def _apply_fallback_description(item: dict[str, str], fallback_text: str) -> None:
+def _is_title_style(style: str) -> bool:
+    return style in {"标题", "Title"}
+
+
+def _is_heading_style(style: str) -> bool:
+    normalized = style.strip().lower()
+    return style.startswith("标题") or normalized.startswith("heading")
+
+
+def _is_body_style(style: str) -> bool:
+    return style in {"正文", "Normal"}
+
+
+def _apply_fallback_description(
+    item: dict[str, str],
+    fallback_text: str,
+    *,
+    reason: str | None = None,
+) -> None:
     item["image_type"] = IMAGE_TYPE_SCREENSHOT
+    if reason:
+        item["description"] = (
+            f"图片解析失败：{reason}。"
+            + (f" 上下文参考：{fallback_text}" if fallback_text else "")
+        )
+        return
+
     item["description"] = ALREADY_SATISFIED if fallback_text else "图片位于教程上下文中，暂无可用正文描述。"
 
 

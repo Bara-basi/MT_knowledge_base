@@ -8,6 +8,7 @@ BASE_URL = "https://open.feishu.cn/open-apis"
 REQUEST_TIMEOUT = 30
 DOWNLOAD_TIMEOUT = 120
 MAX_EXPORT_WAIT_SECONDS = 180
+EXPORT_FAILED_GRACE_SECONDS = 30
 MAX_FILE_ATTEMPTS = 3
 
 
@@ -217,6 +218,7 @@ def wait_export(
     }
 
     started_at = time.monotonic()
+    last_result = None
 
     while True:
 
@@ -235,18 +237,32 @@ def wait_export(
             raise Exception(data)
 
         result = data["data"]["result"]
+        last_result = result
 
         job_status = result["job_status"]
 
         if job_status == 0:
             return result["file_token"]
 
-        if job_status == 2:
-            raise Exception(result)
+        elapsed = time.monotonic() - started_at
 
-        if time.monotonic() - started_at > MAX_EXPORT_WAIT_SECONDS:
+        if job_status == 2 and result.get("job_error_msg"):
+            raise Exception(
+                f"export task failed: ticket={ticket}, token={token}, result={result}"
+            )
+
+        if job_status == 2 and elapsed > EXPORT_FAILED_GRACE_SECONDS:
+            raise Exception(
+                "export task stayed failed after "
+                f"{EXPORT_FAILED_GRACE_SECONDS}s: "
+                f"ticket={ticket}, token={token}, result={result}"
+            )
+
+        if elapsed > MAX_EXPORT_WAIT_SECONDS:
             raise TimeoutError(
-                f"export task timeout after {MAX_EXPORT_WAIT_SECONDS}s: ticket={ticket}"
+                "export task timeout after "
+                f"{MAX_EXPORT_WAIT_SECONDS}s: "
+                f"ticket={ticket}, token={token}, last_result={last_result}"
             )
 
         time.sleep(2)

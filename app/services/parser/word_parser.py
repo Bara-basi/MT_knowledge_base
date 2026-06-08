@@ -38,7 +38,11 @@ VML_IMAGE_DATA_TAG = "{urn:schemas-microsoft-com:vml}imagedata"
 TABLE_JSON_MAX_CHARS = 800
 EMPTY_CELL_TEXT = "（空）"
 MAX_REPEATED_MERGED_CELL_CHARS = 15
-PPT_LINK_PATTERN = re.compile(r"\[[^\[\]\r\n]*\.pptx?\]", re.IGNORECASE)
+ATTACHMENT_LINK_PATTERN = re.compile(r"\[[^\[\]\r\n]*\.(?:pptx?|xlsx?|mp4)\]", re.IGNORECASE)
+CITATION_MARK_PATTERN = re.compile(r"(?:【\d+】|\[\d+])")
+SOURCE_LINE_PATTERN = re.compile(r"^(?:资料来源|数据来源|参考资料|视频来源|参考内容|出处)\s*[:：]\s*(?P<value>.*)$")
+REFERENCE_SECTION_KEYWORDS = ("参考文献", "引用文献")
+URL_IN_TEXT_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
 URL_TEXT_PATTERN = re.compile(r"^https?://\S+$", re.IGNORECASE)
 LINK_STYLE = "链接"
 
@@ -71,10 +75,15 @@ def parse_word_document(
     document = Document(path)
     image_dir = Path("data") / "processing" / path.stem / "img"
     image_dir.mkdir(parents=True, exist_ok=True)
+    _remove_stale_bin_images(image_dir)
 
     stage_started_at = time.perf_counter()
     items = _extract_document_items(document, ParseContext(image_dir=image_dir))
     _log_item_summary("extracted document items", items, stage_started_at)
+
+    stage_started_at = time.perf_counter()
+    items = _clean_document_items(items)
+    _log_item_summary("cleaned document items", items, stage_started_at)
 
     stage_started_at = time.perf_counter()
     _log("start image analysis")
@@ -111,6 +120,132 @@ def _extract_document_items(document: Any, context: ParseContext) -> list[dict[s
 
     _log(f"scanned blocks: paragraphs={paragraph_count}, tables={table_index}, images={context.image_index}")
     return items
+
+
+def _clean_document_items(items: list[dict[str, str]]) -> list[dict[str, str]]:
+    cleaned = _remove_reference_sections(items)
+    cleaned = _remove_source_link_lines(cleaned)
+    cleaned = _remove_empty_heading_sections(cleaned)
+    return cleaned
+
+
+def _remove_reference_sections(items: list[dict[str, str]]) -> list[dict[str, str]]:
+    output: list[dict[str, str]] = []
+    skip_heading_level: int | None = None
+
+    for item in items:
+        style = item.get("style", "")
+        text = item.get("text", "")
+
+        if skip_heading_level is not None:
+            if _is_heading_style(style) and _heading_level(style) <= skip_heading_level:
+                skip_heading_level = None
+            else:
+                continue
+
+        if _is_reference_section_heading(item):
+            skip_heading_level = _heading_level(style) if _is_heading_style(style) else 1
+            continue
+
+        if text:
+            item = {**item, "text": _clean_text(text).strip()}
+            if not item["text"] and item.get("type") != "image":
+                continue
+
+        output.append(item)
+
+    return output
+
+
+def _remove_source_link_lines(items: list[dict[str, str]]) -> list[dict[str, str]]:
+    output: list[dict[str, str]] = []
+    removing_following_links = False
+
+    for item in items:
+        if _is_source_link_item(item):
+            removing_following_links = True
+            continue
+
+        if removing_following_links and _is_link_only_item(item):
+            continue
+
+        removing_following_links = False
+        output.append(item)
+
+    return output
+
+
+def _remove_empty_heading_sections(items: list[dict[str, str]]) -> list[dict[str, str]]:
+    root: dict[str, Any] = {"item": None, "level": 0, "children": []}
+    stack = [root]
+
+    for item in items:
+        style = item.get("style", "")
+        if _is_heading_style(style):
+            level = _heading_level(style)
+            while stack[-1]["level"] >= level:
+                stack.pop()
+            node = {"item": item, "level": level, "children": []}
+            stack[-1]["children"].append(node)
+            stack.append(node)
+            continue
+
+        stack[-1]["children"].append({"item": item, "level": 999, "children": []})
+
+    output: list[dict[str, str]] = []
+    _append_non_empty_nodes(root, output)
+    return output
+
+
+def _append_non_empty_nodes(node: dict[str, Any], output: list[dict[str, str]]) -> bool:
+    item = node["item"]
+    is_heading = item is not None and _is_heading_style(item.get("style", ""))
+    has_content = item is not None and not is_heading and bool(item.get("text", "").strip())
+    child_output: list[dict[str, str]] = []
+
+    for child in node["children"]:
+        if _append_non_empty_nodes(child, child_output):
+            has_content = True
+
+    if item is not None and (not is_heading or has_content):
+        output.append(item)
+    output.extend(child_output)
+    return has_content
+
+
+def _is_reference_section_heading(item: dict[str, str]) -> bool:
+    text = item.get("text", "").strip()
+    if not any(keyword in text for keyword in REFERENCE_SECTION_KEYWORDS):
+        return False
+    return _is_heading_style(item.get("style", "")) or item.get("style") != "正文" or len(text) <= 20
+
+
+def _is_source_link_item(item: dict[str, str]) -> bool:
+    match = SOURCE_LINE_PATTERN.match(item.get("text", "").strip())
+    if match is None:
+        return False
+
+    value = match.group("value").strip()
+    return _looks_like_url(value) or bool(URL_IN_TEXT_PATTERN.search(value))
+
+
+def _is_link_only_item(item: dict[str, str]) -> bool:
+    text = item.get("text", "").strip()
+    if item.get("link_only") == "true" and _looks_like_url(item.get("url", "")):
+        return True
+    if item.get("type") == "link_ref" and _looks_like_url(item.get("url", "")):
+        return True
+    return _looks_like_url(text)
+
+
+def _is_heading_style(style: str) -> bool:
+    normalized = style.strip().lower()
+    return style == "标题" or style.startswith("标题 ") or normalized.startswith("heading")
+
+
+def _heading_level(style: str) -> int:
+    match = re.search(r"\d+", style)
+    return int(match.group(0)) if match else 1
 
 
 def _iter_blocks(parent: Any) -> Iterator[Paragraph | Table]:
@@ -345,6 +480,9 @@ def _cell_text(items: list[dict[str, str]]) -> str:
 
 
 def _table_object_rows(rows: list[list[str]]) -> list[dict[str, str]]:
+    rows = _trim_table_rows(rows)
+    if rows and len(rows[0]) == 2:
+        return _two_column_object_rows(rows)
     if len(rows) <= 1:
         return []
 
@@ -361,6 +499,50 @@ def _table_object_rows(rows: list[list[str]]) -> list[dict[str, str]]:
         )
 
     return object_rows
+
+
+def _two_column_object_rows(rows: list[list[str]]) -> list[dict[str, str]]:
+    object_rows: list[dict[str, str]] = []
+    for index, row in enumerate(rows, start=1):
+        normalized_row = _normalize_row(row, 2)
+        key = normalized_row[0].strip()
+        value = normalized_row[1].strip()
+        if not _is_meaningful_cell(key) and not _is_meaningful_cell(value):
+            continue
+        object_rows.append({key if _is_meaningful_cell(key) else f"row_{index}": value})
+    return object_rows
+
+
+def _trim_table_rows(rows: list[list[str]]) -> list[list[str]]:
+    if not rows:
+        return []
+
+    width = max((len(row) for row in rows), default=0)
+    normalized_rows = [_normalize_row(row, width) for row in rows]
+    normalized_rows = [row for row in normalized_rows if any(_is_meaningful_cell(cell) for cell in row)]
+    kept_column_indexes = [
+        index
+        for index in range(width)
+        if any(_is_meaningful_cell(row[index]) for row in normalized_rows)
+    ]
+    if not kept_column_indexes:
+        return []
+
+    trimmed_rows = [[row[index] for index in kept_column_indexes] for row in normalized_rows]
+    if trimmed_rows and len(trimmed_rows[0]) == 2:
+        return trimmed_rows
+    if len(trimmed_rows) <= 1:
+        return []
+
+    body_rows = trimmed_rows[1:]
+    if not any(any(_is_meaningful_cell(cell) for cell in row) for row in body_rows):
+        return []
+
+    return trimmed_rows
+
+
+def _is_meaningful_cell(value: str) -> bool:
+    return bool(str(value).strip()) and str(value).strip() != EMPTY_CELL_TEXT
 
 
 def _fill_empty_headers(headers: list[str]) -> list[str]:
@@ -427,6 +609,9 @@ def _table_json_text(rows: list[dict[str, str]]) -> str:
 
 
 def _paragraph_items(paragraph: Paragraph, source: str, context: ParseContext) -> list[dict[str, str]]:
+    if _is_source_link_paragraph(paragraph):
+        return []
+
     items: list[dict[str, str]] = []
     text_parts: list[str] = []
     style = _paragraph_style(paragraph)
@@ -452,6 +637,12 @@ def _paragraph_items(paragraph: Paragraph, source: str, context: ParseContext) -
             _append_hyperlink_items(child, paragraph, items, text_parts)
 
     flush_text()
+    link_only_url = _link_only_paragraph_url(paragraph)
+    if link_only_url:
+        for item in items:
+            if item.get("type") == source:
+                item["link_only"] = "true"
+                item["url"] = link_only_url
     return items
 
 
@@ -515,15 +706,75 @@ def _append_hyperlink_items(
 
 
 def _clean_text(text: str) -> str:
-    return PPT_LINK_PATTERN.sub("", text)
+    text = ATTACHMENT_LINK_PATTERN.sub("", text)
+    return CITATION_MARK_PATTERN.sub("", text)
 
 
 def _is_dirty_ppt_link(text: str) -> bool:
-    return bool(text and PPT_LINK_PATTERN.search(text.strip()))
+    return bool(text and ATTACHMENT_LINK_PATTERN.search(text.strip()))
 
 
 def _looks_like_url(text: str) -> bool:
     return bool(URL_TEXT_PATTERN.match(text.strip()))
+
+
+def _is_source_link_paragraph(paragraph: Paragraph) -> bool:
+    text = _clean_text(paragraph.text).strip()
+    match = SOURCE_LINE_PATTERN.match(text)
+    if match is None:
+        return False
+
+    value = match.group("value").strip()
+    if _looks_like_url(value) or URL_IN_TEXT_PATTERN.search(value):
+        return True
+
+    return any(_looks_like_url(target) for target in _paragraph_hyperlink_targets(paragraph))
+
+
+def _link_only_paragraph_url(paragraph: Paragraph) -> str:
+    paragraph_text = _clean_text(paragraph.text).strip()
+    if not paragraph_text:
+        return ""
+
+    displays: list[str] = []
+    targets: list[str] = []
+    for hyperlink in paragraph._p.iter(qn("w:hyperlink")):
+        display = _clean_text("".join(
+            text_node.text or ""
+            for text_node in hyperlink.iter(qn("w:t"))
+        )).strip()
+        if display:
+            displays.append(display)
+
+        relationship_id = hyperlink.get(qn("r:id"))
+        if not relationship_id:
+            continue
+        related_part = paragraph.part.related_parts.get(relationship_id)
+        target = str(getattr(related_part, "target_ref", "") or "").strip()
+        if _looks_like_url(target):
+            targets.append(target)
+
+    if not targets:
+        return ""
+
+    display_text = "".join(displays).strip()
+    if paragraph_text == display_text or _looks_like_url(paragraph_text):
+        return targets[0]
+
+    return ""
+
+
+def _paragraph_hyperlink_targets(paragraph: Paragraph) -> list[str]:
+    targets: list[str] = []
+    for hyperlink in paragraph._p.iter(qn("w:hyperlink")):
+        relationship_id = hyperlink.get(qn("r:id"))
+        if not relationship_id:
+            continue
+        related_part = paragraph.part.related_parts.get(relationship_id)
+        target = str(getattr(related_part, "target_ref", "") or "").strip()
+        if target:
+            targets.append(target)
+    return targets
 
 
 def _paragraph_style(paragraph: Paragraph) -> str:
@@ -581,12 +832,18 @@ def _run_image_relationship_ids(run: Any) -> list[str]:
 
 def _save_image(paragraph: Paragraph, relationship_id: str, context: ParseContext) -> Path | None:
     related_part = paragraph.part.related_parts.get(relationship_id)
-    if related_part is None or not getattr(related_part, "content_type", "").startswith("image/"):
+    content_type = getattr(related_part, "content_type", "") if related_part is not None else ""
+    if not content_type.startswith("image/") or content_type not in IMAGE_EXTENSIONS:
         return None
 
-    image_path = context.next_image_path(related_part.content_type)
+    image_path = context.next_image_path(content_type)
     image_path.write_bytes(related_part.blob)
     return image_path
+
+
+def _remove_stale_bin_images(image_dir: Path) -> None:
+    for path in image_dir.glob("*.bin"):
+        path.unlink(missing_ok=True)
 
 
 def _image_item(path: Path, source: str) -> dict[str, str]:
