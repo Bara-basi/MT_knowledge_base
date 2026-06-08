@@ -778,19 +778,34 @@ def _paragraph_hyperlink_targets(paragraph: Paragraph) -> list[str]:
 
 
 def _paragraph_style(paragraph: Paragraph) -> str:
-    if paragraph.style is not None and paragraph.style.name:
-        return paragraph.style.name
-
     paragraph_properties = paragraph._p.pPr
     if paragraph_properties is not None:
         outline_level = _word_val(paragraph_properties.outlineLvl)
         if outline_level is not None and outline_level.isdigit():
             return f"标题 {int(outline_level) + 1}"
 
+    if paragraph.style is not None and paragraph.style.name:
+        style_name = _normalize_style_name(paragraph.style.name)
+        if style_name != "正文":
+            return style_name
+
     if _looks_like_title(paragraph):
         return "标题"
 
     return "正文"
+
+
+def _normalize_style_name(style_name: str) -> str:
+    normalized = style_name.strip()
+    lower = normalized.lower()
+    if lower == "normal":
+        return "正文"
+    if lower == "title":
+        return "标题"
+    if lower.startswith("heading"):
+        match = re.search(r"\d+", normalized)
+        return f"标题 {match.group(0)}" if match else "标题"
+    return normalized
 
 
 def _looks_like_title(paragraph: Paragraph) -> bool:
