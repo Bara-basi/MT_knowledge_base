@@ -308,13 +308,14 @@ def _build_prompt(context: dict[str, str], *, group_position: int, group_size: i
 
 请先判断图片类型，再按类型抽取信息：
 1. screenshot：操作界面截图。若图片只是上文教程步骤的截图说明，或上文已经充分覆盖图片信息，description 必须输出 already satisfied，不要复述上文。只有图片补充了上文没有表达的关键按钮、界面位置、填写项或注意事项时，才写具体 description。
-2. table：图片主体是表格。必须尽可能只字不差转成 JSON，放入 table_data；不要总结、不要改写、不要遗漏文字。
-3. flowchart：流程图。description 用自然语言描述原文中的主干流程，关注关键阶段/步骤，复杂细节可省略。流程图仍保留图片。
+2. table：图片主体是表格。必须尽可能只字不差转成 JSON，放入 table_data；不要总结、不要改写、不要遗漏文字,每行数据都应该带有列头信息，如果有表名，则记录到table_name中。
+3. flowchart：流程图。description 用自然语言描述原文中的主干流程，关注关键阶段/步骤，复杂细节可省略,流程说明不宜过长，中文字符控制在200字以内，其它字符控制在500字以内。
 
 输出必须是 JSON 对象，不要 Markdown，不要代码块，不要额外解释：
 {{
   "image_type": "screenshot|table|flowchart",
   "description": "描述文本或 already satisfied",
+  "table_name":"表名,没有则填null",
   "table_data": null
 }}
 """.strip()
@@ -330,6 +331,9 @@ def _apply_analysis(item: dict[str, str], analysis: dict[str, Any], fallback_tex
         item["type"] = "image_table"
         item["style"] = "图片表格"
         item["image_type"] = IMAGE_TYPE_TABLE
+        table_name = _normalize_table_name(analysis.get("table_name"))
+        if table_name:
+            item["table_name"] = table_name
         item["text"] = _format_table_data(analysis.get("table_data"), fallback_text)
         return
 
@@ -362,6 +366,15 @@ def _format_table_data(table_data: Any, fallback_text: str) -> str:
     if table_data not in (None, ""):
         return json.dumps(table_data, ensure_ascii=False, separators=(",", ":"))
     return fallback_text or "图片表格未能结构化提取。"
+
+
+def _normalize_table_name(table_name: Any) -> str:
+    if table_name in (None, ""):
+        return ""
+    if isinstance(table_name, str):
+        text = table_name.strip()
+        return "" if text.lower() == "null" else text
+    return json.dumps(table_name, ensure_ascii=False, separators=(",", ":"))
 
 
 def _image_to_data_url(path: Path) -> str:

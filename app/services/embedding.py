@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from functools import cached_property
 from pathlib import Path
@@ -31,6 +32,7 @@ REQUIRED_TOKENIZER_FILES = {"tokenizer.json", "tokenizer_config.json", "vocab.tx
 BM25_LANGUAGE = "zh"
 REMOTE_EMBEDDING_MAX_CHARS = 500
 GLOBAL_BM25_MODEL_FILE = Path("data") / "processing" / "global.bm25.json"
+IMG_TAG_PATTERN = re.compile(r'(?s)<img\s+data-index="\d+">(?P<body>.*?)</img>')
 
 
 class EmbeddingDependencyError(RuntimeError):
@@ -570,10 +572,20 @@ def _format_content_for_embedding(content: str) -> str:
     if not text:
         return text
 
+    text = _strip_img_tags_for_embedding(text)
     table_data = _parse_json_table_content(text)
     if table_data is None:
         return text
     return _format_table_data_for_embedding(table_data)
+
+
+def _strip_img_tags_for_embedding(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        body = re.sub(r"\s+", " ", match.group("body")).strip()
+        body = re.sub(r"^图片\s*[:：]\s*", "", body)
+        return body
+
+    return IMG_TAG_PATTERN.sub(replace, text)
 
 
 def _parse_json_table_content(text: str) -> Any | None:

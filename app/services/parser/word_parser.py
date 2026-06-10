@@ -42,7 +42,7 @@ MAX_REPEATED_MERGED_CELL_CHARS = 15
 ATTACHMENT_LINK_PATTERN = re.compile(r"\[[^\[\]\r\n]*\.(?:pptx?|xlsx?|mp4)\]", re.IGNORECASE)
 CITATION_MARK_PATTERN = re.compile(r"(?:【\d+】|\[\d+])")
 SOURCE_LINE_PATTERN = re.compile(r"^(?:资料来源|数据来源|参考资料|视频来源|参考内容|出处)\s*[:：]\s*(?P<value>.*)$")
-REFERENCE_SECTION_KEYWORDS = ("参考文献", "引用文献")
+REFERENCE_SECTION_KEYWORDS = ("参考文献", "引用文献","相关链接")
 URL_IN_TEXT_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
 URL_TEXT_PATTERN = re.compile(r"^https?://\S+$", re.IGNORECASE)
 LINK_STYLE = "链接"
@@ -882,6 +882,10 @@ def _image_item(path: Path, source: str) -> dict[str, str]:
 def format_extracted_items(items: list[dict[str, str]]) -> str:
     lines: list[str] = []
     for item in items:
+        if item.get("type") in {"table", "image_table", "img_table"} and item.get("table_name"):
+            table_name = _format_item_text_for_txt(item["table_name"])
+            if table_name:
+                lines.append(f"[table] [表标题] {table_name}")
         text = _format_item_text_for_txt(item["text"])
         if item["type"] == "image" and item.get("description"):
             text = f"{text}（{_format_item_text_for_txt(item['description'])}）"

@@ -18,6 +18,7 @@ except ModuleNotFoundError:
 
 ITEM_LINE_PATTERN = re.compile(r"^\[(?P<type>[^\]]+)]\s+\[(?P<style>[^\]]+)]\s*(?P<text>.*)$")
 DESCRIPTION_PATTERN = re.compile(r"^(?P<value>.*?)（(?P<description>.*)）$")
+IMG_TAG_PATTERN = re.compile(r'(?s)<img\s+data-index="(?P<index>\d+)">(?P<body>.*?)</img>')
 NUMBERING_PATTERN = re.compile(
     r"(?im)(?P<prefix>^|[\n\r]+|[ \t\u3000]+)"
     r"(?P<marker>"
@@ -29,8 +30,10 @@ NUMBERING_PATTERN = re.compile(
 )
 SENTENCE_END_PATTERN = re.compile(r"[。！？!?；;]\s*|[.]\s+(?=[^\d])|\n+")
 MIN_CHUNK_CHARS = 10
+SHORT_CHUNK_CHARS = 60
 MAX_CHUNK_CHARS = 500
 FORCED_SPLIT_OVERLAP_CHARS = 20
+PATH_SEPARATOR = "\\"
 
 
 @dataclass
@@ -104,6 +107,7 @@ def split_items(items: list[dict[str, str]], *, source_file: Path | None = None)
     chunks: list[Chunk] = []
     state = ChunkState()
     heading_path: dict[int, str] = {}
+    pending_table_title = ""
     document_metadata = _build_document_metadata(source_file)
 
     for item_index, item in enumerate(items):
@@ -114,10 +118,19 @@ def split_items(items: list[dict[str, str]], *, source_file: Path | None = None)
         if not text:
             continue
 
+        if _is_table_title(item_type, style):
+            _flush_chunk(chunks, state, document_metadata)
+            pending_table_title = text
+            continue
+
         if _is_heading(style):
             _flush_chunk(chunks, state, document_metadata)
             _update_heading_path(heading_path, style, text)
+            pending_table_title = ""
             continue
+
+        if pending_table_title and item_type not in {"table", "image_table", "img_table"}:
+            pending_table_title = ""
 
         if not state.lines:
             state.metadata = _build_chunk_metadata(document_metadata, heading_path)
@@ -129,12 +142,13 @@ def split_items(items: list[dict[str, str]], *, source_file: Path | None = None)
         elif item_type == "link":
             _append_link(state, item, item_index)
         elif item_type in {"table", "image_table", "img_table"}:
-            _append_table_chunk(chunks, state, item, heading_path, document_metadata, item_index)
+            _append_table_chunk(chunks, state, item, heading_path, document_metadata, item_index, pending_table_title)
+            pending_table_title = ""
         else:
             state.lines.append(text)
 
     _flush_chunk(chunks, state, document_metadata)
-    return chunks
+    return _merge_short_text_chunks(chunks)
 
 
 def _restore_special_item_fields(item: dict[str, str]) -> None:
@@ -163,6 +177,10 @@ def _is_heading(style: str) -> bool:
     return style == "标题" or style.startswith("标题 ")
 
 
+def _is_table_title(item_type: str, style: str) -> bool:
+    return item_type == "table" and style == "表标题"
+
+
 def _update_heading_path(heading_path: dict[int, str], style: str, text: str) -> None:
     level = _heading_level(style)
     heading_path[level] = text
@@ -183,7 +201,7 @@ def _append_image(state: ChunkState, item: dict[str, str], item_index: int) -> N
         state.images.append(_image_metadata(item["path"], item_index))
     if description.strip().lower() == "already satisfied":
         return
-    state.lines.append(f"图片：{description}")
+    state.lines.append(_format_image_description_tag(item_index, description))
 
 
 def _append_link(state: ChunkState, item: dict[str, str], item_index: int) -> None:
@@ -206,9 +224,12 @@ def _append_table_chunk(
     heading_path: dict[int, str],
     document_metadata: dict[str, Any],
     item_index: int,
+    table_title: str = "",
 ) -> None:
     _flush_chunk(chunks, state, document_metadata)
     state.metadata = _build_chunk_metadata(document_metadata, heading_path)
+    if table_title:
+        state.metadata["path"] = _append_path_segment(state.metadata.get("path", ""), table_title)
     state.chunk_type = "table"
     if isinstance(item.get("links"), dict):
         for description, url in item["links"].items():
@@ -241,7 +262,7 @@ def _flush_chunk(chunks: list[Chunk], state: ChunkState, document_metadata: dict
         if _non_space_length(chunk_content) < MIN_CHUNK_CHARS:
             continue
 
-        chunk_metadata = dict(metadata)
+        chunk_metadata = _metadata_for_chunk_content(metadata, chunk_content)
         chunk_metadata["chunk_index"] = len(chunks)
         chunks.append(
             Chunk(
@@ -259,6 +280,172 @@ def _flush_chunk(chunks: list[Chunk], state: ChunkState, document_metadata: dict
     state.chunk_type = "text"
 
 
+def _merge_short_text_chunks(chunks: list[Chunk]) -> list[Chunk]:
+    merged_chunks = _reindex_chunks(chunks)
+    for _ in range(8):
+        next_chunks = _merge_short_text_chunks_once(merged_chunks)
+        if _chunk_signature(next_chunks) == _chunk_signature(merged_chunks):
+            return next_chunks
+        merged_chunks = next_chunks
+    return merged_chunks
+
+
+def _merge_short_text_chunks_once(chunks: list[Chunk]) -> list[Chunk]:
+    folded_paths = _short_text_paths_to_fold(chunks)
+    if not folded_paths:
+        return _reindex_chunks(chunks)
+
+    merged_chunks: list[Chunk] = []
+    run: list[Chunk] = []
+    run_path = ""
+
+    for chunk in chunks:
+        prepared = _prepare_chunk_for_short_merge(chunk, folded_paths)
+        if _can_merge_text_chunk(prepared):
+            path = str(prepared.metadata.get("path") or "")
+            if run and path != run_path:
+                _flush_text_merge_run(merged_chunks, run)
+                run = []
+            run.append(prepared)
+            run_path = path
+            continue
+
+        _flush_text_merge_run(merged_chunks, run)
+        run = []
+        run_path = ""
+        merged_chunks.append(prepared)
+
+    _flush_text_merge_run(merged_chunks, run)
+    return _reindex_chunks(merged_chunks)
+
+
+def _chunk_signature(chunks: list[Chunk]) -> tuple[tuple[str, str, str], ...]:
+    return tuple(
+        (
+            chunk.content,
+            str(chunk.metadata.get("path") or ""),
+            str(chunk.metadata.get("chunk_type") or ""),
+        )
+        for chunk in chunks
+    )
+
+
+def _short_text_paths_to_fold(chunks: list[Chunk]) -> dict[str, str]:
+    folded: dict[str, str] = {}
+    for chunk in chunks:
+        if not _can_merge_text_chunk(chunk):
+            continue
+        path = str(chunk.metadata.get("path") or "")
+        if _non_space_length(chunk.content) >= SHORT_CHUNK_CHARS:
+            continue
+        parent_path, _ = _split_path_leaf(path)
+        if parent_path:
+            folded[path] = parent_path
+    return folded
+
+
+def _prepare_chunk_for_short_merge(chunk: Chunk, folded_paths: dict[str, str]) -> Chunk:
+    path = str(chunk.metadata.get("path") or "")
+    new_path = _rewrite_folded_path(path, folded_paths)
+    metadata = dict(chunk.metadata)
+    if new_path != path:
+        metadata["path"] = new_path
+
+    if not _can_merge_text_chunk(chunk):
+        return Chunk(
+            content=chunk.content,
+            metadata=metadata,
+            chunk_index=chunk.chunk_index,
+            file_id=chunk.file_id,
+            vector_id=chunk.vector_id,
+        )
+
+    if path in folded_paths:
+        _, leaf = _split_path_leaf(path)
+        content = f"{leaf}\n{chunk.content}" if leaf else chunk.content
+    else:
+        content = chunk.content
+
+    return Chunk(
+        content=content,
+        metadata=metadata,
+        chunk_index=chunk.chunk_index,
+        file_id=chunk.file_id,
+        vector_id=chunk.vector_id,
+    )
+
+
+def _rewrite_folded_path(path: str, folded_paths: dict[str, str]) -> str:
+    if not path:
+        return path
+
+    for old_path in sorted(folded_paths, key=len, reverse=True):
+        new_path = folded_paths[old_path]
+        if path == old_path:
+            return new_path
+        prefix = f"{old_path}{PATH_SEPARATOR}"
+        if path.startswith(prefix):
+            return _join_existing_path(new_path, path[len(prefix) :])
+    return path
+
+
+def _can_merge_text_chunk(chunk: Chunk) -> bool:
+    chunk_type = str(chunk.metadata.get("chunk_type") or "text")
+    return chunk_type == "text" and not _looks_like_json(chunk.content)
+
+
+def _flush_text_merge_run(chunks: list[Chunk], run: list[Chunk]) -> None:
+    if not run:
+        return
+
+    metadata = _merge_text_run_metadata(run)
+    content = "\n".join(chunk.content.strip() for chunk in run if chunk.content.strip()).strip()
+    for chunk_content in _split_content_for_limit(content, "text"):
+        if _non_space_length(chunk_content) < MIN_CHUNK_CHARS:
+            continue
+        chunk_metadata = _metadata_for_chunk_content(metadata, chunk_content)
+        chunks.append(
+            Chunk(
+                content=chunk_content,
+                metadata=chunk_metadata,
+                file_id=str(chunk_metadata.get("file_id") or "") or None,
+            )
+        )
+
+
+def _merge_text_run_metadata(run: list[Chunk]) -> dict[str, Any]:
+    metadata = dict(run[0].metadata)
+    links: list[dict[str, Any]] = []
+    images: list[dict[str, Any]] = []
+    for chunk in run:
+        links.extend(_metadata_list(chunk.metadata.get("links")))
+        images.extend(_metadata_list(chunk.metadata.get("imgs")))
+    if links:
+        metadata["links"] = _dedupe_assets(links, "link_path")
+    else:
+        metadata.pop("links", None)
+    if images:
+        metadata["imgs"] = _dedupe_assets(images, "img_path")
+    else:
+        metadata.pop("imgs", None)
+    metadata["chunk_type"] = "text"
+    return metadata
+
+
+def _metadata_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _reindex_chunks(chunks: list[Chunk]) -> list[Chunk]:
+    for index, chunk in enumerate(chunks):
+        chunk.chunk_index = index
+        chunk.metadata["chunk_index"] = index
+        chunk.file_id = str(chunk.metadata.get("file_id") or "") or None
+    return chunks
+
+
 def _non_space_length(text: str) -> int:
     return len(re.sub(r"\s+", "", text))
 
@@ -267,12 +454,53 @@ def _split_content_for_limit(content: str, chunk_type: str) -> list[str]:
     if len(content) <= MAX_CHUNK_CHARS:
         return [content]
 
+    if chunk_type == "text" and _has_img_tag(content):
+        return _split_tagged_text_content(content)
+
     if chunk_type == "table" or _looks_like_json(content):
         json_chunks = _split_json_content(content)
         if json_chunks:
             return json_chunks
 
     return _split_plain_text_content(content)
+
+
+def _has_img_tag(text: str) -> bool:
+    return IMG_TAG_PATTERN.search(text) is not None
+
+
+def _split_tagged_text_content(content: str) -> list[str]:
+    chunks: list[str] = []
+    cursor = 0
+
+    for match in IMG_TAG_PATTERN.finditer(content):
+        before = content[cursor : match.start()].strip()
+        if before:
+            chunks.extend(_split_plain_text_content(before))
+        chunks.extend(_split_img_tag_block(match.group(0), match.group("index"), match.group("body")))
+        cursor = match.end()
+
+    after = content[cursor:].strip()
+    if after:
+        chunks.extend(_split_plain_text_content(after))
+    return [chunk for chunk in chunks if chunk.strip()]
+
+
+def _split_img_tag_block(block: str, image_index: str, body: str) -> list[str]:
+    if len(block) <= MAX_CHUNK_CHARS:
+        return [block.strip()]
+
+    open_tag = f'<img data-index="{image_index}">'
+    close_tag = "</img>"
+    max_body_chars = MAX_CHUNK_CHARS - len(open_tag) - len(close_tag)
+    if max_body_chars <= MIN_CHUNK_CHARS:
+        return [block.strip()]
+
+    return [
+        f"{open_tag}{part.strip()}{close_tag}"
+        for part in _split_plain_text_content_with_limit(body.strip(), max_body_chars)
+        if part.strip()
+    ]
 
 
 def _looks_like_json(text: str) -> bool:
@@ -300,9 +528,6 @@ def _json_value_chunks(value: Any) -> list[Any]:
         return _split_json_list(value)
 
     if isinstance(value, dict):
-        list_key = _best_list_key(value)
-        if list_key is not None:
-            return _split_json_dict_list(value, list_key)
         return _split_json_dict_items(value)
 
     return [value]
@@ -325,44 +550,19 @@ def _split_json_list(rows: list[Any]) -> list[list[Any]]:
     return chunks
 
 
-def _best_list_key(value: dict[str, Any]) -> str | None:
-    preferred_keys = ("table_data", "data", "rows", "items")
-    for key in preferred_keys:
-        if isinstance(value.get(key), list):
-            return key
-    for key, item in value.items():
-        if isinstance(item, list):
-            return key
-    return None
-
-
-def _split_json_dict_list(value: dict[str, Any], list_key: str) -> list[dict[str, Any]]:
-    rows = value.get(list_key)
-    if not isinstance(rows, list):
-        return [value]
-
-    chunks: list[dict[str, Any]] = []
-    current: list[Any] = []
-
-    for row in rows:
-        candidate_rows = [*current, row]
-        candidate = {**value, list_key: candidate_rows}
-        if current and len(_json_text(candidate)) > MAX_CHUNK_CHARS:
-            chunks.append({**value, list_key: current})
-            current = [row]
-        else:
-            current.append(row)
-
-    if current:
-        chunks.append({**value, list_key: current})
-    return chunks
-
-
 def _split_json_dict_items(value: dict[str, Any]) -> list[dict[str, Any]]:
     chunks: list[dict[str, Any]] = []
     current: dict[str, Any] = {}
 
     for key, item in value.items():
+        single_item = {key: item}
+        if len(_json_text(single_item)) > MAX_CHUNK_CHARS:
+            if current:
+                chunks.append(current)
+                current = {}
+            chunks.extend(_split_json_dict_item(key, item))
+            continue
+
         candidate = {**current, key: item}
         if current and len(_json_text(candidate)) > MAX_CHUNK_CHARS:
             chunks.append(current)
@@ -375,24 +575,55 @@ def _split_json_dict_items(value: dict[str, Any]) -> list[dict[str, Any]]:
     return chunks
 
 
+def _split_json_dict_item(key: str, item: Any) -> list[dict[str, Any]]:
+    if isinstance(item, list):
+        return [{key: chunk} for chunk in _split_wrapped_json_list(key, item)]
+
+    if isinstance(item, dict):
+        return [{key: chunk} for chunk in _split_json_dict_items(item)]
+
+    return [{key: item}]
+
+
+def _split_wrapped_json_list(key: str, rows: list[Any]) -> list[list[Any]]:
+    chunks: list[list[Any]] = []
+    current: list[Any] = []
+
+    for row in rows:
+        candidate = [*current, row]
+        if current and len(_json_text({key: candidate})) > MAX_CHUNK_CHARS:
+            chunks.append(current)
+            current = [row]
+        else:
+            current.append(row)
+
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def _json_text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 def _split_plain_text_content(content: str) -> list[str]:
+    return _split_plain_text_content_with_limit(content, MAX_CHUNK_CHARS)
+
+
+def _split_plain_text_content_with_limit(content: str, max_chars: int) -> list[str]:
     chunks: list[str] = []
     remaining = content.strip()
 
-    while len(remaining) > MAX_CHUNK_CHARS:
-        split_at = _numbering_split_point(remaining, MAX_CHUNK_CHARS)
+    while len(remaining) > max_chars:
+        split_at = _numbering_split_point(remaining, max_chars)
         if split_at is None:
-            split_at = _sentence_end_split_point(remaining, MAX_CHUNK_CHARS)
+            split_at = _sentence_end_split_point(remaining, max_chars)
         if split_at is not None:
             chunk = remaining[:split_at].rstrip()
             remaining = remaining[split_at:].lstrip()
         else:
-            chunk = remaining[:MAX_CHUNK_CHARS].rstrip()
-            next_start = max(0, MAX_CHUNK_CHARS - FORCED_SPLIT_OVERLAP_CHARS)
+            chunk = remaining[:max_chars].rstrip()
+            next_start = max(0, max_chars - FORCED_SPLIT_OVERLAP_CHARS)
             remaining = remaining[next_start:].lstrip()
 
         if chunk:
@@ -464,7 +695,7 @@ def _build_chunk_metadata(
 
 
 def _format_heading_path(heading_path: dict[int, str]) -> str:
-    return "/".join(
+    return PATH_SEPARATOR.join(
         _safe_path_segment(text)
         for _, text in sorted(heading_path.items())
         if _safe_path_segment(text)
@@ -474,6 +705,67 @@ def _format_heading_path(heading_path: dict[int, str]) -> str:
 def _safe_path_segment(text: str) -> str:
     normalized = re.sub(r"\s+", " ", str(text)).strip()
     return normalized.replace("/", "／").replace("\\", "＼")
+
+
+def _append_path_segment(path: str, segment: str) -> str:
+    safe_segment = _safe_path_segment(segment)
+    if not safe_segment:
+        return path
+    return f"{path}{PATH_SEPARATOR}{safe_segment}" if path else safe_segment
+
+
+def _join_existing_path(path: str, suffix: str) -> str:
+    suffix = str(suffix or "").strip(PATH_SEPARATOR)
+    if not suffix:
+        return path
+    return f"{path}{PATH_SEPARATOR}{suffix}" if path else suffix
+
+
+def _split_path_leaf(path: str) -> tuple[str, str]:
+    normalized = str(path or "").strip(PATH_SEPARATOR)
+    if not normalized:
+        return "", ""
+    if PATH_SEPARATOR not in normalized:
+        return "", normalized
+    parent, leaf = normalized.rsplit(PATH_SEPARATOR, 1)
+    return parent, leaf
+
+
+def _format_image_description_tag(item_index: int, description: str) -> str:
+    safe_description = str(description).replace("</img>", "<／img>")
+    return f'<img data-index="{item_index}">图片：{safe_description}</img>'
+
+
+def _metadata_for_chunk_content(metadata: dict[str, Any], content: str) -> dict[str, Any]:
+    chunk_metadata = dict(metadata)
+    if "imgs" not in chunk_metadata:
+        return chunk_metadata
+
+    image_indexes = _image_indexes_in_content(content)
+    imgs = [
+        dict(item)
+        for item in _metadata_list(chunk_metadata.get("imgs"))
+        if _metadata_item_index(item) in image_indexes
+    ]
+    if imgs:
+        chunk_metadata["imgs"] = _dedupe_assets(imgs, "img_path")
+    else:
+        chunk_metadata.pop("imgs", None)
+    return chunk_metadata
+
+
+def _image_indexes_in_content(content: str) -> set[int]:
+    indexes: set[int] = set()
+    for match in IMG_TAG_PATTERN.finditer(content):
+        indexes.add(int(match.group("index")))
+    return indexes
+
+
+def _metadata_item_index(item: dict[str, Any]) -> int:
+    try:
+        return int(item.get("index", -1))
+    except (TypeError, ValueError):
+        return -1
 
 
 def _image_metadata(path: str, item_index: int) -> dict[str, Any]:
