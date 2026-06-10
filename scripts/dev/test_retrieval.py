@@ -9,6 +9,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.services.embedding import default_bm25_model_file
 from app.services.retrieval import RetrievalService
 
 
@@ -34,14 +35,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--bm25-model",
-        default=str(
-            Path("data")
-            / "processing"
-            / "订阅号运营SOP"
-            / "embedding"
-            / "订阅号运营SOP.bm25.json"
-        ),
-        help="BM25 model JSON saved during embedding generation.",
+        default=str(default_bm25_model_file()),
+        help="BM25 model JSON saved during global embedding generation.",
     )
     args = parser.parse_args()
 

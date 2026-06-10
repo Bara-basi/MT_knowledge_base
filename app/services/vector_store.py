@@ -63,7 +63,7 @@ class VectorStoreService:
         return self.client.query(
             collection_name=self.config.name,
             ids=ids,
-            output_fields=["id", "document_id", "chunk_index", "content", "metadata"],
+            output_fields=["id", "file_id", "chunk_index", "content", "metadata"],
         )
 
     def _build_milvus_row(self, record: dict[str, Any]) -> dict[str, Any]:
@@ -93,13 +93,17 @@ class VectorStoreService:
             raise VectorStoreError(f"Invalid chunk_index: {chunk_index!r}") from exc
 
         metadata = dict(record.get("metadata") or {})
-        document_id = record.get("document_id") or build_document_id(metadata)
-        chunk_id = record.get("vector_id") or build_chunk_id(document_id, chunk_index)
+        file_id = record.get("file_id") or metadata.get("file_id")
+        if not file_id:
+            raise VectorStoreError("Embedding record metadata is missing file_id.")
+        file_id = str(file_id)
+        chunk_id = record.get("vector_id") or build_chunk_id(file_id, chunk_index)
 
         metadata.update(
             {
                 "chunk_id": chunk_id,
-                "document_id": document_id,
+                "chunk_index": chunk_index,
+                "file_id": file_id,
                 "embedding_model": record.get("embedding_model"),
                 "embedding_dimension": len(vector),
                 "bm25_model": record.get("bm25_model"),
@@ -113,7 +117,7 @@ class VectorStoreService:
             "vector": vector,
             "sparse_vector": normalize_sparse_vector(sparse_vector),
             "content": record.get("content", ""),
-            "document_id": document_id,
+            "file_id": file_id,
             "chunk_index": chunk_index,
             "metadata": metadata,
         }
@@ -131,14 +135,18 @@ def load_embedding_records(embedding_file: str | Path) -> list[dict[str, Any]]:
     return data
 
 
-def build_document_id(metadata: dict[str, Any]) -> str:
-    source = str(metadata.get("source_file") or metadata.get("title") or "unknown")
-    digest = hashlib.sha1(source.encode("utf-8")).hexdigest()[:16]
-    return f"doc_{digest}"
+def build_file_id(metadata: dict[str, Any]) -> str:
+    file_type = str(metadata.get("file_type") or "")
+    file_name = str(metadata.get("file_name") or "")
+    if not file_type or not file_name:
+        raise VectorStoreError("Cannot build file_id without file_type and file_name.")
+    file_stem = Path(file_name).stem
+    digest = hashlib.sha1(file_stem.encode("utf-8")).hexdigest()[:12]
+    return f"{file_type}_{digest}"
 
 
-def build_chunk_id(document_id: str, chunk_index: int) -> str:
-    return f"{document_id}_chunk_{chunk_index:06d}"
+def build_chunk_id(file_id: str, chunk_index: int) -> str:
+    return f"{file_id}_chunk_{chunk_index:06d}"
 
 
 def normalize_sparse_vector(sparse_vector: dict[Any, Any]) -> dict[int, float]:

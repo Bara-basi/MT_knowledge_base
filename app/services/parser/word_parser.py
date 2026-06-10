@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from docx import Document
+from docx.oxml.exceptions import InvalidXmlError
 from docx.oxml.ns import qn
 from docx.oxml.table import CT_Tbl
 from docx.oxml.text.paragraph import CT_P
@@ -87,7 +88,7 @@ def parse_word_document(
 
     stage_started_at = time.perf_counter()
     _log("start image analysis")
-    items = enrich_image_descriptions(items, max_concurrency=image_analysis_workers)
+    items = enrich_image_descriptions(items, document_title=path.stem, max_concurrency=image_analysis_workers)
     _log_item_summary("finished image analysis", items, stage_started_at)
 
     stage_started_at = time.perf_counter()
@@ -295,7 +296,10 @@ def _plain_table_items(table: Table, table_index: int, context: ParseContext) ->
 
 
 def _is_single_cell_table(table: Table) -> bool:
-    return len(table.rows) == 1 and bool(table.rows) and len(table.rows[0].cells) == 1
+    try:
+        return len(table.rows) == 1 and bool(table.rows) and len(table.rows[0].cells) == 1
+    except InvalidXmlError:
+        return False
 
 
 def _json_table_items(table: Table, table_index: int, context: ParseContext) -> list[dict[str, str]]:
@@ -368,7 +372,11 @@ def _json_table_items(table: Table, table_index: int, context: ParseContext) -> 
 
 
 def _table_grid_width(table: Table) -> int:
-    grid = table._tbl.tblGrid
+    try:
+        grid = table._tbl.tblGrid
+    except InvalidXmlError:
+        grid = None
+
     if grid is not None and grid.gridCol_lst:
         return len(grid.gridCol_lst)
     return max(

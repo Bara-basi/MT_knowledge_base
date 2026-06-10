@@ -11,7 +11,7 @@ class Chunk:
     content: str
     metadata: dict[str, Any] = field(default_factory=dict)
     chunk_index: int | None = None
-    document_id: str | None = None
+    file_id: str | None = None
     vector_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -22,8 +22,8 @@ class Chunk:
 
         if self.chunk_index is not None:
             data["chunk_index"] = self.chunk_index
-        if self.document_id is not None:
-            data["document_id"] = self.document_id
+        if self.file_id is not None:
+            data["file_id"] = self.file_id
         if self.vector_id is not None:
             data["vector_id"] = self.vector_id
 

@@ -1,0 +1,39 @@
+{
+    "milvus":{
+        "chunk_index":"chunk在文中的序号，从0开始",
+        "chunk_id": "入库时动态生成",
+        "chunk_type":"chunk类型",
+        "file_id":"文件类别+文件名哈希值，如doc_8f3a91c2b7e4",
+        "file_type":"文件类别",
+        "file_name":"文件名(含文件扩展名，不含路径)",
+        "file_path":"文件来源路径(一般在minio，测试阶段在本地)",
+        "path":"chunk的标题路径，如'公司介绍/一、公司简介'",
+        "imgs":[
+            {
+                "index":"图片在chunk中的索引",
+                "img_name":"图片名(和原文占位符对应)",
+                "img_path":"图片来源路径"
+            }
+        ],
+        "links":[
+            {
+                "index":"链接在chunk中的索引",  
+                "link_name":"链接名(和原文占位符对应)",
+                "link_path":"链接来源路径"
+            }
+        ]
+    },
+    "postgresql":{
+        "content_hash":"总体内容哈希值，用于判断内容是否改变",
+        "file_name":"文件名(含文件扩展名，不含路径)",
+        "file_path":"文件来源路径(一般在minio，测试阶段在本地)",
+        "file_type":"文件类型",
+        "assets":[
+            {"type":"img","name":"图片名","path":"图片来源路径"},
+            {"type":"link","name":"链接名","path":"链接来源路径"}
+        ],
+        "update_time":"更新时间",    
+        "creater":"创建人"
+    }
+    
+}

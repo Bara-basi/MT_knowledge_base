@@ -10,11 +10,11 @@ class FlowRetrievalRequest(BaseModel):
     limit: int = Field(5, ge=1, le=50, description="Number of chunks to return.")
     document_name: str | None = Field(
         None,
-        description="Processing document name used to resolve the default BM25 model.",
+        description="Optional document hint kept for client compatibility; BM25 uses the global model by default.",
     )
     bm25_model_file: str | None = Field(
         None,
-        description="Explicit BM25 model JSON path. Overrides document_name.",
+        description="Explicit BM25 model JSON path for debugging. Defaults to the global BM25 model.",
     )
     recall_limit: int | None = Field(
         None,
@@ -29,9 +29,10 @@ class FlowRetrievedChunk(BaseModel):
     id: str
     order: int
     content: str
-    structure: dict[str, Any] = Field(default_factory=dict)
-    link: dict[str, str] | None = None
-    img: list[str] | None = None
+    file_id: str | None = None
+    path: str = ""
+    links: list[dict[str, Any]] | None = None
+    imgs: list[dict[str, Any]] | None = None
 
 
 class FlowRetrievalResponse(BaseModel):

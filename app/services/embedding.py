@@ -14,10 +14,23 @@ from app.core.config import settings
 from app.models.chunk import Chunk
 
 
-EMBEDDING_METADATA_EXCLUDE_KEYS = {"link", "img"}
+EMBEDDING_METADATA_EXCLUDE_KEYS = {
+    "links",
+    "imgs",
+    "file_id",
+    "chunk_id",
+    "chunk_index",
+    "embedding_model",
+    "embedding_dimension",
+    "bm25_model",
+    "bm25_language",
+    "bm25_dimension",
+}
 REQUIRED_MODEL_FILES = {"config.json", "pytorch_model.bin"}
 REQUIRED_TOKENIZER_FILES = {"tokenizer.json", "tokenizer_config.json", "vocab.txt"}
 BM25_LANGUAGE = "zh"
+REMOTE_EMBEDDING_MAX_CHARS = 500
+GLOBAL_BM25_MODEL_FILE = Path("data") / "processing" / "global.bm25.json"
 
 
 class EmbeddingDependencyError(RuntimeError):
@@ -26,6 +39,10 @@ class EmbeddingDependencyError(RuntimeError):
 
 class EmbeddingAPIError(RuntimeError):
     """Raised when the remote embedding API returns an invalid or failed response."""
+
+
+class EmbeddingLocalError(RuntimeError):
+    """Raised when the local embedding model cannot produce vectors."""
 
 
 class EmbeddingService:
@@ -47,7 +64,7 @@ class EmbeddingService:
 
     @property
     def use_local_model(self) -> bool:
-        return settings.use_local_embedding_model
+        return self._has_local_model() or settings.use_local_embedding_model
 
     @cached_property
     def tokenizer(self):
@@ -133,45 +150,68 @@ class EmbeddingService:
         text_list = [text.strip() for text in texts if text and text.strip()]
         if not text_list:
             return []
-        if not self.use_local_model:
-            return self._embed_texts_remote(text_list)
+
+        if self.use_local_model:
+            try:
+                return self._embed_texts_local(text_list)
+            except EmbeddingLocalError as exc:
+                if not settings.siliconflow_api_key:
+                    raise
+                print(
+                    "[embedding] local embedding failed; falling back to remote API: "
+                    f"{exc}",
+                    flush=True,
+                )
+
+        return self._embed_texts_remote(text_list)
+
+    def _embed_texts_local(self, texts: list[str]) -> list[list[float]]:
+        if not self._has_local_model() and not settings.use_local_embedding_model:
+            raise EmbeddingLocalError("Local embedding model is not available.")
 
         try:
             import torch
             import torch.nn.functional as functional
         except ImportError as exc:
-            raise EmbeddingDependencyError(
+            raise EmbeddingLocalError(
                 "Embedding dependencies are missing. Install torch before using "
                 "EmbeddingService."
             ) from exc
 
-        device = self._resolve_device(torch)
-        vectors: list[list[float]] = []
-        with torch.no_grad():
-            for start in range(0, len(text_list), self.batch_size):
-                batch = text_list[start : start + self.batch_size]
-                encoded = self.tokenizer(
-                    batch,
-                    padding=True,
-                    truncation=True,
-                    max_length=512,
-                    return_tensors="pt",
-                )
-                encoded = {key: value.to(device) for key, value in encoded.items()}
-                output = self.model(**encoded)
-                batch_vectors = output.last_hidden_state[:, 0]
-                if self.normalize_embeddings:
-                    batch_vectors = functional.normalize(batch_vectors, p=2, dim=1)
-                vectors.extend(batch_vectors.cpu().float().tolist())
+        try:
+            device = self._resolve_device(torch)
+            vectors: list[list[float]] = []
+            with torch.no_grad():
+                for start in range(0, len(texts), self.batch_size):
+                    batch = texts[start : start + self.batch_size]
+                    encoded = self.tokenizer(
+                        batch,
+                        padding=True,
+                        truncation=True,
+                        max_length=512,
+                        return_tensors="pt",
+                    )
+                    encoded = {key: value.to(device) for key, value in encoded.items()}
+                    output = self.model(**encoded)
+                    batch_vectors = output.last_hidden_state[:, 0]
+                    if self.normalize_embeddings:
+                        batch_vectors = functional.normalize(batch_vectors, p=2, dim=1)
+                    vectors.extend(batch_vectors.cpu().float().tolist())
+        except Exception as exc:
+            raise EmbeddingLocalError(str(exc)) from exc
 
         return vectors
+
+    def _has_local_model(self) -> bool:
+        _, local_files_only = self._resolve_model_source()
+        return local_files_only
 
     def _embed_texts_remote(self, texts: list[str]) -> list[list[float]]:
         self._ensure_remote_configured()
 
         vectors: list[list[float]] = []
         for start in range(0, len(texts), self.batch_size):
-            batch = texts[start : start + self.batch_size]
+            batch = [_trim_remote_embedding_input(text) for text in texts[start : start + self.batch_size]]
             payload = {
                 "model": self.model_name,
                 "input": batch,
@@ -270,11 +310,22 @@ class EmbeddingService:
         parts.append("content:\n" + _format_content_for_embedding(chunk.content))
         return "\n\n".join(parts)
 
-    def embed_chunks(self, chunks: Iterable[Chunk]) -> list[dict[str, Any]]:
+    def embed_chunks(
+        self,
+        chunks: Iterable[Chunk],
+        *,
+        bm25_model: Any | None = None,
+        bm25_model_file: str | Path | None = None,
+    ) -> list[dict[str, Any]]:
         chunk_list = list(chunks)
         embedding_texts = [self.build_embedding_text(chunk) for chunk in chunk_list]
         vectors = self.embed_texts(embedding_texts)
-        bm25_model, bm25_vectors = build_bm25_document_embeddings(embedding_texts)
+        if bm25_model is None:
+            if bm25_model_file is None:
+                bm25_model_file = default_bm25_model_file()
+            bm25_model = load_bm25_embedding_function(bm25_model_file)
+        sparse_matrix = bm25_model.encode_documents(embedding_texts)
+        bm25_vectors = sparse_matrix_to_json_vectors(sparse_matrix)
 
         results: list[dict[str, Any]] = []
         for chunk, embedding_text, vector, bm25_vector in zip(
@@ -292,6 +343,7 @@ class EmbeddingService:
             data["bm25_model"] = "pymilvus.model.sparse.BM25EmbeddingFunction"
             data["bm25_language"] = BM25_LANGUAGE
             data["bm25_dimension"] = getattr(bm25_model, "dim", None)
+            data["bm25_model_file"] = str(bm25_model_file or default_bm25_model_file())
             results.append(data)
         return results
 
@@ -299,10 +351,17 @@ class EmbeddingService:
         self,
         chunk_file: str | Path,
         output_file: str | Path | None = None,
+        *,
+        bm25_model: Any | None = None,
+        bm25_model_file: str | Path | None = None,
     ) -> Path:
         chunk_path = Path(chunk_file)
         chunks = load_chunks(chunk_path)
-        embeddings = self.embed_chunks(chunks)
+        embeddings = self.embed_chunks(
+            chunks,
+            bm25_model=bm25_model,
+            bm25_model_file=bm25_model_file,
+        )
 
         if output_file is None:
             output_file = (
@@ -317,14 +376,30 @@ class EmbeddingService:
             json.dumps(embeddings, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        self.save_bm25_model_file(chunks, path)
         return path
+
+    def save_global_bm25_model_file(
+        self,
+        chunks: Iterable[Chunk],
+        output_file: str | Path | None = None,
+    ) -> tuple[Path, Any]:
+        output_path = Path(output_file) if output_file is not None else default_bm25_model_file()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        chunk_list = list(chunks)
+        if not chunk_list:
+            raise ValueError("Cannot train a global BM25 model without chunks.")
+        embedding_texts = [self.build_embedding_text(chunk) for chunk in chunk_list]
+        bm25_model = build_bm25_embedding_function()
+        bm25_model.fit(embedding_texts)
+        bm25_model.save(str(output_path))
+        return output_path, bm25_model
 
     def save_bm25_model_file(self, chunks: list[Chunk], embedding_file: Path) -> Path:
         embedding_texts = [self.build_embedding_text(chunk) for chunk in chunks]
         bm25_model = build_bm25_embedding_function()
         bm25_model.fit(embedding_texts)
-        output_file = embedding_file.with_suffix("").with_suffix(".bm25.json")
+        output_file = default_bm25_model_file()
+        output_file.parent.mkdir(parents=True, exist_ok=True)
         bm25_model.save(str(output_file))
         return output_file
 
@@ -359,6 +434,10 @@ class EmbeddingService:
 
 
 embedding_service = EmbeddingService()
+
+
+def default_bm25_model_file() -> Path:
+    return GLOBAL_BM25_MODEL_FILE
 
 
 def build_bm25_embedding_function():
@@ -456,7 +535,7 @@ def load_chunks(chunk_file: str | Path) -> list[Chunk]:
                 content=item["content"],
                 metadata=item.get("metadata", {}),
                 chunk_index=item.get("chunk_index"),
-                document_id=item.get("document_id"),
+                file_id=item.get("file_id"),
                 vector_id=item.get("vector_id"),
             )
         )
@@ -566,6 +645,13 @@ def _has_value(value: Any) -> bool:
     if isinstance(value, (list, tuple, set, dict)):
         return bool(value)
     return True
+
+
+def _trim_remote_embedding_input(text: str) -> str:
+    text = text.strip()
+    if len(text) <= REMOTE_EMBEDDING_MAX_CHARS:
+        return text
+    return text[:REMOTE_EMBEDDING_MAX_CHARS]
 
 
 def _is_complete_model_snapshot(path: Path) -> bool:

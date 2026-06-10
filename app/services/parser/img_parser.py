@@ -31,6 +31,7 @@ MAX_IMAGE_ANALYSIS_WORKERS = 5
 def enrich_image_descriptions(
     items: list[dict[str, str]],
     *,
+    document_title: str = "",
     llm_client: LLMClient | None = None,
     model: str = IMAGE_ANALYSIS_MODEL,
     max_concurrency: int = DEFAULT_IMAGE_ANALYSIS_WORKERS,
@@ -39,6 +40,9 @@ def enrich_image_descriptions(
     started_at = time.perf_counter()
     client = _get_optional_client(llm_client)
     tasks = _build_analysis_tasks(items)
+    for task in tasks:
+        if document_title:
+            task["context"]["document_title"] = document_title
     _log(f"image analysis tasks: {len(tasks)}")
 
     if client is None:
@@ -270,6 +274,7 @@ def _analyze_image(
             "image_url": {"url": _image_to_data_url(Path(item["path"]))},
         },
     ]
+    # print(content[0].get("text"))
     messages = [{"role": "user", "content": content}]
     try:
         response = client.chat(
@@ -297,8 +302,8 @@ def _build_prompt(context: dict[str, str], *, group_position: int, group_size: i
 你是企业内部知识库的教程图片解析器。当前请求只包含一张图片；它是原连续图片组中的第 {group_position} 张，共 {group_size} 张。
 
 上下文元数据：
-- 教程名称：{context["document_title"] or "未知"}
-- 当前教程分块：{context["heading_path"] or "未知"}
+- 文件名称：{context["document_title"] or "未知"}
+- 当前文件分块：{context["heading_path"] or "未知"}
 - 最近一条上文正文：{context["nearest_body_text"] or "无"}
 
 请先判断图片类型，再按类型抽取信息：

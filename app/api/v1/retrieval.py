@@ -15,17 +15,6 @@ from app.services.retrieval import RetrievalResult, get_retrieval_service
 
 router = APIRouter(prefix="/retrieval", tags=["retrieval"])
 
-STRUCTURE_METADATA_KEYS = (
-    "title",
-    "chapter",
-    "heading_2",
-    "heading_3",
-    "heading_4",
-    "heading_5",
-    "heading_6",
-    "step",
-)
-
 
 @router.post(
     "/flow",
@@ -84,14 +73,6 @@ def _retrieve_flow_chunks(request: FlowRetrievalRequest) -> FlowRetrievalRespons
 def _resolve_bm25_model_file(request: FlowRetrievalRequest) -> str | Path | None:
     if request.bm25_model_file:
         return request.bm25_model_file
-    if request.document_name:
-        return (
-            Path("data")
-            / "processing"
-            / request.document_name
-            / "embedding"
-            / f"{request.document_name}.bm25.json"
-        )
     return None
 
 
@@ -99,7 +80,13 @@ def _sort_flow_results(results: list[RetrievalResult]) -> list[RetrievalResult]:
     return sorted(
         results,
         key=lambda result: (
-            str(result.metadata.get("title") or result.document_id or ""),
+            str(
+                result.metadata.get("file_name")
+                or result.metadata.get("file_id")
+                or result.file_id
+                or ""
+            ),
+            str((result.metadata or {}).get("path") or ""),
             result.chunk_index if result.chunk_index is not None else 10**9,
         ),
     )
@@ -107,51 +94,73 @@ def _sort_flow_results(results: list[RetrievalResult]) -> list[RetrievalResult]:
 
 def _to_flow_chunk(order: int, result: RetrievalResult) -> FlowRetrievedChunk:
     metadata = result.metadata or {}
-    structure = _extract_structure(metadata)
 
     return FlowRetrievedChunk(
         id=result.id,
         order=order,
         content=result.content,
-        structure=structure,
-        link=_normalize_links(metadata.get("link")),
-        img=_normalize_images(metadata.get("img")),
+        file_id=str(metadata.get("file_id") or result.file_id or "") or None,
+        path=str(metadata.get("path") or ""),
+        links=_normalize_links(metadata.get("links")),
+        imgs=_normalize_images(metadata.get("imgs")),
     )
 
 
-def _extract_structure(metadata: dict[str, Any]) -> dict[str, Any]:
+def _normalize_links(value: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(value, list):
+        return None
+    links = [
+        _normalize_link_item(item)
+        for item in value
+    ]
+    links = [item for item in links if item is not None]
+    return links or None
+
+
+def _normalize_images(value: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(value, list):
+        return None
+    images = [
+        _normalize_image_item(item)
+        for item in value
+    ]
+    images = [item for item in images if item is not None]
+    return images or None
+
+
+def _normalize_link_item(item: Any) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    link_path = item.get("link_path")
+    link_name = item.get("link_name")
+    if not _has_value(link_path):
+        return None
     return {
-        key: metadata[key]
-        for key in STRUCTURE_METADATA_KEYS
-        if key in metadata and _has_value(metadata[key])
+        "index": _asset_index(item),
+        "link_name": str(link_name or link_path),
+        "link_path": str(link_path),
     }
 
 
-def _normalize_links(value: Any) -> dict[str, str] | None:
-    if isinstance(value, dict):
-        links = {
-            str(key): str(url)
-            for key, url in value.items()
-            if _has_value(key) and _has_value(url)
-        }
-        return links or None
-
-    if isinstance(value, list):
-        links = {
-            f"link_{index}": str(url)
-            for index, url in enumerate(value, start=1)
-            if _has_value(url)
-        }
-        return links or None
-
-    return None
-
-
-def _normalize_images(value: Any) -> list[str] | None:
-    if not isinstance(value, list):
+def _normalize_image_item(item: Any) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
         return None
-    images = [str(item) for item in value if _has_value(item)]
-    return images or None
+    img_path = item.get("img_path")
+    img_name = item.get("img_name")
+    if not _has_value(img_path):
+        return None
+    return {
+        "index": _asset_index(item),
+        "img_name": str(img_name or Path(str(img_path)).name),
+        "img_path": str(img_path),
+    }
+
+
+def _asset_index(item: dict[str, Any]) -> int:
+    try:
+        return int(item.get("index", 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _has_value(value: Any) -> bool:

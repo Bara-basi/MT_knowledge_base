@@ -12,7 +12,7 @@ from app.db.milvus import (
     ensure_chunk_collection,
     get_milvus_client,
 )
-from app.services.embedding import EmbeddingService
+from app.services.embedding import EmbeddingService, default_bm25_model_file
 from app.services.rerank import RerankCandidate, RerankService
 
 
@@ -22,7 +22,7 @@ class RetrievalResult:
     score: float
     content: str
     metadata: dict[str, Any]
-    document_id: str | None = None
+    file_id: str | None = None
     chunk_index: int | None = None
     recall_score: float | None = None
     rerank_score: float | None = None
@@ -33,7 +33,7 @@ class RetrievalResult:
             "score": self.score,
             "recall_score": self.recall_score,
             "rerank_score": self.rerank_score,
-            "document_id": self.document_id,
+            "file_id": self.file_id,
             "chunk_index": self.chunk_index,
             "content": self.content,
             "metadata": self.metadata,
@@ -103,7 +103,7 @@ class RetrievalService:
             reqs=[dense_request, sparse_request],
             ranker=RRFRanker(),
             limit=recall_limit,
-            output_fields=["id", "document_id", "chunk_index", "content", "metadata"],
+            output_fields=["id", "file_id", "chunk_index", "content", "metadata"],
         )
         results = [_to_retrieval_result(hit) for hit in raw_results[0]]
         if not rerank or not results:
@@ -145,7 +145,7 @@ def _to_retrieval_result(hit: dict[str, Any]) -> RetrievalResult:
         id=str(hit.get("id") or entity.get("id")),
         score=float(hit.get("distance", hit.get("score", 0.0))),
         recall_score=float(hit.get("distance", hit.get("score", 0.0))),
-        document_id=entity.get("document_id"),
+        file_id=entity.get("file_id"),
         chunk_index=entity.get("chunk_index"),
         content=entity.get("content", ""),
         metadata=entity.get("metadata") or {},
@@ -161,12 +161,3 @@ def get_retrieval_service() -> RetrievalService:
         retrieval_service = RetrievalService()
     return retrieval_service
 
-
-def default_bm25_model_file() -> Path:
-    return (
-        Path("data")
-        / "processing"
-        / "订阅号运营SOP"
-        / "embedding"
-        / "订阅号运营SOP.bm25.json"
-    )

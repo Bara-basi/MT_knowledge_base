@@ -51,7 +51,7 @@ def build_chunk_schema(config: MilvusCollectionConfig | None = None) -> Any:
     schema.add_field(field_name="vector", datatype=DataType.FLOAT_VECTOR, dim=config.vector_dim)
     schema.add_field(field_name="sparse_vector", datatype=DataType.SPARSE_FLOAT_VECTOR)
     schema.add_field(field_name="content", datatype=DataType.VARCHAR, max_length=8192)
-    schema.add_field(field_name="document_id", datatype=DataType.VARCHAR, max_length=128)
+    schema.add_field(field_name="file_id", datatype=DataType.VARCHAR, max_length=128)
     schema.add_field(field_name="chunk_index", datatype=DataType.INT64)
     schema.add_field(field_name="metadata", datatype=DataType.JSON)
     return schema
