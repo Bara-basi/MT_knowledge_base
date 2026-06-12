@@ -121,10 +121,10 @@ class Settings:
     rerank_sigmoid_scale: float = float(os.getenv("RERANK_SIGMOID_SCALE", "1.0"))
     rerank_score_threshold: float | None = _env_optional_float(
         "RERANK_SCORE_THRESHOLD",
-        0.1,
+        0.0,
     )
     rerank_score_cliff_delta: float = float(
-        os.getenv("RERANK_SCORE_CLIFF_DELTA", "0.7")
+        os.getenv("RERANK_SCORE_CLIFF_DELTA", "1")
     )
     retrieval_recall_multiplier: int = int(
         os.getenv("RETRIEVAL_RECALL_MULTIPLIER", "5")

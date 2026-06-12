@@ -5,6 +5,7 @@ import csv
 import json
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,8 +19,12 @@ from app.services.llm import LLMClient
 
 
 DEFAULT_OUTPUT_FILE = Path("data") / "vocab" / "expanded_vocab.csv"
-DEFAULT_MAX_CHARS = 12000
+DEFAULT_MAX_CHARS = 6000
+DEFAULT_RETRIES = 2
 DEFAULT_POS = "nz"
+PARAGRAPH_LINE_PATTERN = re.compile(
+    r"^\[paragraph]\s+\[(?P<style>[^\]]+)]\s*(?P<text>.*)$"
+)
 ALLOWED_POS_TAGS = {
     "n",
     "nr",
@@ -74,6 +79,18 @@ def main() -> None:
         help="Optional LLM model override.",
     )
     parser.add_argument(
+        "--retries",
+        type=int,
+        default=DEFAULT_RETRIES,
+        help="Retry count per text chunk when the LLM response cannot be parsed.",
+    )
+    parser.add_argument(
+        "--enable-thinking",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable model thinking mode. Disabled by default for faster vocab extraction.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print extracted terms without writing the output CSV.",
@@ -88,12 +105,32 @@ def main() -> None:
     client = LLMClient()
     extracted: list[VocabItem] = []
     for index, txt_file in enumerate(txt_files, start=1):
-        text = txt_file.read_text(encoding="utf-8", errors="replace")
-        text = text[: max(args.max_chars, 1)]
-        print(f"[{index}/{len(txt_files)}] Extracting vocab from {txt_file}", flush=True)
-        items = extract_vocab_from_text(client, txt_file, text, model=args.model)
-        print(f"  extracted={len(items)}", flush=True)
-        extracted.extend(items)
+        raw_text = txt_file.read_text(encoding="utf-8", errors="replace")
+        text = filter_paragraph_lines(raw_text)
+        print(
+            f"[{index}/{len(txt_files)}] Extracting vocab from {txt_file} "
+            f"(paragraph_chars={len(text)})",
+            flush=True,
+        )
+        if not text.strip():
+            print("  skipped=empty paragraph text", flush=True)
+            continue
+        chunks = split_text_for_llm(text, max_chars=max(args.max_chars, 1))
+        for chunk_index, chunk in enumerate(chunks, start=1):
+            print(
+                f"  chunk={chunk_index}/{len(chunks)} chars={len(chunk)}",
+                flush=True,
+            )
+            items = extract_vocab_from_text(
+                client,
+                txt_file,
+                chunk,
+                model=args.model,
+                retries=max(args.retries, 0),
+                enable_thinking=args.enable_thinking,
+            )
+            print(f"    extracted={len(items)}", flush=True)
+            extracted.extend(items)
 
     output_file = Path(args.output)
     merged = merge_vocab(load_existing_vocab(output_file), extracted)
@@ -123,32 +160,134 @@ def find_txt_files(input_path: Path, *, recursive: bool) -> list[Path]:
     return sorted(path for path in iterator if path.is_file())
 
 
+def filter_paragraph_lines(text: str) -> str:
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        match = PARAGRAPH_LINE_PATTERN.match(line)
+        if match is None:
+            continue
+        paragraph = match.group("text").strip()
+        if paragraph:
+            lines.append(paragraph)
+    return "\n".join(lines)
+
+
+def split_text_for_llm(text: str, *, max_chars: int) -> list[str]:
+    if len(text) <= max_chars:
+        return [text]
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_length = 0
+    for line in text.splitlines():
+        line_length = len(line) + 1
+        if current and current_length + line_length > max_chars:
+            chunks.append("\n".join(current).strip())
+            current = []
+            current_length = 0
+        if line_length > max_chars:
+            chunks.extend(_split_long_line(line, max_chars=max_chars))
+            continue
+        current.append(line)
+        current_length += line_length
+
+    if current:
+        chunks.append("\n".join(current).strip())
+    return [chunk for chunk in chunks if chunk]
+
+
+def _split_long_line(line: str, *, max_chars: int) -> list[str]:
+    return [
+        line[start : start + max_chars].strip()
+        for start in range(0, len(line), max_chars)
+        if line[start : start + max_chars].strip()
+    ]
+
+
 def extract_vocab_from_text(
     client: LLMClient,
     txt_file: Path,
     text: str,
     *,
     model: str | None = None,
+    retries: int = DEFAULT_RETRIES,
+    enable_thinking: bool = False,
 ) -> list[VocabItem]:
-    response = client.chat(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "你是企业内部知识库的分词词表构建助手。"
-                    "你的任务是从文本中提取适合加入 jieba 自定义词典的词。"
-                ),
-            },
-            {
-                "role": "user",
-                "content": _build_prompt(txt_file, text),
-            },
-        ],
-        model=model,
-        temperature=0.1,
-        max_tokens=1200,
+    messages = _build_messages(txt_file, text)
+    last_response = ""
+    last_error: Exception | None = None
+
+    for attempt in range(retries + 1):
+        response = client.chat(
+            messages,
+            model=model,
+            temperature=0.0 if attempt else 0.1,
+            max_tokens=1200,
+            extra_body={"enable_thinking": enable_thinking},
+        )
+        last_response = response
+        try:
+            return parse_vocab_response(response)
+        except ValueError as exc:
+            last_error = exc
+            fallback_items = parse_vocab_fallback(response)
+            if fallback_items:
+                print(
+                    f"    warning=parse fallback used items={len(fallback_items)} "
+                    f"reason={exc}",
+                    flush=True,
+                )
+                return fallback_items
+            if attempt >= retries:
+                break
+            print(
+                f"    warning=parse failed attempt={attempt + 1}/{retries + 1}: {exc}",
+                flush=True,
+            )
+            messages = _build_retry_messages(last_response)
+            time.sleep(min(2 ** attempt, 5))
+
+    print(
+        "    warning=skip chunk after parse failures "
+        f"reason={last_error} response_preview={last_response[:200]!r}",
+        flush=True,
     )
-    return parse_vocab_response(response)
+    return []
+
+
+def _build_messages(txt_file: Path, text: str) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是企业内部知识库的分词词表构建助手。"
+                "你的任务是从文本中提取适合加入 jieba 自定义词典的词。"
+                "必须只输出合法 JSON 数组。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": _build_prompt(txt_file, text),
+        },
+    ]
+
+
+def _build_retry_messages(response: str) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": "你是 JSON 修复器。必须只输出合法 JSON 数组，不要解释。",
+        },
+        {
+            "role": "user",
+            "content": (
+                "下面内容不是合法 JSON 数组。请将其中可识别的词汇修复为格式 "
+                '[{"word":"词","pos":"nz"}]。如果无法识别任何词，返回 []。\n\n'
+                f"{response[:4000]}"
+            ),
+        },
+    ]
 
 
 def _build_prompt(txt_file: Path, text: str) -> str:
@@ -204,6 +343,57 @@ def parse_vocab_response(response: str) -> list[VocabItem]:
         if word:
             items.append(VocabItem(word=word, pos=pos))
     return items
+
+
+def parse_vocab_fallback(response: str) -> list[VocabItem]:
+    items: list[VocabItem] = []
+    for raw_line in response.splitlines():
+        line = raw_line.strip().strip("-*• \t")
+        if not line or line in {"[", "]"}:
+            continue
+        line = line.rstrip(",;；")
+        item = _parse_fallback_line(line)
+        if item is not None:
+            items.append(item)
+    return merge_vocab([], items)
+
+
+def _parse_fallback_line(line: str) -> VocabItem | None:
+    json_like = _parse_json_object_line(line)
+    if json_like is not None:
+        return json_like
+
+    for separator in (",", "，", "\t", "|", "：", ":"):
+        if separator not in line:
+            continue
+        left, right = [part.strip() for part in line.split(separator, 1)]
+        word = normalize_word(left.strip('"“”'))
+        pos = normalize_pos(right.strip('"“”'))
+        if word:
+            return VocabItem(word=word, pos=pos)
+
+    match = re.match(r"^(?P<word>[\w\u4e00-\u9fff·（）()《》-]{2,})\s+(?P<pos>[a-z]{1,4})$", line)
+    if match is not None:
+        word = normalize_word(match.group("word"))
+        if word:
+            return VocabItem(word=word, pos=normalize_pos(match.group("pos")))
+    return None
+
+
+def _parse_json_object_line(line: str) -> VocabItem | None:
+    candidate = line.rstrip(",")
+    if not candidate.startswith("{") or not candidate.endswith("}"):
+        return None
+    try:
+        data = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    word = normalize_word(data.get("word"))
+    if not word:
+        return None
+    return VocabItem(word=word, pos=normalize_pos(data.get("pos")))
 
 
 def _extract_json_array(text: str) -> str:
