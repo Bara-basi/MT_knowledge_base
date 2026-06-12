@@ -164,8 +164,18 @@ def _extract_picture(
     if image is None:
         return None
 
-    image_path = context.next_image_path(getattr(image, "content_type", None))
-    blob = image.blob
+    content_type = _safe_image_content_type(image, slide_index, shape_order)
+    if content_type is None or content_type not in IMAGE_EXTENSIONS:
+        _log(f"skip unsupported image: slide={slide_index}, shape={shape_order}, content_type={content_type!r}")
+        return None
+
+    try:
+        blob = image.blob
+    except (OSError, ValueError) as exc:
+        _log(f"skip unreadable image: slide={slide_index}, shape={shape_order}, error={exc}")
+        return None
+
+    image_path = context.next_image_path(content_type)
     image_path.write_bytes(blob)
     left = int(getattr(shape, "left", 0) or 0)
     top = int(getattr(shape, "top", 0) or 0)
@@ -191,6 +201,17 @@ def _extract_picture(
         "order": shape_order,
         "hash": _image_dhash(blob),
     }
+
+
+def _safe_image_content_type(image: Any, slide_index: int, shape_order: int) -> str | None:
+    try:
+        content_type = getattr(image, "content_type", None)
+    except (OSError, ValueError) as exc:
+        _log(f"skip unsupported image: slide={slide_index}, shape={shape_order}, error={exc}")
+        return None
+
+    content_type_text = str(content_type or "").lower()
+    return content_type_text or None
 
 
 def _extract_text_items(shape: Any, slide_index: int, shape_order: int) -> list[dict[str, Any]]:

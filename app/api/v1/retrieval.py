@@ -32,7 +32,8 @@ def _retrieve_flow_chunks(request: FlowRetrievalRequest) -> FlowRetrievalRespons
         f"query={request.query!r} limit={request.limit} "
         f"document_name={request.document_name!r} "
         f"bm25_model_file={request.bm25_model_file!r} "
-        f"recall_limit={request.recall_limit} rerank={request.rerank}",
+        f"recall_limit={request.recall_limit} rerank={request.rerank} "
+        f"debug={request.debug}",
         flush=True,
     )
     bm25_model_file = _resolve_bm25_model_file(request)
@@ -56,8 +57,8 @@ def _retrieve_flow_chunks(request: FlowRetrievalRequest) -> FlowRetrievalRespons
         raise HTTPException(status_code=500, detail=f"Retrieval failed: {exc}") from exc
 
     chunks = [
-        _to_flow_chunk(index, result)
-        for index, result in enumerate(_sort_flow_results(results), start=1)
+        _to_flow_chunk(result, debug=request.debug)
+        for result in _sort_flow_results(results)
     ]
     print(
         f"[retrieval] flow success query={request.query!r} count={len(chunks)}",
@@ -77,33 +78,40 @@ def _resolve_bm25_model_file(request: FlowRetrievalRequest) -> str | Path | None
 
 
 def _sort_flow_results(results: list[RetrievalResult]) -> list[RetrievalResult]:
-    return sorted(
-        results,
-        key=lambda result: (
-            str(
-                result.metadata.get("file_name")
-                or result.metadata.get("file_id")
-                or result.file_id
-                or ""
-            ),
-            str((result.metadata or {}).get("path") or ""),
-            result.chunk_index if result.chunk_index is not None else 10**9,
-        ),
-    )
+    return sorted(results, key=lambda result: result.id)
 
 
-def _to_flow_chunk(order: int, result: RetrievalResult) -> FlowRetrievedChunk:
+def _to_flow_chunk(
+    result: RetrievalResult,
+    debug: bool = False,
+) -> FlowRetrievedChunk:
     metadata = result.metadata or {}
 
     return FlowRetrievedChunk(
-        id=result.id,
-        order=order,
+        chunk_id=result.id,
         content=result.content,
-        file_id=str(metadata.get("file_id") or result.file_id or "") or None,
+        chunk_index=_chunk_index(result, metadata),
+        chunk_type=str(metadata.get("chunk_type") or ""),
+        file_name=str(metadata.get("file_name") or ""),
+        file_path=str(metadata.get("file_path") or ""),
         path=str(metadata.get("path") or ""),
         links=_normalize_links(metadata.get("links")),
         imgs=_normalize_images(metadata.get("imgs")),
+        rerank_score=result.rerank_score if debug else None,
+        normalized_rerank_score=result.normalized_rerank_score if debug else None,
     )
+
+
+def _chunk_index(result: RetrievalResult, metadata: dict[str, Any]) -> int | None:
+    value = (
+        result.chunk_index
+        if result.chunk_index is not None
+        else metadata.get("chunk_index")
+    )
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_links(value: Any) -> list[dict[str, Any]] | None:

@@ -26,6 +26,18 @@ from app.services.embedding import EmbeddingService
 from app.services.vector_store import VectorStoreService
 
 
+def _parse_bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Expected a boolean value, got: {value!r}")
+
+
 @dataclass
 class ReindexSummary:
     input_path: Path
@@ -50,8 +62,8 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Drop the Milvus chunk collection, recreate it with the current schema, "
-            "and reingest all supported documents."
+            "Recreate or resume the Milvus chunk collection indexing workflow "
+            "for all supported documents."
         ),
     )
     parser.add_argument(
@@ -78,9 +90,33 @@ def main() -> None:
         help="Max concurrent image description API calls per document. Default: 3.",
     )
     parser.add_argument(
+        "--no-parser",
+        "--no_parser",
+        dest="no_parser",
+        action="store_true",
+        help="Skip document parsing and rebuild chunks from existing processing txt files.",
+    )
+    parser.add_argument(
         "--no-flush",
         action="store_true",
         help="Skip Milvus flush after each document upsert. Useful for larger batches.",
+    )
+    parser.add_argument(
+        "--rebuild",
+        nargs="?",
+        const=True,
+        default=True,
+        type=_parse_bool,
+        help=(
+            "Rebuild existing processing artifacts and reset the Milvus collection. "
+            "Use '--rebuild false' to reuse existing txt/chunk/embedding files."
+        ),
+    )
+    parser.add_argument(
+        "--no-rebuild",
+        dest="rebuild",
+        action="store_false",
+        help="Reuse existing txt/chunk/embedding files and keep the existing Milvus collection.",
     )
     args = parser.parse_args()
 
@@ -95,9 +131,15 @@ def main() -> None:
     print(f"Input: {input_path}")
     print(f"Documents: {len(document_files)}")
     print(f"Collection: {config.name}")
-    print("Dropping existing collection...")
-    drop_result = drop_chunk_collection(client=client, config=config)
-    print(f"Dropped: {drop_result['dropped']}")
+    print(f"Rebuild: {args.rebuild}")
+    print(f"Parser: {'disabled' if args.no_parser else 'enabled'}")
+    if args.rebuild:
+        print("Dropping existing collection...")
+        drop_result = drop_chunk_collection(client=client, config=config)
+        print(f"Dropped: {drop_result['dropped']}")
+    else:
+        drop_result = {"dropped": False}
+        print("Keeping existing collection because rebuild is disabled.")
 
     print("Creating collection with current schema...")
     ensure_result = ensure_chunk_collection(client=client, config=config)
@@ -110,11 +152,14 @@ def main() -> None:
     failures: list[tuple[Path, Exception]] = []
 
     for index, file_path in enumerate(document_files, start=1):
-        print(f"\n[{index}/{len(document_files)}] Parsing {file_path}", flush=True)
+        step_name = "Chunking from existing txt" if args.no_parser else "Parsing"
+        print(f"\n[{index}/{len(document_files)}] {step_name} {file_path}", flush=True)
         try:
             prepared = prepare_document(
                 file_path,
                 image_analysis_workers=args.image_workers,
+                rebuild=args.rebuild,
+                parse=not args.no_parser,
             )
         except Exception as exc:
             failures.append((file_path, exc))
@@ -130,14 +175,23 @@ def main() -> None:
 
     results: list[IngestionResult] = []
     if prepared_documents:
-        all_chunks = [
-            chunk
+        needs_embedding = args.rebuild or any(
+            not prepared.embedding_file.exists()
             for prepared in prepared_documents
-            for chunk in prepared.chunks
-        ]
-        print("\nTraining global BM25 model...")
-        bm25_model_file, bm25_model = embedding_service.save_global_bm25_model_file(all_chunks)
-        print(f"Global BM25 model: {bm25_model_file}")
+        )
+        if needs_embedding:
+            all_chunks = [
+                chunk
+                for prepared in prepared_documents
+                for chunk in prepared.chunks
+            ]
+            print("\nTraining global BM25 model...")
+            bm25_model_file, bm25_model = embedding_service.save_global_bm25_model_file(all_chunks)
+            print(f"Global BM25 model: {bm25_model_file}")
+        else:
+            bm25_model_file = None
+            bm25_model = None
+            print("\nSkipping global BM25 training because all embedding files already exist.")
 
         for index, prepared in enumerate(prepared_documents, start=1):
             print(f"\n[{index}/{len(prepared_documents)}] Embedding {prepared.file_path}", flush=True)
@@ -149,6 +203,7 @@ def main() -> None:
                     flush=not args.no_flush,
                     bm25_model=bm25_model,
                     bm25_model_file=bm25_model_file,
+                    rebuild=args.rebuild,
                 )
             except Exception as exc:
                 failures.append((prepared.file_path, exc))

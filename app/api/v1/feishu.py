@@ -27,6 +27,8 @@ _tenant_access_token_expires_at = 0.0
 _seen_message_keys: dict[str, float] = {}
 _seen_message_ttl_seconds = 3600
 _pseudo_tag_pattern = re.compile(r"<(img|link)>(.*?)</\1>", re.IGNORECASE | re.DOTALL)
+_feedback_interval_seconds = 1.5
+_feedback_texts_cache: list[str] | None = None
 
 
 @router.post("/events")
@@ -148,6 +150,64 @@ async def _answer_feishu_message(
         question_len=len(question),
     )
 
+    feedback_message_id: str | None = None
+    feedback_stop_event: asyncio.Event | None = None
+    feedback_task: asyncio.Task[None] | None = None
+    if message_id:
+        feedback_message_id = await _try_send_feishu_markdown_message(
+            chat_id=chat_id,
+            reply_to_message_id=message_id,
+            markdown_text=_get_initial_feedback_text(),
+            log_content=False,
+        )
+        if not feedback_message_id:
+            feedback_message_id = await _try_send_feishu_markdown_reply(
+                message_id,
+                _get_initial_feedback_text(),
+                log_content=False,
+            )
+        if feedback_message_id:
+            feedback_stop_event = asyncio.Event()
+            feedback_task = asyncio.create_task(
+                _run_feishu_feedback_loop(
+                    message_id=feedback_message_id,
+                    stop_event=feedback_stop_event,
+                    event_id=event_id,
+                    dedupe_key=dedupe_key,
+                )
+            )
+            _debug(
+                "feedback card started",
+                event_id=event_id,
+                message_id=message_id,
+                feedback_message_id=feedback_message_id,
+                dedupe_key=dedupe_key,
+            )
+    elif chat_id:
+        feedback_message_id = await _try_send_feishu_markdown_message(
+            chat_id=chat_id,
+            reply_to_message_id=None,
+            markdown_text=_get_initial_feedback_text(),
+            log_content=False,
+        )
+        if feedback_message_id:
+            feedback_stop_event = asyncio.Event()
+            feedback_task = asyncio.create_task(
+                _run_feishu_feedback_loop(
+                    message_id=feedback_message_id,
+                    stop_event=feedback_stop_event,
+                    event_id=event_id,
+                    dedupe_key=dedupe_key,
+                )
+            )
+            _debug(
+                "feedback card started",
+                event_id=event_id,
+                message_id=message_id,
+                feedback_message_id=feedback_message_id,
+                dedupe_key=dedupe_key,
+            )
+
     try:
         await create_chat_record(
             user_id=sender_id,
@@ -226,36 +286,6 @@ async def _answer_feishu_message(
                 dedupe_key=dedupe_key,
                 error=str(exc),
             )
-
-        try:
-            fallback_result = await asyncio.to_thread(
-                evaluate_answer_fallback,
-                question=question,
-                answer=response.answer,
-                user_id=sender_id,
-                session_id=chat_id,
-                conversation_id=chat_id,
-                reference_answer=None,
-                persist=True,
-                verbose=False,
-            )
-            _debug(
-                "fallback evaluation recorded",
-                event_id=event_id,
-                message_id=message_id,
-                dedupe_key=dedupe_key,
-                fallback=fallback_result.get("fallback"),
-                reason=_preview(fallback_result.get("reason", "")),
-            )
-        except Exception as exc:  # noqa: BLE001 - evaluation must not block user replies.
-            logger.exception("Failed to evaluate fallback for Feishu message: %s", exc)
-            _warn(
-                "fallback evaluation failed",
-                event_id=event_id,
-                message_id=message_id,
-                dedupe_key=dedupe_key,
-                error=str(exc),
-            )
     except HTTPException as exc:
         detail = _detail_to_text(exc.detail)
         logger.exception("Failed to query knowledge base for Feishu message: %s", detail)
@@ -266,12 +296,21 @@ async def _answer_feishu_message(
             dedupe_key=dedupe_key,
             error=detail,
         )
-        if message_id:
-            await _try_reply_feishu_markdown(
-                message_id,
-                "知识库暂时无法返回答案，请稍后再试。",
+        await _stop_feishu_feedback_loop(feedback_stop_event, feedback_task)
+        failed_text = _get_failed_feedback_text()
+        if feedback_message_id:
+            await _try_update_feishu_markdown_message(feedback_message_id, failed_text)
+        elif message_id:
+            await _try_reply_feishu_markdown(message_id, failed_text)
+        elif chat_id:
+            await _try_send_feishu_markdown_message(
+                chat_id=chat_id,
+                reply_to_message_id=None,
+                markdown_text=failed_text,
             )
         return
+
+    await _stop_feishu_feedback_loop(feedback_stop_event, feedback_task)
 
     if not message_id:
         _debug(
@@ -282,7 +321,15 @@ async def _answer_feishu_message(
         )
         return
 
-    sent = await _try_reply_feishu_markdown(message_id, response.answer)
+    if feedback_message_id:
+        sent = await _try_update_feishu_markdown_message(feedback_message_id, response.answer)
+    else:
+        sent_message_id = await _try_send_feishu_markdown_message(
+            chat_id=chat_id,
+            reply_to_message_id=message_id,
+            markdown_text=response.answer,
+        )
+        sent = sent_message_id is not None
     _debug(
         "reply finished",
         event_id=event_id,
@@ -290,21 +337,258 @@ async def _answer_feishu_message(
         dedupe_key=dedupe_key,
         sent=sent,
     )
-
-
-async def _try_reply_feishu_markdown(message_id: str, markdown_text: str) -> bool:
-    _debug(
-        "markdown reply attempt",
+    _schedule_feishu_answer_evaluation(
+        question=question,
+        answer=response.answer,
+        sender_id=sender_id,
+        chat_id=chat_id,
+        event_id=event_id,
         message_id=message_id,
-        markdown_len=len(markdown_text),
-        markdown_preview=_preview(markdown_text),
+        dedupe_key=dedupe_key,
     )
+
+
+def _schedule_feishu_answer_evaluation(
+    *,
+    question: str,
+    answer: str,
+    sender_id: str | None,
+    chat_id: str | None,
+    event_id: str | None,
+    message_id: str | None,
+    dedupe_key: str | None,
+) -> None:
+    task = asyncio.create_task(
+        _run_feishu_answer_evaluation(
+            question=question,
+            answer=answer,
+            sender_id=sender_id,
+            chat_id=chat_id,
+            event_id=event_id,
+            message_id=message_id,
+            dedupe_key=dedupe_key,
+        )
+    )
+    task.add_done_callback(_log_feishu_answer_evaluation_task_failure)
+
+
+def _log_feishu_answer_evaluation_task_failure(task: asyncio.Task[None]) -> None:
     try:
-        return await _reply_feishu_markdown(message_id, markdown_text)
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:  # noqa: BLE001 - keep background task failures visible.
+        logger.exception("Unexpected Feishu answer evaluation task failure: %s", exc)
+
+
+async def _run_feishu_answer_evaluation(
+    *,
+    question: str,
+    answer: str,
+    sender_id: str | None,
+    chat_id: str | None,
+    event_id: str | None,
+    message_id: str | None,
+    dedupe_key: str | None,
+) -> None:
+    try:
+        fallback_result = await asyncio.to_thread(
+            evaluate_answer_fallback,
+            question=question,
+            answer=answer,
+            user_id=sender_id,
+            session_id=chat_id,
+            conversation_id=chat_id,
+            reference_answer=None,
+            persist=True,
+            verbose=False,
+        )
+        _debug(
+            "fallback evaluation recorded",
+            event_id=event_id,
+            message_id=message_id,
+            dedupe_key=dedupe_key,
+            fallback=fallback_result.get("fallback"),
+            reason=_preview(fallback_result.get("reason", "")),
+        )
+    except Exception as exc:  # noqa: BLE001 - evaluation must not block user replies.
+        logger.exception("Failed to evaluate fallback for Feishu message: %s", exc)
+        _warn(
+            "fallback evaluation failed",
+            event_id=event_id,
+            message_id=message_id,
+            dedupe_key=dedupe_key,
+            error=str(exc),
+        )
+
+
+async def _run_feishu_feedback_loop(
+    *,
+    message_id: str,
+    stop_event: asyncio.Event,
+    event_id: str | None,
+    dedupe_key: str | None,
+) -> None:
+    feedback_texts = _load_feedback_texts()
+    if not feedback_texts:
+        _debug("feedback loop skipped", reason="missing_feedback_texts", message_id=message_id)
+        return
+
+    index = 1 % len(feedback_texts)
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=_feedback_interval_seconds)
+            break
+        except asyncio.TimeoutError:
+            pass
+
+        text = feedback_texts[index]
+        index = (index + 1) % len(feedback_texts)
+        await _try_update_feishu_markdown_message(message_id, text, log_content=False)
+
+
+async def _stop_feishu_feedback_loop(
+    stop_event: asyncio.Event | None,
+    task: asyncio.Task[None] | None,
+) -> None:
+    if stop_event:
+        stop_event.set()
+    if task:
+        await task
+
+
+def _load_feedback_texts() -> list[str]:
+    global _feedback_texts_cache
+
+    if _feedback_texts_cache is not None:
+        return _feedback_texts_cache
+
+    fallback_texts = [
+        "正在理解问题...",
+        "正在检索知识库...",
+        "正在筛选相关资料...",
+        "正在组织答案...",
+    ]
+    feedback_path = Path("data") / "UI反馈.json"
+    try:
+        raw_data = json.loads(feedback_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _warn("feedback text load failed", path=str(feedback_path), error=str(exc))
+        _feedback_texts_cache = fallback_texts
+        return _feedback_texts_cache
+
+    status_text = raw_data.get("STATUS_TEXT") if isinstance(raw_data, dict) else None
+    if not isinstance(status_text, dict):
+        _feedback_texts_cache = fallback_texts
+        return _feedback_texts_cache
+
+    texts = [
+        value.strip()
+        for key, value in status_text.items()
+        if key != "failed" and isinstance(value, str) and value.strip()
+    ]
+    _feedback_texts_cache = texts or fallback_texts
+    return _feedback_texts_cache
+
+
+def _get_initial_feedback_text() -> str:
+    feedback_texts = _load_feedback_texts()
+    return feedback_texts[0] if feedback_texts else "正在处理..."
+
+
+def _get_failed_feedback_text() -> str:
+    fallback_text = "处理失败，请稍后重试"
+    feedback_path = Path("data") / "UI反馈.json"
+    try:
+        raw_data = json.loads(feedback_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return fallback_text
+
+    status_text = raw_data.get("STATUS_TEXT") if isinstance(raw_data, dict) else None
+    failed_text = status_text.get("failed") if isinstance(status_text, dict) else None
+    return failed_text.strip() if isinstance(failed_text, str) and failed_text.strip() else fallback_text
+
+
+async def _try_send_feishu_markdown_message(
+    *,
+    chat_id: str | None,
+    reply_to_message_id: str | None,
+    markdown_text: str,
+    log_content: bool = True,
+) -> str | None:
+    if chat_id:
+        fields: dict[str, Any] = {"chat_id": chat_id, "markdown_len": len(markdown_text)}
+        if log_content:
+            fields["markdown_preview"] = _preview(markdown_text)
+        _debug("markdown send attempt", **fields)
+        try:
+            return await _send_feishu_markdown_message_to_chat(
+                chat_id,
+                markdown_text,
+                log_content=log_content,
+            )
+        except HTTPException as exc:
+            detail = _detail_to_text(exc.detail)
+            logger.exception("Failed to send Feishu markdown card to chat %s: %s", chat_id, detail)
+            _debug("markdown send failed", chat_id=chat_id, error=detail)
+
+    if reply_to_message_id:
+        return await _try_send_feishu_markdown_reply(
+            reply_to_message_id,
+            markdown_text,
+            log_content=log_content,
+        )
+
+    return None
+
+
+async def _try_send_feishu_markdown_reply(
+    message_id: str,
+    markdown_text: str,
+    *,
+    log_content: bool = True,
+) -> str | None:
+    fields: dict[str, Any] = {"message_id": message_id, "markdown_len": len(markdown_text)}
+    if log_content:
+        fields["markdown_preview"] = _preview(markdown_text)
+    _debug("markdown reply attempt", **fields)
+    try:
+        return await _send_feishu_markdown_reply(
+            message_id,
+            markdown_text,
+            log_content=log_content,
+        )
     except HTTPException as exc:
         detail = _detail_to_text(exc.detail)
         logger.exception("Failed to send Feishu markdown card %s: %s", message_id, detail)
         _debug("markdown reply failed", message_id=message_id, error=detail)
+        return None
+
+
+async def _try_reply_feishu_markdown(message_id: str, markdown_text: str) -> bool:
+    return await _try_send_feishu_markdown_reply(message_id, markdown_text) is not None
+
+
+async def _try_update_feishu_markdown_message(
+    message_id: str,
+    markdown_text: str,
+    *,
+    log_content: bool = True,
+) -> bool:
+    fields: dict[str, Any] = {"message_id": message_id, "markdown_len": len(markdown_text)}
+    if log_content:
+        fields["markdown_preview"] = _preview(markdown_text)
+    _debug("markdown update attempt", **fields)
+    try:
+        return await _update_feishu_markdown_message(
+            message_id,
+            markdown_text,
+            log_content=log_content,
+        )
+    except HTTPException as exc:
+        detail = _detail_to_text(exc.detail)
+        logger.exception("Failed to update Feishu markdown card %s: %s", message_id, detail)
+        _debug("markdown update failed", message_id=message_id, error=detail)
         return False
 
 
@@ -386,7 +670,85 @@ def _is_duplicate_message(dedupe_key: str | None) -> bool:
     return False
 
 
-async def _reply_feishu_markdown(message_id: str, markdown_text: str) -> bool:
+async def _send_feishu_markdown_message_to_chat(
+    chat_id: str,
+    markdown_text: str,
+    *,
+    log_content: bool = True,
+) -> str | None:
+    if not settings.feishu_app_id or not settings.feishu_app_secret:
+        _debug(
+            "markdown send skipped",
+            reason="missing_app_credentials",
+            has_app_id=bool(settings.feishu_app_id),
+            has_app_secret=bool(settings.feishu_app_secret),
+        )
+        return None
+
+    token = await _get_tenant_access_token()
+    timeout = httpx.Timeout(settings.feishu_timeout)
+    url = f"{settings.feishu_base_url}/open-apis/im/v1/messages"
+    content = await _build_feishu_card_content(markdown_text, token)
+    fields: dict[str, Any] = {"chat_id": chat_id, "url": url}
+    if log_content:
+        fields["content_preview"] = _preview(content)
+    _debug("markdown send api request", **fields)
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                url,
+                params={"receive_id_type": "chat_id"},
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "receive_id": chat_id,
+                    "msg_type": "interactive",
+                    "content": content,
+                },
+            )
+            _debug(
+                "markdown send api response",
+                chat_id=chat_id,
+                http_status=response.status_code,
+                body_preview=_preview(response.text),
+            )
+            response.raise_for_status()
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="Feishu markdown send API timed out") from exc
+    except httpx.HTTPStatusError as exc:
+        detail = _response_text(exc.response)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Feishu markdown send API returned {exc.response.status_code}: {detail}",
+        ) from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to call Feishu markdown send API: {exc}",
+        ) from exc
+
+    result = response.json()
+    if result.get("code") != 0:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Feishu markdown send API error: {result}",
+        )
+
+    sent_message_id = _extract_feishu_message_id(result)
+    _debug(
+        "markdown send api success",
+        chat_id=chat_id,
+        sent_message_id=sent_message_id,
+    )
+    return sent_message_id
+
+
+async def _send_feishu_markdown_reply(
+    message_id: str,
+    markdown_text: str,
+    *,
+    log_content: bool = True,
+) -> str | None:
     if not settings.feishu_app_id or not settings.feishu_app_secret:
         _debug(
             "markdown reply skipped",
@@ -394,18 +756,16 @@ async def _reply_feishu_markdown(message_id: str, markdown_text: str) -> bool:
             has_app_id=bool(settings.feishu_app_id),
             has_app_secret=bool(settings.feishu_app_secret),
         )
-        return False
+        return None
 
     token = await _get_tenant_access_token()
     timeout = httpx.Timeout(settings.feishu_timeout)
     url = f"{settings.feishu_base_url}/open-apis/im/v1/messages/{message_id}/reply"
     content = await _build_feishu_card_content(markdown_text, token)
-    _debug(
-        "markdown reply api request",
-        message_id=message_id,
-        url=url,
-        content_preview=_preview(content),
-    )
+    fields: dict[str, Any] = {"message_id": message_id, "url": url}
+    if log_content:
+        fields["content_preview"] = _preview(content)
+    _debug("markdown reply api request", **fields)
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -445,8 +805,95 @@ async def _reply_feishu_markdown(message_id: str, markdown_text: str) -> bool:
             detail=f"Feishu markdown reply API error: {result}",
         )
 
-    _debug("markdown reply api success", message_id=message_id)
+    reply_message_id = _extract_feishu_message_id(result)
+    _debug(
+        "markdown reply api success",
+        message_id=message_id,
+        reply_message_id=reply_message_id,
+    )
+    return reply_message_id
+
+
+async def _update_feishu_markdown_message(
+    message_id: str,
+    markdown_text: str,
+    *,
+    log_content: bool = True,
+) -> bool:
+    if not settings.feishu_app_id or not settings.feishu_app_secret:
+        _debug(
+            "markdown update skipped",
+            reason="missing_app_credentials",
+            has_app_id=bool(settings.feishu_app_id),
+            has_app_secret=bool(settings.feishu_app_secret),
+        )
+        return False
+
+    token = await _get_tenant_access_token()
+    timeout = httpx.Timeout(settings.feishu_timeout)
+    url = f"{settings.feishu_base_url}/open-apis/im/v1/messages/{message_id}"
+    content = await _build_feishu_card_content(markdown_text, token)
+    fields: dict[str, Any] = {"message_id": message_id, "url": url}
+    if log_content:
+        fields["content_preview"] = _preview(content)
+    _debug("markdown update api request", **fields)
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.patch(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                json={"content": content},
+            )
+            _debug(
+                "markdown update api response",
+                message_id=message_id,
+                http_status=response.status_code,
+                body_preview=_preview(response.text),
+            )
+            response.raise_for_status()
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="Feishu markdown update API timed out") from exc
+    except httpx.HTTPStatusError as exc:
+        detail = _response_text(exc.response)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Feishu markdown update API returned {exc.response.status_code}: {detail}",
+        ) from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to call Feishu markdown update API: {exc}",
+        ) from exc
+
+    result = response.json()
+    if result.get("code") != 0:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Feishu markdown update API error: {result}",
+        )
+
+    _debug("markdown update api success", message_id=message_id)
     return True
+
+
+def _extract_feishu_message_id(result: dict[str, Any]) -> str | None:
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return None
+
+    for key in ("message_id", "messageId"):
+        value = data.get(key)
+        if value:
+            return str(value)
+
+    message = data.get("message")
+    if isinstance(message, dict):
+        value = message.get("message_id") or message.get("messageId")
+        if value:
+            return str(value)
+
+    return None
 
 
 async def _build_feishu_card_content(markdown_text: str, token: str) -> str:
@@ -481,22 +928,46 @@ async def _build_feishu_card_elements(markdown_text: str, token: str) -> list[di
             _flush_markdown_buffer(elements, markdown_buffer)
             image_key = await _upload_local_image(value, token)
             if image_key:
-                elements.append(
-                    {
-                        "tag": "img",
-                        "img_key": image_key,
-                        "alt": {
-                            "tag": "plain_text",
-                            "content": Path(value.replace("\\", "/")).name or "image",
-                        },
-                    }
-                )
+                alt_text = Path(value.replace("\\", "/")).name or "image"
+                elements.append(_build_half_width_image_element(image_key, alt_text))
 
         cursor = match.end()
 
     markdown_buffer.append(markdown_text[cursor:])
     _flush_markdown_buffer(elements, markdown_buffer)
     return elements
+
+
+def _build_half_width_image_element(image_key: str, alt_text: str) -> dict[str, Any]:
+    image_element = {
+        "tag": "img",
+        "img_key": image_key,
+        "alt": {
+            "tag": "plain_text",
+            "content": alt_text,
+        },
+    }
+    return {
+        "tag": "column_set",
+        "flex_mode": "bisect",
+        "background_style": "default",
+        "columns": [
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "vertical_align": "top",
+                "elements": [image_element],
+            },
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "vertical_align": "top",
+                "elements": [],
+            },
+        ],
+    }
 
 
 def _flush_markdown_buffer(elements: list[dict[str, Any]], buffer: list[str]) -> None:

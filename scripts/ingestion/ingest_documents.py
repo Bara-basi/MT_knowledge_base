@@ -11,9 +11,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.services.chunking.splitter import save_chunks, split_items
+from app.services.chunking.splitter import load_items_from_txt
 from app.services.embedding import (
     EmbeddingService,
     default_bm25_model_file,
+    load_chunks,
     load_bm25_embedding_function,
 )
 from app.services.parser.parser import parse_document
@@ -244,11 +246,9 @@ def prepare_document(
     file_path: Path,
     *,
     image_analysis_workers: int,
+    rebuild: bool = True,
+    parse: bool = True,
 ) -> PreparedDocument:
-    parsed_items = parse_document(
-        file_path,
-        image_analysis_workers=image_analysis_workers,
-    )
     document_name = file_path.stem
     processing_dir = Path("data") / "processing" / document_name
 
@@ -256,8 +256,25 @@ def prepare_document(
     chunk_file = processing_dir / "chunk" / f"{document_name}.chunks.json"
     embedding_file = processing_dir / "embedding" / f"{document_name}.embeddings.json"
 
-    chunks = split_items(parsed_items, source_file=file_path)
-    save_chunks(chunks, chunk_file)
+    if not rebuild and chunk_file.exists():
+        chunks = load_chunks(chunk_file)
+    else:
+        if not parse:
+            if not txt_file.exists():
+                raise FileNotFoundError(
+                    f"Parsed txt file is required when parse is disabled: {txt_file}"
+                )
+            parsed_items = load_items_from_txt(txt_file)
+        elif not rebuild and txt_file.exists():
+            parsed_items = load_items_from_txt(txt_file)
+        else:
+            parsed_items = parse_document(
+                file_path,
+                image_analysis_workers=image_analysis_workers,
+            )
+
+        chunks = split_items(parsed_items, source_file=file_path)
+        save_chunks(chunks, chunk_file)
 
     return PreparedDocument(
         file_path=file_path,
@@ -305,13 +322,15 @@ def embed_prepared_document(
     flush: bool,
     bm25_model,
     bm25_model_file: Path | None,
+    rebuild: bool = True,
 ) -> IngestionResult:
-    embedding_service.embed_chunk_file(
-        prepared.chunk_file,
-        prepared.embedding_file,
-        bm25_model=bm25_model,
-        bm25_model_file=bm25_model_file,
-    )
+    if rebuild or not prepared.embedding_file.exists():
+        embedding_service.embed_chunk_file(
+            prepared.chunk_file,
+            prepared.embedding_file,
+            bm25_model=bm25_model,
+            bm25_model_file=bm25_model_file,
+        )
 
     upsert_count = 0
     if vector_store_service is not None:

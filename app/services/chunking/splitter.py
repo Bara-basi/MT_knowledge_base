@@ -9,16 +9,23 @@ from typing import Any
 
 try:
     from app.models.chunk import Chunk
+    from app.services.data_clean import clean_items
 except ModuleNotFoundError:
     import sys
 
     sys.path.append(str(Path(__file__).resolve().parents[3]))
     from app.models.chunk import Chunk
+    from app.services.data_clean import clean_items
 
 
 ITEM_LINE_PATTERN = re.compile(r"^\[(?P<type>[^\]]+)]\s+\[(?P<style>[^\]]+)]\s*(?P<text>.*)$")
 DESCRIPTION_PATTERN = re.compile(r"^(?P<value>.*?)（(?P<description>.*)）$")
-IMG_TAG_PATTERN = re.compile(r'(?s)<img\s+data-index="(?P<index>\d+)">(?P<body>.*?)</img>')
+IMG_TAG_PATTERN = re.compile(r'(?s)<img\s+index="(?P<index>\d+)">(?P<body>.*?)</img>')
+LINK_TAG_PATTERN = re.compile(r'(?s)<a\s+index="(?P<index>\d+)">.*?</a>')
+ASSET_TAG_PATTERN = re.compile(
+    r'(?s)<(?P<tag>img|a)\s+index="(?P<index>\d+)">(?P<body>.*?)</(?P=tag)>'
+)
+LINK_MARKER_PATTERN = re.compile(r"\{\{[^{}\r\n]*\}\}")
 NUMBERING_PATTERN = re.compile(
     r"(?im)(?P<prefix>^|[\n\r]+|[ \t\u3000]+)"
     r"(?P<marker>"
@@ -104,6 +111,7 @@ def load_items_from_txt(txt_file: str | Path) -> list[dict[str, str]]:
 
 
 def split_items(items: list[dict[str, str]], *, source_file: Path | None = None) -> list[Chunk]:
+    items = clean_items(items)
     chunks: list[Chunk] = []
     state = ChunkState()
     heading_path: dict[int, str] = {}
@@ -145,7 +153,7 @@ def split_items(items: list[dict[str, str]], *, source_file: Path | None = None)
             _append_table_chunk(chunks, state, item, heading_path, document_metadata, item_index, pending_table_title)
             pending_table_title = ""
         else:
-            state.lines.append(text)
+            state.lines.append(_strip_link_markers(text))
 
     _flush_chunk(chunks, state, document_metadata)
     return _merge_short_text_chunks(chunks)
@@ -206,15 +214,16 @@ def _append_image(state: ChunkState, item: dict[str, str], item_index: int) -> N
 
 def _append_link(state: ChunkState, item: dict[str, str], item_index: int) -> None:
     description = item.get("description") or item.get("text", "")
-    state.lines.append(f"链接：{description}")
     if item.get("url"):
         state.links.append(_link_metadata(description, item["url"], item_index))
+        state.lines.append(_format_link_tag(item_index, description))
 
 
 def _append_link_ref(state: ChunkState, item: dict[str, str], item_index: int) -> None:
     description = item.get("description") or item.get("text", "")
     if description and item.get("url"):
         state.links.append(_link_metadata(description, item["url"], item_index))
+        state.lines.append(_format_link_tag(item_index, description))
 
 
 def _append_table_chunk(
@@ -454,7 +463,7 @@ def _split_content_for_limit(content: str, chunk_type: str) -> list[str]:
     if len(content) <= MAX_CHUNK_CHARS:
         return [content]
 
-    if chunk_type == "text" and _has_img_tag(content):
+    if chunk_type == "text" and _has_asset_tag(content):
         return _split_tagged_text_content(content)
 
     if chunk_type == "table" or _looks_like_json(content):
@@ -465,19 +474,26 @@ def _split_content_for_limit(content: str, chunk_type: str) -> list[str]:
     return _split_plain_text_content(content)
 
 
-def _has_img_tag(text: str) -> bool:
-    return IMG_TAG_PATTERN.search(text) is not None
+def _has_asset_tag(text: str) -> bool:
+    return ASSET_TAG_PATTERN.search(text) is not None
 
 
 def _split_tagged_text_content(content: str) -> list[str]:
     chunks: list[str] = []
     cursor = 0
 
-    for match in IMG_TAG_PATTERN.finditer(content):
+    for match in ASSET_TAG_PATTERN.finditer(content):
         before = content[cursor : match.start()].strip()
         if before:
             chunks.extend(_split_plain_text_content(before))
-        chunks.extend(_split_img_tag_block(match.group(0), match.group("index"), match.group("body")))
+        chunks.extend(
+            _split_asset_tag_block(
+                match.group(0),
+                match.group("tag"),
+                match.group("index"),
+                match.group("body"),
+            )
+        )
         cursor = match.end()
 
     after = content[cursor:].strip()
@@ -486,11 +502,14 @@ def _split_tagged_text_content(content: str) -> list[str]:
     return [chunk for chunk in chunks if chunk.strip()]
 
 
-def _split_img_tag_block(block: str, image_index: str, body: str) -> list[str]:
+def _split_asset_tag_block(block: str, tag: str, asset_index: str, body: str) -> list[str]:
     if len(block) <= MAX_CHUNK_CHARS:
         return [block.strip()]
 
-    open_tag = f'<img data-index="{image_index}">'
+    if tag != "img":
+        return [block.strip()]
+
+    open_tag = f'<img index="{asset_index}">'
     close_tag = "</img>"
     max_body_chars = MAX_CHUNK_CHARS - len(open_tag) - len(close_tag)
     if max_body_chars <= MIN_CHUNK_CHARS:
@@ -733,11 +752,32 @@ def _split_path_leaf(path: str) -> tuple[str, str]:
 
 def _format_image_description_tag(item_index: int, description: str) -> str:
     safe_description = str(description).replace("</img>", "<／img>")
-    return f'<img data-index="{item_index}">图片：{safe_description}</img>'
+    return f'<img index="{item_index}">图片：{safe_description}</img>'
+
+
+def _format_link_tag(item_index: int, description: str) -> str:
+    safe_description = str(description).replace("</a>", "<／a>")
+    return f'<a index="{item_index}">链接：{safe_description}</a>'
+
+
+def _strip_link_markers(text: str) -> str:
+    return LINK_MARKER_PATTERN.sub("", text).strip()
 
 
 def _metadata_for_chunk_content(metadata: dict[str, Any], content: str) -> dict[str, Any]:
     chunk_metadata = dict(metadata)
+    if "links" in chunk_metadata:
+        link_indexes = _link_indexes_in_content(content)
+        links = [
+            dict(item)
+            for item in _metadata_list(chunk_metadata.get("links"))
+            if _metadata_item_index(item) in link_indexes
+        ]
+        if links:
+            chunk_metadata["links"] = _dedupe_assets(links, "link_path")
+        else:
+            chunk_metadata.pop("links", None)
+
     if "imgs" not in chunk_metadata:
         return chunk_metadata
 
@@ -757,6 +797,13 @@ def _metadata_for_chunk_content(metadata: dict[str, Any], content: str) -> dict[
 def _image_indexes_in_content(content: str) -> set[int]:
     indexes: set[int] = set()
     for match in IMG_TAG_PATTERN.finditer(content):
+        indexes.add(int(match.group("index")))
+    return indexes
+
+
+def _link_indexes_in_content(content: str) -> set[int]:
+    indexes: set[int] = set()
+    for match in LINK_TAG_PATTERN.finditer(content):
         indexes.add(int(match.group("index")))
     return indexes
 

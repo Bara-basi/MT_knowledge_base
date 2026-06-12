@@ -1,7 +1,8 @@
 import re
 
 from app.services.chunking.splitter import split_items
-from app.services.embedding import _format_content_for_embedding
+from app.models.chunk import Chunk
+from app.services.embedding import EmbeddingService, _format_content_for_embedding
 from app.services.parser.word_parser import format_extracted_items
 
 
@@ -95,7 +96,7 @@ def test_image_metadata_stays_with_image_description_after_split() -> None:
     image_chunks = [chunk for chunk in chunks if "<img " in chunk.content]
     non_image_chunks = [chunk for chunk in chunks if "<img " not in chunk.content]
     assert len(image_chunks) == 1
-    assert re.fullmatch(r'<img data-index="\d+">图片：点击保存按钮完成提交。</img>', image_chunks[0].content)
+    assert re.fullmatch(r'<img index="\d+">图片：点击保存按钮完成提交。</img>', image_chunks[0].content)
     assert image_chunks[0].metadata["imgs"][0]["img_path"] == "data/processing/demo/img/image_0001.png"
     assert all("imgs" not in chunk.metadata for chunk in non_image_chunks)
 
@@ -116,12 +117,67 @@ def test_long_image_description_keeps_tags_and_image_metadata_on_each_piece() ->
     )
 
     assert len(chunks) > 1
-    assert all(re.match(r'<img data-index="\d+">', chunk.content) for chunk in chunks)
+    assert all(re.match(r'<img index="\d+">', chunk.content) for chunk in chunks)
     assert all(chunk.content.endswith("</img>") for chunk in chunks)
     assert all(chunk.metadata["imgs"][0]["img_path"] == "data/processing/demo/img/image_0002.png" for chunk in chunks)
 
 
 def test_img_tags_are_removed_from_embedding_text() -> None:
-    content = '<img data-index="3">图片：点击保存按钮完成提交。</img>'
+    content = '<img index="3">图片：点击保存按钮完成提交。</img>'
 
     assert _format_content_for_embedding(content) == "点击保存按钮完成提交。"
+
+
+def test_link_markers_become_indexed_tags_with_embedding_link_text() -> None:
+    chunks = split_items(
+        [
+            {"type": "paragraph", "style": "标题 1", "text": "工具链接"},
+            {"type": "paragraph", "style": "正文", "text": "秀米：{{秀米网站链接}}"},
+            {
+                "type": "link_ref",
+                "style": "链接",
+                "text": "https://xiumi.us/#/",
+                "url": "https://xiumi.us/#/",
+                "description": "秀米网站链接",
+            },
+        ]
+    )
+
+    assert len(chunks) == 1
+    assert chunks[0].content == '秀米：\n<a index="2">链接：秀米网站链接</a>'
+    assert chunks[0].metadata["links"] == [
+        {
+            "index": 2,
+            "link_name": "秀米网站链接",
+            "link_path": "https://xiumi.us/#/",
+        }
+    ]
+    assert _format_content_for_embedding(chunks[0].content) == "秀米：\n秀米网站链接"
+
+
+def test_embedding_text_uses_file_name_stem_path_and_content_only() -> None:
+    chunk = Chunk(
+        content="正文内容",
+        metadata={
+            "file_name": "产品手册.docx",
+            "file_path": "data/raw/产品手册.docx",
+            "path": "章节\\小节",
+            "file_id": "file_123",
+            "links": [{"link_name": "链接名", "link_path": "https://example.com"}],
+        },
+    )
+
+    assert EmbeddingService().build_embedding_text(chunk) == "产品手册 章节\\小节 正文内容"
+
+
+def test_table_embedding_text_uses_json_array_rows() -> None:
+    content = '[{"制造商":"Pfaudler","总部地点":"美国"},{"制造商":"De Dietrich Process Systems","总部地点":"法国"}]'
+    chunk = Chunk(
+        content=content,
+        metadata={"file_name": "供应商.xlsx", "path": "供应商\\玻璃衬里反应釜"},
+    )
+
+    assert EmbeddingService().build_embedding_text(chunk) == (
+        '供应商 供应商\\玻璃衬里反应釜 '
+        '[["制造商","总部地点"],["Pfaudler","美国"],["De Dietrich Process Systems","法国"]]'
+    )

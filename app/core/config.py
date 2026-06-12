@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -24,6 +25,16 @@ def _get_first_env(*names: str, default: str = "") -> str:
     return default
 
 
+def _env_optional_float(name: str, default: float | None) -> float | None:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value = value.strip()
+    if not value:
+        return None
+    return float(value)
+
+
 @dataclass(frozen=True)
 class Settings:
     """Runtime settings loaded from environment variables."""
@@ -43,6 +54,7 @@ class Settings:
     milvus_index_ef_construction: int = int(
         os.getenv("MILVUS_INDEX_EF_CONSTRUCTION", "200")
     )
+    milvus_search_ef: int = int(os.getenv("MILVUS_SEARCH_EF", "64"))
 
     postgres_host: str = os.getenv("POSTGRES_HOST", "localhost")
     postgres_port: int = int(os.getenv("POSTGRES_PORT", "5432"))
@@ -82,6 +94,19 @@ class Settings:
     embedding_normalize: bool = (
         os.getenv("EMBEDDING_NORMALIZE", "true").lower() == "true"
     )
+    jieba_expanded_vocab_file: str = os.getenv(
+        "JIEBA_EXPANDED_VOCAB_FILE",
+        os.getenv(
+            "JIEBA_EXPAND_VOCAB_FILE",
+            str(Path("data") / "vocab" / "expanded_vocab.csv"),
+        ),
+    )
+    jieba_expanded_vocab_freq: int = int(
+        os.getenv(
+            "JIEBA_EXPANDED_VOCAB_FREQ",
+            os.getenv("JIEBA_EXPAND_VOCAB_FREQ", "100000"),
+        )
+    )
 
     reranker_model_name: str = os.getenv(
         "RERANKER_MODEL_NAME",
@@ -92,6 +117,15 @@ class Settings:
     reranker_device: str | None = os.getenv("RERANKER_DEVICE") or embedding_device
     reranker_batch_size: int = int(os.getenv("RERANKER_BATCH_SIZE", "8"))
     reranker_max_length: int = int(os.getenv("RERANKER_MAX_LENGTH", "512"))
+    rerank_normalize_scores: bool = _env_bool("RERANK_NORMALIZE_SCORES", True)
+    rerank_sigmoid_scale: float = float(os.getenv("RERANK_SIGMOID_SCALE", "1.0"))
+    rerank_score_threshold: float | None = _env_optional_float(
+        "RERANK_SCORE_THRESHOLD",
+        0.1,
+    )
+    rerank_score_cliff_delta: float = float(
+        os.getenv("RERANK_SCORE_CLIFF_DELTA", "0.7")
+    )
     retrieval_recall_multiplier: int = int(
         os.getenv("RETRIEVAL_RECALL_MULTIPLIER", "5")
     )

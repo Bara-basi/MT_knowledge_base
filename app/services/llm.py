@@ -8,7 +8,7 @@ import httpx
 
 
 DEFAULT_SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
-DEFAULT_SILICONFLOW_MODEL = "Pro/moonshotai/Kimi-K2.5"
+DEFAULT_SILICONFLOW_MODEL = "Pro/moonshotai/Kimi-K2.6"
 
 
 class LLMConfigError(RuntimeError):

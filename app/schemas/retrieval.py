@@ -7,7 +7,12 @@ from pydantic import BaseModel, Field
 
 class FlowRetrievalRequest(BaseModel):
     query: str = Field(..., min_length=1, description="User question.")
-    limit: int = Field(5, ge=1, le=50, description="Number of chunks to return.")
+    limit: int = Field(
+        15,
+        ge=1,
+        le=50,
+        description="Maximum number of chunks to return.",
+    )
     document_name: str | None = Field(
         None,
         description="Optional document hint kept for client compatibility; BM25 uses the global model by default.",
@@ -23,16 +28,24 @@ class FlowRetrievalRequest(BaseModel):
         description="Hybrid recall candidate count before reranking.",
     )
     rerank: bool = Field(True, description="Whether to use reranker after recall.")
+    debug: bool = Field(
+        False,
+        description="Whether to include retrieval debug scores in each chunk.",
+    )
 
 
 class FlowRetrievedChunk(BaseModel):
-    id: str
-    order: int
+    chunk_id: str
     content: str
-    file_id: str | None = None
+    chunk_index: int | None = None
+    chunk_type: str = ""
+    file_name: str = ""
+    file_path: str = ""
     path: str = ""
     links: list[dict[str, Any]] | None = None
     imgs: list[dict[str, Any]] | None = None
+    rerank_score: float | None = None
+    normalized_rerank_score: float | None = None
 
 
 class FlowRetrievalResponse(BaseModel):

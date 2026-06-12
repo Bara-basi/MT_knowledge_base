@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ class RetrievalResult:
     chunk_index: int | None = None
     recall_score: float | None = None
     rerank_score: float | None = None
+    normalized_rerank_score: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -33,6 +35,7 @@ class RetrievalResult:
             "score": self.score,
             "recall_score": self.recall_score,
             "rerank_score": self.rerank_score,
+            "normalized_rerank_score": self.normalized_rerank_score,
             "file_id": self.file_id,
             "chunk_index": self.chunk_index,
             "content": self.content,
@@ -62,7 +65,7 @@ class RetrievalService:
     def search(
         self,
         query: str,
-        limit: int = 5,
+        limit: int = 15,
         bm25_model_file: str | Path | None = None,
         recall_limit: int | None = None,
         rerank: bool = True,
@@ -78,13 +81,14 @@ class RetrievalService:
             bm25_model_path,
         )
         ensure_chunk_collection(self.client, self.config)
+        dense_search_ef = self._dense_search_ef(recall_limit)
 
         dense_request = AnnSearchRequest(
             data=[query_vector],
             anns_field="vector",
             param={
                 "metric_type": self.config.metric_type,
-                "params": {"ef": 64},
+                "params": {"ef": dense_search_ef},
             },
             limit=recall_limit,
         )
@@ -108,7 +112,13 @@ class RetrievalService:
         results = [_to_retrieval_result(hit) for hit in raw_results[0]]
         if not rerank or not results:
             return results[:limit]
-        return self._rerank_results(query, results)[:limit]
+        return self._filter_reranked_results(
+            self._rerank_results(query, results),
+            max_results=limit,
+        )
+
+    def _dense_search_ef(self, recall_limit: int) -> int:
+        return max(settings.milvus_search_ef, recall_limit + 1)
 
     def _rerank_results(
         self,
@@ -129,7 +139,8 @@ class RetrievalService:
                 continue
             result.recall_score = result.score
             result.rerank_score = rerank_score.score
-            result.score = rerank_score.score
+            result.normalized_rerank_score = _normalize_score(rerank_score.score)
+            result.score = result.normalized_rerank_score
             ranked_results.append(result)
 
         ranked_ids = {result.id for result in ranked_results}
@@ -137,6 +148,58 @@ class RetrievalService:
             result for result in results if result.id not in ranked_ids
         )
         return ranked_results
+
+    def _filter_reranked_results(
+        self,
+        results: list[RetrievalResult],
+        max_results: int,
+    ) -> list[RetrievalResult]:
+        filtered = _filter_by_rerank_score_threshold(results)
+        filtered = _cut_at_score_cliff(filtered)
+        return filtered[:max_results]
+
+
+def _normalize_score(score: float) -> float:
+    if not settings.rerank_normalize_scores:
+        return score
+
+    scale = settings.rerank_sigmoid_scale
+    if scale <= 0:
+        scale = 1.0
+    value = float(score) / scale
+    if value >= 0:
+        return 1.0 / (1.0 + math.exp(-value))
+    exp_value = math.exp(value)
+    return exp_value / (1.0 + exp_value)
+
+
+def _filter_by_rerank_score_threshold(
+    results: list[RetrievalResult],
+) -> list[RetrievalResult]:
+    threshold = settings.rerank_score_threshold
+    if threshold is None:
+        return results
+    return [
+        result
+        for result in results
+        if result.normalized_rerank_score is not None
+        and result.normalized_rerank_score >= threshold
+    ]
+
+
+def _cut_at_score_cliff(results: list[RetrievalResult]) -> list[RetrievalResult]:
+    cliff_delta = settings.rerank_score_cliff_delta
+    if cliff_delta <= 0 or len(results) < 2:
+        return results
+
+    for index, (left, right) in enumerate(zip(results, results[1:]), start=1):
+        left_score = left.normalized_rerank_score
+        right_score = right.normalized_rerank_score
+        if left_score is None or right_score is None:
+            continue
+        if left_score - right_score >= cliff_delta:
+            return results[:index]
+    return results
 
 
 def _to_retrieval_result(hit: dict[str, Any]) -> RetrievalResult:
@@ -160,4 +223,3 @@ def get_retrieval_service() -> RetrievalService:
     if retrieval_service is None:
         retrieval_service = RetrievalService()
     return retrieval_service
-

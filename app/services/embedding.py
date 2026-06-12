@@ -4,6 +4,7 @@ import json
 import os
 import re
 import tempfile
+import csv
 from functools import cached_property
 from pathlib import Path
 from typing import Any, Iterable
@@ -15,24 +16,13 @@ from app.core.config import settings
 from app.models.chunk import Chunk
 
 
-EMBEDDING_METADATA_EXCLUDE_KEYS = {
-    "links",
-    "imgs",
-    "file_id",
-    "chunk_id",
-    "chunk_index",
-    "embedding_model",
-    "embedding_dimension",
-    "bm25_model",
-    "bm25_language",
-    "bm25_dimension",
-}
 REQUIRED_MODEL_FILES = {"config.json", "pytorch_model.bin"}
 REQUIRED_TOKENIZER_FILES = {"tokenizer.json", "tokenizer_config.json", "vocab.txt"}
 BM25_LANGUAGE = "zh"
 REMOTE_EMBEDDING_MAX_CHARS = 500
 GLOBAL_BM25_MODEL_FILE = Path("data") / "processing" / "global.bm25.json"
-IMG_TAG_PATTERN = re.compile(r'(?s)<img\s+data-index="\d+">(?P<body>.*?)</img>')
+IMG_TAG_PATTERN = re.compile(r'(?s)<img\s+index="\d+">(?P<body>.*?)</img>')
+LINK_TAG_PATTERN = re.compile(r'(?s)<a\s+index="\d+">(?P<body>.*?)</a>')
 
 
 class EmbeddingDependencyError(RuntimeError):
@@ -301,16 +291,11 @@ class EmbeddingService:
         return {int(key): value for key, value in vectors[0].items()}
 
     def build_embedding_text(self, chunk: Chunk) -> str:
-        metadata_lines = [
-            f"{key}: {_format_metadata_value(value)}"
-            for key, value in chunk.metadata.items()
-            if key not in EMBEDDING_METADATA_EXCLUDE_KEYS and _has_value(value)
-        ]
-        parts = []
-        if metadata_lines:
-            parts.append("metadata:\n" + "\n".join(metadata_lines))
-        parts.append("content:\n" + _format_content_for_embedding(chunk.content))
-        return "\n\n".join(parts)
+        return _join_embedding_parts(
+            _file_name_stem(chunk.metadata.get("file_name")),
+            chunk.metadata.get("path"),
+            _format_content_for_embedding(chunk.content),
+        )
 
     def embed_chunks(
         self,
@@ -453,8 +438,50 @@ def build_bm25_embedding_function():
             'pip install "pymilvus[model]"'
         ) from exc
 
+    load_jieba_expanded_vocab(
+        settings.jieba_expanded_vocab_file,
+        freq=settings.jieba_expanded_vocab_freq,
+    )
     analyzer = build_default_analyzer(language=BM25_LANGUAGE)
     return BM25EmbeddingFunction(analyzer)
+
+
+def load_jieba_expanded_vocab(
+    vocab_file: str | Path | None = None,
+    *,
+    freq: int | None = None,
+) -> int:
+    path = Path(vocab_file or settings.jieba_expanded_vocab_file)
+    if not path.exists():
+        return 0
+
+    try:
+        import jieba
+    except ImportError as exc:
+        raise EmbeddingDependencyError(
+            "jieba is required to load the expanded BM25 vocabulary."
+        ) from exc
+
+    word_freq = freq if freq is not None else settings.jieba_expanded_vocab_freq
+    loaded = 0
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            word = str(row.get("word") or row.get("词") or "").strip()
+            tag = str(row.get("pos") or row.get("词性") or "nz").strip() or "nz"
+            if not word:
+                continue
+            jieba.add_word(word, freq=word_freq, tag=tag)
+            loaded += 1
+    return loaded
+
+
+def load_jieba_expand_vocab(
+    vocab_file: str | Path | None = None,
+    *,
+    freq: int | None = None,
+) -> int:
+    return load_jieba_expanded_vocab(vocab_file, freq=freq)
 
 
 def load_bm25_embedding_function(model_file: str | Path):
@@ -561,31 +588,43 @@ def _ensure_bm25_model_loadable_on_windows(model_file: str | Path) -> Path:
     return safe_path
 
 
-def _format_metadata_value(value: Any) -> str:
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False, sort_keys=True)
-    return str(value)
-
-
 def _format_content_for_embedding(content: str) -> str:
     text = content.strip()
     if not text:
         return text
 
-    text = _strip_img_tags_for_embedding(text)
+    text = _strip_asset_tags_for_embedding(text)
     table_data = _parse_json_table_content(text)
     if table_data is None:
         return text
     return _format_table_data_for_embedding(table_data)
 
 
-def _strip_img_tags_for_embedding(text: str) -> str:
-    def replace(match: re.Match[str]) -> str:
+def _join_embedding_parts(*values: Any) -> str:
+    return " ".join(str(value).strip() for value in values if _has_value(value))
+
+
+def _file_name_stem(file_name: Any) -> str:
+    value = str(file_name or "").strip()
+    if not value:
+        return ""
+    return Path(value).stem
+
+
+def _strip_asset_tags_for_embedding(text: str) -> str:
+    def replace_image(match: re.Match[str]) -> str:
         body = re.sub(r"\s+", " ", match.group("body")).strip()
         body = re.sub(r"^图片\s*[:：]\s*", "", body)
         return body
 
-    return IMG_TAG_PATTERN.sub(replace, text)
+    def replace_link(match: re.Match[str]) -> str:
+        body = re.sub(r"\s+", " ", match.group("body")).strip()
+        body = re.sub(r"^链接\s*[:：]\s*", "", body)
+        return body
+
+    text = IMG_TAG_PATTERN.sub(replace_image, text)
+    text = LINK_TAG_PATTERN.sub(replace_link, text)
+    return text.strip()
 
 
 def _parse_json_table_content(text: str) -> Any | None:
@@ -615,20 +654,18 @@ def _looks_like_table_data(value: Any) -> bool:
 def _format_table_data_for_embedding(table_data: Any) -> str:
     if all(isinstance(row, dict) for row in table_data):
         headers = _ordered_table_headers(table_data)
-        lines = ["table_headers: " + " | ".join(headers)]
-        for index, row in enumerate(table_data, start=1):
-            values = [_stringify_table_cell(row.get(header, "")) for header in headers]
-            lines.append(f"row_{index}: " + " | ".join(values))
-        return "\n".join(lines)
+        rows = [
+            [_table_cell_for_embedding(row.get(header, "")) for header in headers]
+            for row in table_data
+        ]
+        return json.dumps([headers, *rows], ensure_ascii=False, separators=(",", ":"))
 
-    lines = []
     rows = list(table_data)
-    if rows and all(isinstance(cell, str) for cell in rows[0]):
-        lines.append("table_headers: " + " | ".join(_stringify_table_cell(cell) for cell in rows[0]))
-        rows = rows[1:]
-    for index, row in enumerate(rows, start=1):
-        lines.append(f"row_{index}: " + " | ".join(_stringify_table_cell(cell) for cell in row))
-    return "\n".join(lines)
+    normalized_rows = [
+        [_table_cell_for_embedding(cell) for cell in row]
+        for row in rows
+    ]
+    return json.dumps(normalized_rows, ensure_ascii=False, separators=(",", ":"))
 
 
 def _ordered_table_headers(rows: list[dict[str, Any]]) -> list[str]:
@@ -643,10 +680,12 @@ def _ordered_table_headers(rows: list[dict[str, Any]]) -> list[str]:
     return headers
 
 
-def _stringify_table_cell(value: Any) -> str:
+def _table_cell_for_embedding(value: Any) -> Any:
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    return str(value).strip()
+    if value is None:
+        return ""
+    return value
 
 
 def _has_value(value: Any) -> bool:

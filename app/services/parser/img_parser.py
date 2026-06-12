@@ -17,7 +17,7 @@ except ModuleNotFoundError:
     from llm import LLMAPIError, LLMConfigError, LLMClient, get_llm_client
 
 
-IMAGE_ANALYSIS_MODEL = "Pro/moonshotai/Kimi-K2.5"
+IMAGE_ANALYSIS_MODEL = "Pro/moonshotai/Kimi-K2.6"
 ALREADY_SATISFIED = "already satisfied"
 VIDEO_LIKE_SUFFIXES = {".gif", ".git"}
 
