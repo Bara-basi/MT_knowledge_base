@@ -78,17 +78,14 @@ def test_flow_chunk_includes_scores_only_when_debug_enabled() -> None:
         score=0.88,
         content="debug",
         metadata={},
-        rerank_score=2.0,
-        normalized_rerank_score=0.880797,
+        rerank_score=0.88,
     )
 
     normal_payload = _to_flow_chunk(result).model_dump(exclude_none=True)
     debug_payload = _to_flow_chunk(result, debug=True).model_dump(exclude_none=True)
 
     assert "rerank_score" not in normal_payload
-    assert "normalized_rerank_score" not in normal_payload
-    assert debug_payload["rerank_score"] == 2.0
-    assert debug_payload["normalized_rerank_score"] == 0.880797
+    assert debug_payload["rerank_score"] == 0.88
 
 
 def test_flow_results_sort_by_chunk_id_ascending() -> None:
@@ -105,14 +102,14 @@ def test_flow_results_sort_by_chunk_id_ascending() -> None:
     ]
 
 
-def test_rerank_filter_normalizes_scores_and_cuts_low_score_tail() -> None:
+def test_rerank_filter_uses_raw_scores_and_cuts_low_score_tail() -> None:
     service = RetrievalService.__new__(RetrievalService)
     service.rerank_service = FakeRerankService(
         [
-            RerankScore(id="a", score=8.0),
-            RerankScore(id="b", score=-1.0),
-            RerankScore(id="c", score=-3.0),
-            RerankScore(id="d", score=-4.0),
+            RerankScore(id="a", score=0.95),
+            RerankScore(id="b", score=0.91),
+            RerankScore(id="c", score=0.2),
+            RerankScore(id="d", score=0.1),
         ]
     )
     results = [
@@ -127,9 +124,8 @@ def test_rerank_filter_normalizes_scores_and_cuts_low_score_tail() -> None:
         max_results=15,
     )
 
-    assert [result.id for result in ranked] == ["a"]
-    assert ranked[0].rerank_score == 8.0
-    assert round(ranked[0].normalized_rerank_score or 0, 4) == 0.9997
+    assert [result.id for result in ranked] == ["a", "b"]
+    assert [result.rerank_score for result in ranked] == [0.95, 0.91]
 
 
 def test_rerank_limit_is_maximum_after_filters() -> None:

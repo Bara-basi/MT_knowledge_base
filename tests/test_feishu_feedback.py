@@ -36,6 +36,7 @@ def test_feishu_feedback_card_updates_until_final_answer(monkeypatch) -> None:
         return None
 
     monkeypatch.setattr(feishu, "_feedback_interval_seconds", 0.05)
+    monkeypatch.setattr(feishu, "_n8n_progress_polling_configured", lambda: False)
     monkeypatch.setattr(feishu, "_load_feedback_texts", lambda: ["step 1", "step 2", "step 3"])
     monkeypatch.setattr(feishu, "_try_send_feishu_markdown_message", fake_send_message)
     monkeypatch.setattr(feishu, "_try_update_feishu_markdown_message", fake_update_message)
@@ -96,6 +97,7 @@ def test_feishu_answer_schedules_evaluation_after_reply(monkeypatch) -> None:
         raise AssertionError("evaluation should be scheduled after the Feishu reply")
 
     monkeypatch.setattr(feishu, "_load_feedback_texts", lambda: ["step 1"])
+    monkeypatch.setattr(feishu, "_n8n_progress_polling_configured", lambda: False)
     monkeypatch.setattr(feishu, "_try_send_feishu_markdown_message", fake_send_message)
     monkeypatch.setattr(feishu, "_try_update_feishu_markdown_message", fake_update_message)
     monkeypatch.setattr(feishu, "ask_knowledge_base", fake_ask_knowledge_base)
@@ -159,3 +161,150 @@ def test_feishu_card_images_render_half_width_without_changing_text_width(monkey
             },
         }
     ]
+
+
+def test_feishu_card_normalizes_unsupported_markdown_for_old_card_renderer() -> None:
+    markdown = (
+        "### 标题\n\n"
+        "> 引用内容\n\n"
+        "| 列一 | 列二 |\n"
+        "| --- | --- |\n"
+        "| A | B |\n\n"
+        "---\n"
+    )
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    assert card["elements"] == [
+        {
+            "tag": "markdown",
+            "content": "**标题**\n\n▌ 引用内容\n\n1. 列一: A；列二: B\n\n────────",
+        }
+    ]
+
+
+def test_n8n_progress_stage_advances_after_rewrite_finishes() -> None:
+    execution = {
+        "workflowData": {
+            "nodes": [
+                {
+                    "id": "54aad033-e2d6-4b2a-aa73-027f9fc839ce",
+                    "name": "renamed rewrite node",
+                }
+            ]
+        },
+        "data": {
+            "resultData": {
+                "runData": {
+                    "renamed rewrite node": [
+                        {"startTime": "2026-06-15T01:00:00.000Z"}
+                    ]
+                }
+            }
+        },
+    }
+
+    assert feishu._extract_n8n_progress_stage(execution) == "retrieving"
+
+
+def test_n8n_progress_stage_advances_after_retrieval_node_finishes() -> None:
+    execution = {
+        "workflowData": {
+            "nodes": [
+                {
+                    "id": "53fb4814-a531-4422-b6ba-f38c3db5a9a4",
+                    "name": "renamed retrieval node",
+                }
+            ]
+        },
+        "data": {
+            "resultData": {
+                "runData": {
+                    "renamed retrieval node": [
+                        {"startTime": "2026-06-15T01:00:00.000Z"}
+                    ]
+                }
+            }
+        },
+    }
+
+    assert feishu._extract_n8n_progress_stage(execution) == "reranking"
+
+
+def test_n8n_progress_stage_advances_after_context_formatting_finishes() -> None:
+    execution = {
+        "workflowData": {
+            "nodes": [
+                {
+                    "id": "6113024b-7803-4ce2-930a-c893ff1ff7fd",
+                    "name": "renamed context formatter",
+                }
+            ]
+        },
+        "data": {
+            "resultData": {
+                "runData": {
+                    "renamed context formatter": [
+                        {"startTime": "2026-06-15T01:00:00.000Z"}
+                    ]
+                }
+            }
+        },
+    }
+
+    assert feishu._extract_n8n_progress_stage(execution) == "generating"
+
+
+def test_n8n_progress_stage_ignores_fast_chat_node() -> None:
+    execution = {
+        "data": {
+            "resultData": {
+                "runData": {
+                    "无关闲聊": [
+                        {"startTime": "2026-06-15T01:00:00.000Z"}
+                    ]
+                }
+            }
+        },
+    }
+
+    assert feishu._extract_n8n_progress_stage(execution) is None
+
+
+def test_n8n_progress_stage_returns_latest_mapped_stage() -> None:
+    execution = {
+        "workflowData": {
+            "nodes": [
+                {
+                    "id": "54aad033-e2d6-4b2a-aa73-027f9fc839ce",
+                    "name": "renamed rewrite node",
+                },
+                {
+                    "id": "53fb4814-a531-4422-b6ba-f38c3db5a9a4",
+                    "name": "renamed retrieval entry",
+                },
+                {
+                    "id": "6113024b-7803-4ce2-930a-c893ff1ff7fd",
+                    "name": "renamed context formatter",
+                },
+            ]
+        },
+        "data": {
+            "resultData": {
+                "runData": {
+                    "renamed rewrite node": [
+                        {"startTime": "2026-06-15T01:00:00.000Z"}
+                    ],
+                    "renamed retrieval entry": [
+                        {"startTime": "2026-06-15T01:00:02.000Z"}
+                    ],
+                    "renamed context formatter": [
+                        {"startTime": "2026-06-15T01:00:04.000Z"}
+                    ],
+                }
+            }
+        },
+    }
+
+    assert feishu._extract_n8n_progress_stage(execution) == "generating"

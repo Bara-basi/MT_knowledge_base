@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import unicodedata
 from typing import Any
 
 import httpx
@@ -23,11 +25,14 @@ async def query_knowledge_base(request: QueryRequest) -> QueryResponse:
 
 async def ask_knowledge_base(request: QueryRequest) -> QueryResponse:
     """Forward a user question to the n8n QA agent and normalize its answer."""
-    payload = N8nQueryRequest(**request.model_dump()).model_dump()
+    sanitized_question = sanitize_question_for_n8n(request.question)
+    n8n_request = request.model_copy(update={"question": sanitized_question})
+    payload = N8nQueryRequest(**n8n_request.model_dump()).model_dump()
     print(
         "[query] n8n request "
         f"url={settings.n8n_query_webhook_url!r} "
-        f"question={request.question!r} "
+        f"question={sanitized_question!r} "
+        f"question_sanitized={sanitized_question != request.question!r} "
         f"user_id={request.user_id!r} "
         f"session_id={request.session_id!r} "
         f"conversation_id={request.conversation_id!r} "
@@ -79,6 +84,33 @@ async def ask_knowledge_base(request: QueryRequest) -> QueryResponse:
         question=request.question,
         answer=answer,
     )
+
+
+def sanitize_question_for_n8n(question: str) -> str:
+    """Normalize user text before n8n inserts it into workflow JSON expressions."""
+    text = unicodedata.normalize("NFC", question)
+    text = text.replace("\ufeff", "").replace("\u200b", "")
+    text = text.replace("\u200c", "").replace("\u200d", "")
+    text = text.replace("\u2028", "\n").replace("\u2029", "\n")
+
+    # Some clients or intermediate nodes send literal JSON escapes in plain text.
+    # Collapsing these keeps the natural question while avoiding n8n hand-built JSON failures.
+    replacements = {
+        r"\"": '"',
+        r"\'": "'",
+        r"\/": "/",
+        r"\n": " ",
+        r"\r": " ",
+        r"\t": " ",
+        r"\b": " ",
+        r"\f": " ",
+    }
+    for escaped, replacement in replacements.items():
+        text = text.replace(escaped, replacement)
+
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    text = re.sub(r"[ \t\r\n]+", " ", text)
+    return text.strip()
 
 
 def _parse_n8n_response(response: httpx.Response) -> Any:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import json
 import logging
 import mimetypes
@@ -30,6 +31,61 @@ _pseudo_tag_pattern = re.compile(r"<(img|link)>(.*?)</\1>", re.IGNORECASE | re.D
 _feedback_interval_seconds = 1.5
 _feedback_texts_cache: list[str] | None = None
 
+_n8n_progress_texts = {
+    "understanding": "🤔 正在理解问题...",
+    "retrieving": "🔍 正在检索知识库...",
+    "reranking": "📚 正在整理资料...",
+    "generating": "✍️ 正在组织答案...",
+}
+_n8n_progress_stage_order = ("understanding", "retrieving", "reranking", "generating")
+
+# n8n execution data is only reliable after a node appears in runData.
+# These mappings intentionally treat a completed node as the signal for the next stage.
+_n8n_completed_node_stage_ids = {
+    "understanding": set(),
+    "retrieving": {
+        "54aad033-e2d6-4b2a-aa73-027f9fc839ce",
+    },
+    "reranking": {
+        "53fb4814-a531-4422-b6ba-f38c3db5a9a4",
+        "18cbcf26-ca22-443f-aa09-3c4173e60983",
+        "a509efe4-649b-4cf7-b32a-5ad35a45a60a",
+        "8a620c5f-620a-481a-96f1-880f595ebb74",
+        "db342e62-4de8-486a-9443-ddfafc679b77",
+    },
+    "generating": {
+        "6113024b-7803-4ce2-930a-c893ff1ff7fd",
+    },
+}
+_n8n_completed_node_stage_names = {
+    "understanding": set(),
+    "retrieving": {"query转写", "query_rewrite"},
+    "reranking": {
+        "前往问答检索",
+        "前往问答检索1",
+        "前往问答检索2",
+        "前往问答检索3",
+        "Code in JavaScript",
+    },
+    "generating": {"合并item并去重"},
+}
+
+# Current-node mappings are kept as a fallback for long-running nodes that are visible mid-run.
+_n8n_current_node_stage_ids = {
+    "understanding": set(),
+    "retrieving": {
+        "c3d63d86-f11f-4e59-a65e-d6d12c630a5f",
+        "4370e0b8-88ff-459f-8625-5a48e20edb06",
+    },
+    "reranking": {"be8a0486-cbf0-4b6e-95c2-9dc978abcbc7"},
+    "generating": {"8ab6c4c9-2d7a-4835-b80b-1caadbca9561"},
+}
+_n8n_current_node_stage_names = {
+    "understanding": set(),
+    "retrieving": {"When Executed by Another Workflow", "HTTP Request"},
+    "reranking": {"合并多路召回结果"},
+    "generating": {"检索回答", "检索问答"},
+}
 
 @router.post("/events")
 async def handle_feishu_events(
@@ -153,6 +209,7 @@ async def _answer_feishu_message(
     feedback_message_id: str | None = None
     feedback_stop_event: asyncio.Event | None = None
     feedback_task: asyncio.Task[None] | None = None
+    n8n_started_after = time.time()
     if message_id:
         feedback_message_id = await _try_send_feishu_markdown_message(
             chat_id=chat_id,
@@ -168,13 +225,12 @@ async def _answer_feishu_message(
             )
         if feedback_message_id:
             feedback_stop_event = asyncio.Event()
-            feedback_task = asyncio.create_task(
-                _run_feishu_feedback_loop(
-                    message_id=feedback_message_id,
-                    stop_event=feedback_stop_event,
-                    event_id=event_id,
-                    dedupe_key=dedupe_key,
-                )
+            feedback_task = _create_feishu_feedback_task(
+                message_id=feedback_message_id,
+                stop_event=feedback_stop_event,
+                event_id=event_id,
+                dedupe_key=dedupe_key,
+                n8n_started_after=n8n_started_after,
             )
             _debug(
                 "feedback card started",
@@ -192,13 +248,12 @@ async def _answer_feishu_message(
         )
         if feedback_message_id:
             feedback_stop_event = asyncio.Event()
-            feedback_task = asyncio.create_task(
-                _run_feishu_feedback_loop(
-                    message_id=feedback_message_id,
-                    stop_event=feedback_stop_event,
-                    event_id=event_id,
-                    dedupe_key=dedupe_key,
-                )
+            feedback_task = _create_feishu_feedback_task(
+                message_id=feedback_message_id,
+                stop_event=feedback_stop_event,
+                event_id=event_id,
+                dedupe_key=dedupe_key,
+                n8n_started_after=n8n_started_after,
             )
             _debug(
                 "feedback card started",
@@ -422,6 +477,297 @@ async def _run_feishu_answer_evaluation(
         )
 
 
+def _create_feishu_feedback_task(
+    *,
+    message_id: str,
+    stop_event: asyncio.Event,
+    event_id: str | None,
+    dedupe_key: str | None,
+    n8n_started_after: float,
+) -> asyncio.Task[None]:
+    if _n8n_progress_polling_configured():
+        return asyncio.create_task(
+            _run_n8n_progress_feedback_loop(
+                message_id=message_id,
+                stop_event=stop_event,
+                event_id=event_id,
+                dedupe_key=dedupe_key,
+                started_after=n8n_started_after,
+            )
+        )
+
+    return asyncio.create_task(
+        _run_feishu_feedback_loop(
+            message_id=message_id,
+            stop_event=stop_event,
+            event_id=event_id,
+            dedupe_key=dedupe_key,
+        )
+    )
+
+
+def _n8n_progress_polling_configured() -> bool:
+    return (
+        settings.n8n_progress_enabled
+        and bool(settings.n8n_api_key)
+        and bool(_get_n8n_api_base_url())
+    )
+
+
+def _get_n8n_api_base_url() -> str:
+    if settings.n8n_api_base_url:
+        return settings.n8n_api_base_url
+
+    webhook_url = settings.n8n_query_webhook_url
+    marker = "/webhook"
+    marker_index = webhook_url.find(marker)
+    if marker_index > 0:
+        return webhook_url[:marker_index].rstrip("/")
+    return ""
+
+
+async def _run_n8n_progress_feedback_loop(
+    *,
+    message_id: str,
+    stop_event: asyncio.Event,
+    event_id: str | None,
+    dedupe_key: str | None,
+    started_after: float,
+) -> None:
+    last_stage = "understanding"
+    last_text = _n8n_progress_texts[last_stage]
+    poll_interval = max(settings.n8n_progress_poll_interval, 0.2)
+
+    try:
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=poll_interval)
+                break
+            except asyncio.TimeoutError:
+                pass
+
+            stage = await _poll_n8n_progress_stage(started_after=started_after)
+            if stage and _n8n_stage_index(stage) > _n8n_stage_index(last_stage):
+                last_stage = stage
+                text = _n8n_progress_texts[stage]
+                if text != last_text:
+                    last_text = text
+                    await _try_update_feishu_markdown_message(
+                        message_id,
+                        text,
+                        log_content=False,
+                    )
+    except Exception as exc:  # noqa: BLE001 - progress feedback should never block answers.
+        _warn(
+            "n8n progress polling failed; falling back to legacy feedback loop",
+            event_id=event_id,
+            dedupe_key=dedupe_key,
+            error=str(exc),
+        )
+        await _run_feishu_feedback_loop(
+            message_id=message_id,
+            stop_event=stop_event,
+            event_id=event_id,
+            dedupe_key=dedupe_key,
+        )
+
+
+async def _poll_n8n_progress_stage(*, started_after: float) -> str | None:
+    base_url = _get_n8n_api_base_url()
+    if not base_url:
+        return None
+
+    workflow_ids = [
+        workflow_id
+        for workflow_id in (
+            settings.n8n_query_workflow_id,
+            settings.n8n_retrieval_workflow_id,
+        )
+        if workflow_id
+    ]
+    if not workflow_ids:
+        return None
+
+    timeout = httpx.Timeout(
+        timeout=min(max(settings.n8n_progress_poll_interval, 1.0), 10.0),
+        connect=min(settings.n8n_query_connect_timeout, 5.0),
+    )
+    headers = {"X-N8N-API-KEY": settings.n8n_api_key}
+
+    async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
+        executions: list[dict[str, Any]] = []
+        for workflow_id in workflow_ids:
+            executions.extend(
+                await _list_recent_n8n_executions(
+                    client=client,
+                    base_url=base_url,
+                    workflow_id=workflow_id,
+                    started_after=started_after,
+                )
+            )
+
+        stage: str | None = None
+        for execution in sorted(
+            executions,
+            key=lambda item: _parse_n8n_time(item.get("startedAt")) or 0.0,
+        ):
+            execution_id = execution.get("id")
+            if not execution_id:
+                continue
+
+            detail = await _get_n8n_execution_detail(
+                client=client,
+                base_url=base_url,
+                execution_id=str(execution_id),
+            )
+            detail_stage = _extract_n8n_progress_stage(detail)
+            if detail_stage and (
+                stage is None or _n8n_stage_index(detail_stage) > _n8n_stage_index(stage)
+            ):
+                stage = detail_stage
+
+        return stage
+
+
+async def _list_recent_n8n_executions(
+    *,
+    client: httpx.AsyncClient,
+    base_url: str,
+    workflow_id: str,
+    started_after: float,
+) -> list[dict[str, Any]]:
+    response = await client.get(
+        f"{base_url}/api/v1/executions",
+        params={"workflowId": workflow_id, "limit": 10, "includeData": "false"},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    items = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        return []
+
+    threshold = started_after - max(settings.n8n_progress_lookback_seconds, 0)
+    recent_items: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        started_at = _parse_n8n_time(item.get("startedAt"))
+        if started_at is None or started_at >= threshold:
+            recent_items.append(item)
+    return recent_items
+
+
+async def _get_n8n_execution_detail(
+    *,
+    client: httpx.AsyncClient,
+    base_url: str,
+    execution_id: str,
+) -> dict[str, Any]:
+    response = await client.get(
+        f"{base_url}/api/v1/executions/{execution_id}",
+        params={"includeData": "true"},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return payload if isinstance(payload, dict) else {}
+
+
+def _extract_n8n_progress_stage(execution: dict[str, Any]) -> str | None:
+    stage: str | None = None
+    for node_id, node_name, _started_at in _iter_n8n_executed_nodes(execution):
+        node_stage = _stage_for_n8n_node(node_id=node_id, node_name=node_name)
+        if node_stage and (
+            stage is None or _n8n_stage_index(node_stage) > _n8n_stage_index(stage)
+        ):
+            stage = node_stage
+    return stage
+
+
+def _iter_n8n_executed_nodes(
+    execution: dict[str, Any],
+) -> list[tuple[str | None, str, float | None]]:
+    data = execution.get("data") if isinstance(execution.get("data"), dict) else {}
+    result_data = data.get("resultData") if isinstance(data.get("resultData"), dict) else {}
+    run_data = result_data.get("runData") if isinstance(result_data.get("runData"), dict) else {}
+    if not run_data:
+        return []
+
+    nodes = _extract_n8n_workflow_nodes(execution)
+    nodes_by_name = {
+        str(node.get("name")): node
+        for node in nodes
+        if isinstance(node, dict) and node.get("name")
+    }
+
+    executed_nodes: list[tuple[str | None, str, float | None]] = []
+    for node_name, runs in run_data.items():
+        if not isinstance(node_name, str):
+            continue
+        node = nodes_by_name.get(node_name) or {}
+        started_at = _first_n8n_node_start_time(runs)
+        executed_nodes.append((node.get("id"), node_name, started_at))
+
+    return sorted(executed_nodes, key=lambda item: item[2] or 0.0)
+
+
+def _extract_n8n_workflow_nodes(execution: dict[str, Any]) -> list[dict[str, Any]]:
+    execution_data = execution.get("data") if isinstance(execution.get("data"), dict) else {}
+    candidates = [
+        execution.get("workflowData"),
+        execution_data.get("workflowData"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, dict) and isinstance(candidate.get("nodes"), list):
+            return [node for node in candidate["nodes"] if isinstance(node, dict)]
+    return []
+
+
+def _first_n8n_node_start_time(runs: Any) -> float | None:
+    if not isinstance(runs, list):
+        return None
+    starts = [
+        _parse_n8n_time(run.get("startTime"))
+        for run in runs
+        if isinstance(run, dict)
+    ]
+    starts = [value for value in starts if value is not None]
+    return min(starts) if starts else None
+
+
+def _stage_for_n8n_node(*, node_id: Any, node_name: str) -> str | None:
+    node_id_text = str(node_id) if node_id else ""
+    for stage in _n8n_progress_stage_order:
+        if node_id_text and node_id_text in _n8n_completed_node_stage_ids[stage]:
+            return stage
+        if node_name in _n8n_completed_node_stage_names[stage]:
+            return stage
+    for stage in _n8n_progress_stage_order:
+        if node_id_text and node_id_text in _n8n_current_node_stage_ids[stage]:
+            return stage
+        if node_name in _n8n_current_node_stage_names[stage]:
+            return stage
+    return None
+
+
+def _n8n_stage_index(stage: str | None) -> int:
+    if stage in _n8n_progress_stage_order:
+        return _n8n_progress_stage_order.index(stage)
+    return -1
+
+
+def _parse_n8n_time(value: Any) -> float | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
 async def _run_feishu_feedback_loop(
     *,
     message_id: str,
@@ -464,10 +810,10 @@ def _load_feedback_texts() -> list[str]:
         return _feedback_texts_cache
 
     fallback_texts = [
-        "正在理解问题...",
-        "正在检索知识库...",
-        "正在筛选相关资料...",
-        "正在组织答案...",
+        "🤔 正在理解问题...",
+        "🔍 正在检索知识库...",
+        "📚 正在整理资料...",
+        "✍️ 正在组织答案...",
     ]
     feedback_path = Path("data") / "UI反馈.json"
     try:
@@ -493,11 +839,11 @@ def _load_feedback_texts() -> list[str]:
 
 def _get_initial_feedback_text() -> str:
     feedback_texts = _load_feedback_texts()
-    return feedback_texts[0] if feedback_texts else "正在处理..."
+    return feedback_texts[0] if feedback_texts else "🤔 正在理解问题..."
 
 
 def _get_failed_feedback_text() -> str:
-    fallback_text = "处理失败，请稍后重试"
+    fallback_text = "⚠️ 处理失败，请稍后重试"
     feedback_path = Path("data") / "UI反馈.json"
     try:
         raw_data = json.loads(feedback_path.read_text(encoding="utf-8"))
@@ -988,16 +1334,26 @@ def _normalize_card_markdown(markdown: str) -> str:
     lines = markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     normalized_lines: list[str] = []
     in_code_block = False
+    index = 0
 
-    for line in lines:
+    while index < len(lines):
+        line = lines[index]
         stripped = line.strip()
         if stripped.startswith("```"):
             in_code_block = not in_code_block
             normalized_lines.append(line)
+            index += 1
             continue
 
         if in_code_block:
             normalized_lines.append(line)
+            index += 1
+            continue
+
+        table_end = _find_markdown_table_end(lines, index)
+        if table_end is not None:
+            normalized_lines.extend(_markdown_table_to_card_lines(lines[index:table_end]))
+            index = table_end
             continue
 
         heading = re.match(r"^(#{1,6})\s+(.+?)\s*$", stripped)
@@ -1005,11 +1361,89 @@ def _normalize_card_markdown(markdown: str) -> str:
             level = len(heading.group(1))
             title = heading.group(2).strip()
             normalized_lines.extend(_heading_to_card_markdown(level, title))
+            index += 1
+            continue
+
+        if _is_markdown_horizontal_rule(stripped):
+            normalized_lines.append("────────")
+            index += 1
+            continue
+
+        if stripped.startswith(">"):
+            normalized_lines.append(_normalize_blockquote_line(line))
+            index += 1
             continue
 
         normalized_lines.append(_normalize_card_markdown_line(line))
+        index += 1
 
     return "\n".join(normalized_lines).strip() or " "
+
+
+def _find_markdown_table_end(lines: list[str], start_index: int) -> int | None:
+    if start_index + 1 >= len(lines):
+        return None
+    header = lines[start_index].strip()
+    separator = lines[start_index + 1].strip()
+    if not _looks_like_markdown_table_row(header):
+        return None
+    if not _is_markdown_table_separator(separator):
+        return None
+
+    end = start_index + 2
+    while end < len(lines) and _looks_like_markdown_table_row(lines[end].strip()):
+        end += 1
+    return end
+
+
+def _looks_like_markdown_table_row(line: str) -> bool:
+    return line.startswith("|") and line.endswith("|") and line.count("|") >= 2
+
+
+def _is_markdown_table_separator(line: str) -> bool:
+    if not _looks_like_markdown_table_row(line):
+        return False
+    cells = _split_markdown_table_row(line)
+    if not cells:
+        return False
+    return all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells)
+
+
+def _split_markdown_table_row(line: str) -> list[str]:
+    trimmed = line.strip().strip("|")
+    return [cell.strip() for cell in trimmed.split("|")]
+
+
+def _markdown_table_to_card_lines(table_lines: list[str]) -> list[str]:
+    headers = _split_markdown_table_row(table_lines[0])
+    rows = [_split_markdown_table_row(line) for line in table_lines[2:]]
+    normalized_rows: list[str] = []
+
+    for row_index, row in enumerate(rows, start=1):
+        if not any(cell.strip() for cell in row):
+            continue
+        pairs = []
+        for column_index, header in enumerate(headers):
+            value = row[column_index].strip() if column_index < len(row) else ""
+            if not value:
+                continue
+            label = header.strip() or f"列{column_index + 1}"
+            pairs.append(f"{label}: {value}")
+        if pairs:
+            normalized_rows.append(f"{row_index}. " + "；".join(pairs))
+
+    return normalized_rows or ["；".join(headers)]
+
+
+def _is_markdown_horizontal_rule(stripped_line: str) -> bool:
+    return bool(re.fullmatch(r"[-*_]\s*[-*_]\s*[-*_\s]*", stripped_line)) and len(
+        stripped_line.replace(" ", "")
+    ) >= 3
+
+
+def _normalize_blockquote_line(line: str) -> str:
+    quote = re.sub(r"^\s*>\s?", "", line).strip()
+    return f"▌ {quote}" if quote else "▌"
 
 
 def _normalize_card_markdown_line(line: str) -> str:
@@ -1210,4 +1644,3 @@ def _warn(message: str, **fields: Any) -> None:
     )
     suffix = f" {field_text}" if field_text else ""
     print(f"[feishu][warn] {message}{suffix}", flush=True)
-

@@ -98,7 +98,6 @@ def _to_flow_chunk(
         links=_normalize_links(metadata.get("links")),
         imgs=_normalize_images(metadata.get("imgs")),
         rerank_score=result.rerank_score if debug else None,
-        normalized_rerank_score=result.normalized_rerank_score if debug else None,
     )
 
 

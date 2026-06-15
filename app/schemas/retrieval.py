@@ -45,7 +45,6 @@ class FlowRetrievedChunk(BaseModel):
     links: list[dict[str, Any]] | None = None
     imgs: list[dict[str, Any]] | None = None
     rerank_score: float | None = None
-    normalized_rerank_score: float | None = None
 
 
 class FlowRetrievalResponse(BaseModel):

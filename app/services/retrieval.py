@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +26,6 @@ class RetrievalResult:
     chunk_index: int | None = None
     recall_score: float | None = None
     rerank_score: float | None = None
-    normalized_rerank_score: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -35,7 +33,6 @@ class RetrievalResult:
             "score": self.score,
             "recall_score": self.recall_score,
             "rerank_score": self.rerank_score,
-            "normalized_rerank_score": self.normalized_rerank_score,
             "file_id": self.file_id,
             "chunk_index": self.chunk_index,
             "content": self.content,
@@ -139,8 +136,7 @@ class RetrievalService:
                 continue
             result.recall_score = result.score
             result.rerank_score = rerank_score.score
-            result.normalized_rerank_score = _normalize_score(rerank_score.score)
-            result.score = result.normalized_rerank_score
+            result.score = rerank_score.score
             ranked_results.append(result)
 
         ranked_ids = {result.id for result in ranked_results}
@@ -159,20 +155,6 @@ class RetrievalService:
         return filtered[:max_results]
 
 
-def _normalize_score(score: float) -> float:
-    if not settings.rerank_normalize_scores:
-        return score
-
-    scale = settings.rerank_sigmoid_scale
-    if scale <= 0:
-        scale = 1.0
-    value = float(score) / scale
-    if value >= 0:
-        return 1.0 / (1.0 + math.exp(-value))
-    exp_value = math.exp(value)
-    return exp_value / (1.0 + exp_value)
-
-
 def _filter_by_rerank_score_threshold(
     results: list[RetrievalResult],
 ) -> list[RetrievalResult]:
@@ -182,8 +164,7 @@ def _filter_by_rerank_score_threshold(
     return [
         result
         for result in results
-        if result.normalized_rerank_score is not None
-        and result.normalized_rerank_score >= threshold
+        if result.rerank_score is not None and result.rerank_score >= threshold
     ]
 
 
@@ -193,8 +174,8 @@ def _cut_at_score_cliff(results: list[RetrievalResult]) -> list[RetrievalResult]
         return results
 
     for index, (left, right) in enumerate(zip(results, results[1:]), start=1):
-        left_score = left.normalized_rerank_score
-        right_score = right.normalized_rerank_score
+        left_score = left.rerank_score
+        right_score = right.rerank_score
         if left_score is None or right_score is None:
             continue
         if left_score - right_score >= cliff_delta:

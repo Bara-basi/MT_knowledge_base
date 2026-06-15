@@ -117,11 +117,9 @@ class Settings:
     reranker_device: str | None = os.getenv("RERANKER_DEVICE") or embedding_device
     reranker_batch_size: int = int(os.getenv("RERANKER_BATCH_SIZE", "8"))
     reranker_max_length: int = int(os.getenv("RERANKER_MAX_LENGTH", "512"))
-    rerank_normalize_scores: bool = _env_bool("RERANK_NORMALIZE_SCORES", True)
-    rerank_sigmoid_scale: float = float(os.getenv("RERANK_SIGMOID_SCALE", "1.0"))
     rerank_score_threshold: float | None = _env_optional_float(
         "RERANK_SCORE_THRESHOLD",
-        0.0,
+        0,
     )
     rerank_score_cliff_delta: float = float(
         os.getenv("RERANK_SCORE_CLIFF_DELTA", "1")
@@ -156,6 +154,15 @@ class Settings:
     )
     n8n_query_timeout: float = float(os.getenv("N8N_QUERY_TIMEOUT", "600"))
     n8n_query_connect_timeout: float = float(os.getenv("N8N_QUERY_CONNECT_TIMEOUT", "10"))
+    n8n_api_base_url: str = os.getenv("N8N_API_BASE_URL", "").rstrip("/")
+    n8n_api_key: str = os.getenv("N8N_API_KEY", "")
+    n8n_progress_enabled: bool = _env_bool("N8N_PROGRESS_ENABLED", True)
+    n8n_progress_poll_interval: float = float(os.getenv("N8N_PROGRESS_POLL_INTERVAL", "1.5"))
+    n8n_progress_lookback_seconds: float = float(
+        os.getenv("N8N_PROGRESS_LOOKBACK_SECONDS", "5")
+    )
+    n8n_query_workflow_id: str = os.getenv("N8N_QUERY_WORKFLOW_ID", "hukvjyqCh8K1Nk4U")
+    n8n_retrieval_workflow_id: str = os.getenv("N8N_RETRIEVAL_WORKFLOW_ID", "n6AyYe8rRw36dmOz")
 
     feishu_app_id: str = _get_first_env("FEISHU_APP_ID", "LARK_APP_ID")
     feishu_app_secret: str = _get_first_env("FEISHU_APP_SECRET", "LARK_APP_SECRET")
