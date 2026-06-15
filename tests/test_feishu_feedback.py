@@ -127,7 +127,7 @@ def test_feishu_answer_schedules_evaluation_after_reply(monkeypatch) -> None:
     ]
 
 
-def test_feishu_card_images_render_half_width_without_changing_text_width(monkeypatch) -> None:
+def test_feishu_card_images_render_as_json2_image_elements(monkeypatch) -> None:
     async def fake_upload_local_image(_raw_path: str, _token: str) -> str:
         return "img_v3_key"
 
@@ -141,29 +141,31 @@ def test_feishu_card_images_render_half_width_without_changing_text_width(monkey
     )
 
     card = json.loads(content)
-    assert card["elements"][0] == {"tag": "markdown", "content": "before"}
-    assert card["elements"][2] == {"tag": "markdown", "content": "after"}
+    assert card["schema"] == "2.0"
+    elements = card["body"]["elements"]
+    assert elements[0] == {
+        "tag": "markdown",
+        "content": "before",
+        "text_align": "left",
+        "text_size": "normal_v2",
+    }
+    assert elements[1] == {
+        "tag": "img",
+        "img_key": "img_v3_key",
+        "alt": {
+            "tag": "plain_text",
+            "content": "screenshot.png",
+        },
+    }
+    assert elements[2] == {
+        "tag": "markdown",
+        "content": "after",
+        "text_align": "left",
+        "text_size": "normal_v2",
+    }
 
-    image_container = card["elements"][1]
-    assert image_container["tag"] == "column_set"
-    assert image_container["flex_mode"] == "bisect"
-    assert [column["weight"] for column in image_container["columns"]] == [1, 1]
 
-    image_column, spacer_column = image_container["columns"]
-    assert spacer_column["elements"] == []
-    assert image_column["elements"] == [
-        {
-            "tag": "img",
-            "img_key": "img_v3_key",
-            "alt": {
-                "tag": "plain_text",
-                "content": "screenshot.png",
-            },
-        }
-    ]
-
-
-def test_feishu_card_normalizes_unsupported_markdown_for_old_card_renderer() -> None:
+def test_feishu_card_preserves_markdown_for_json2_renderer() -> None:
     markdown = (
         "### 标题\n\n"
         "> 引用内容\n\n"
@@ -176,13 +178,149 @@ def test_feishu_card_normalizes_unsupported_markdown_for_old_card_renderer() -> 
     content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
 
     card = json.loads(content)
-    assert card["elements"] == [
+    assert card["schema"] == "2.0"
+    assert card["body"]["elements"] == [
         {
             "tag": "markdown",
-            "content": "**标题**\n\n▌ 引用内容\n\n1. 列一: A；列二: B\n\n────────",
+            "content": markdown.strip(),
+            "text_align": "left",
+            "text_size": "normal_v2",
         }
     ]
 
+
+def test_feishu_card_rewrites_reference_links_and_appends_source_panel() -> None:
+    expected_url = feishu._build_document_download_url(
+        "data/raw/结构化word文档/造船行业.docx"
+    )
+    markdown = (
+        "结论内容。"
+        "[片段1,造船行业发展情况说明](data/raw/结构化word文档/造船行业.docx)"
+    )
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    elements = card["body"]["elements"]
+    assert elements[0] == {
+        "tag": "markdown",
+        "content": f"结论内容。[[1]]({expected_url})",
+        "text_align": "left",
+        "text_size": "normal_v2",
+    }
+    assert elements[1] == {
+        "tag": "collapsible_panel",
+        "expanded": False,
+        "header": {"title": {"tag": "plain_text", "content": "知识来源"}},
+        "elements": [
+            {
+                "tag": "markdown",
+                "content": f"[[1]]({expected_url}) 片段1,造船行业发展情况说明",
+                "text_align": "left",
+                "text_size": "normal_v2",
+            }
+        ],
+    }
+
+
+def test_feishu_card_rewrites_legacy_reference_title_links() -> None:
+    expected_url = feishu._build_document_download_url(
+        "data/raw/结构化word文档/造船行业.docx"
+    )
+    markdown = (
+        "结论内容。"
+        '[片段1](data/raw/结构化word文档/造船行业.docx "片段1,造船行业发展情况说明")'
+    )
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    elements = card["body"]["elements"]
+    assert elements[0]["content"] == f"结论内容。[[1]]({expected_url})"
+    assert (
+        elements[1]["elements"][0]["content"]
+        == f"[[1]]({expected_url}) 片段1,造船行业发展情况说明"
+    )
+
+
+def test_feishu_card_rewrites_reference_links_with_windows_paths_and_spaces() -> None:
+    markdown = (
+        "提醒客户：如果有工厂承诺春节期间还能快速交货，很可能是为了接单而过分承诺，"
+        "后期反而容易出问题。"
+        '[片段13](data\\raw\\一般类、文本居多的word文档\\销售工具包 - 订单谈判.docx '
+        '"片段13,客户无法理解为什么春节假期的交货期要延长这么久怎么办")'
+    )
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    elements = card["body"]["elements"]
+    expected_url = feishu._build_document_download_url(
+        "data\\raw\\一般类、文本居多的word文档\\销售工具包 - 订单谈判.docx"
+    )
+    assert elements[0]["content"].endswith(f"[[1]]({expected_url})")
+    assert (
+        elements[1]["elements"][0]["content"]
+        == f"[[1]]({expected_url}) 片段13,客户无法理解为什么春节假期的交货期要延长这么久怎么办"
+    )
+
+
+def test_feishu_card_deduplicates_reference_sources_and_strips_model_source_section() -> None:
+    expected_url = feishu._build_document_download_url("data/raw/a.docx")
+    markdown = (
+        "第一段。[片段7,来源甲](data/raw/a.docx)\n"
+        "第二段。[片段2,重复来源](data/raw/a.docx)\n\n"
+        "---\n"
+        "知识来源：\n"
+        "[片段7,来源甲](data/raw/a.docx)"
+    )
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    elements = card["body"]["elements"]
+    assert elements[0]["content"] == f"第一段。[[1]]({expected_url})\n第二段。[[1]]({expected_url})"
+    assert elements[1]["elements"][0]["content"] == f"[[1]]({expected_url}) 片段7,来源甲"
+
+
+def test_feishu_card_deduplicates_adjacent_repeated_reference_links() -> None:
+    expected_url = feishu._build_document_download_url("data/raw/a.docx")
+    markdown = (
+        "结论内容。"
+        "[片段7,来源甲](data/raw/a.docx)"
+        "[片段2,重复来源](data/raw/a.docx)"
+    )
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    elements = card["body"]["elements"]
+    assert elements[0]["content"] == f"结论内容。[[1]]({expected_url})"
+    assert elements[1]["elements"][0]["content"] == f"[[1]]({expected_url}) 片段7,来源甲"
+
+
+def test_feishu_card_deduplicates_adjacent_existing_short_references() -> None:
+    existing_url = feishu._build_document_download_url("data/raw/a.docx")
+    markdown = f"结论内容。[[1]]({existing_url})[[1]]({existing_url})"
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    assert card["body"]["elements"][0]["content"] == f"结论内容。[[1]]({existing_url})"
+
+
+def test_feishu_card_keeps_regular_markdown_links_and_code_blocks() -> None:
+    markdown = (
+        "[普通链接](https://example.com)\n"
+        "```\n"
+        "[片段1,不要处理](demo.docx)\n"
+        "```"
+    )
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    assert card["body"]["elements"][0]["content"] == markdown
 
 def test_n8n_progress_stage_advances_after_rewrite_finishes() -> None:
     execution = {

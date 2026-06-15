@@ -7,8 +7,10 @@ import logging
 import mimetypes
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlencode
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
@@ -28,8 +30,25 @@ _tenant_access_token_expires_at = 0.0
 _seen_message_keys: dict[str, float] = {}
 _seen_message_ttl_seconds = 3600
 _pseudo_tag_pattern = re.compile(r"<(img|link)>(.*?)</\1>", re.IGNORECASE | re.DOTALL)
+_markdown_link_pattern = re.compile(r"(?<!!)\[([^\]\n]+)\]\(([^)\n]+)\)")
+_markdown_link_title_pattern = re.compile(r"^(?P<url>.+?)\s+\"(?P<title>[^\"]*)\"\s*$")
+_reference_link_label_pattern = re.compile(r"^\s*(片段\s*\d+)\s*[,，:：]\s*(.+?)\s*$")
+_adjacent_reference_pattern = re.compile(
+    r"(?P<ref>\[\[(?P<number>\d+)\]\]\([^)]+\))(?P<separator>\s*)(?P=ref)"
+)
+_source_section_heading_pattern = re.compile(
+    r"^\s*(?:#{1,6}\s*)?(?:\*\*)?(知识来源|引用文献|参考来源)(?:\*\*)?\s*[:：]?\s*$"
+)
 _feedback_interval_seconds = 1.5
 _feedback_texts_cache: list[str] | None = None
+
+
+@dataclass
+class _ReferenceSource:
+    number: int
+    label: str
+    description: str
+    url: str
 
 _n8n_progress_texts = {
     "understanding": "🤔 正在理解问题...",
@@ -1243,16 +1262,23 @@ def _extract_feishu_message_id(result: dict[str, Any]) -> str | None:
 
 
 async def _build_feishu_card_content(markdown_text: str, token: str) -> str:
+    markdown_text, reference_sources = _rewrite_reference_links(markdown_text)
     elements = await _build_feishu_card_elements(markdown_text, token)
+    if reference_sources:
+        elements.append(_build_reference_sources_panel(reference_sources))
     if not elements:
         elements = [_build_markdown_element(" ")]
 
     return json.dumps(
         {
+            "schema": "2.0",
             "config": {
-                "wide_screen_mode": True,
+                "update_multi": True,
             },
-            "elements": elements,
+            "body": {
+                "direction": "vertical",
+                "elements": elements,
+            },
         },
         ensure_ascii=False,
     )
@@ -1275,7 +1301,7 @@ async def _build_feishu_card_elements(markdown_text: str, token: str) -> list[di
             image_key = await _upload_local_image(value, token)
             if image_key:
                 alt_text = Path(value.replace("\\", "/")).name or "image"
-                elements.append(_build_half_width_image_element(image_key, alt_text))
+                elements.append(_build_image_element(image_key, alt_text))
 
         cursor = match.end()
 
@@ -1284,35 +1310,14 @@ async def _build_feishu_card_elements(markdown_text: str, token: str) -> list[di
     return elements
 
 
-def _build_half_width_image_element(image_key: str, alt_text: str) -> dict[str, Any]:
-    image_element = {
+def _build_image_element(image_key: str, alt_text: str) -> dict[str, Any]:
+    return {
         "tag": "img",
         "img_key": image_key,
         "alt": {
             "tag": "plain_text",
             "content": alt_text,
         },
-    }
-    return {
-        "tag": "column_set",
-        "flex_mode": "bisect",
-        "background_style": "default",
-        "columns": [
-            {
-                "tag": "column",
-                "width": "weighted",
-                "weight": 1,
-                "vertical_align": "top",
-                "elements": [image_element],
-            },
-            {
-                "tag": "column",
-                "width": "weighted",
-                "weight": 1,
-                "vertical_align": "top",
-                "elements": [],
-            },
-        ],
     }
 
 
@@ -1326,7 +1331,134 @@ def _flush_markdown_buffer(elements: list[dict[str, Any]], buffer: list[str]) ->
 def _build_markdown_element(markdown: str) -> dict[str, str]:
     return {
         "tag": "markdown",
-        "content": _normalize_card_markdown(markdown),
+        "content": markdown.strip() or " ",
+        "text_align": "left",
+        "text_size": "normal_v2",
+    }
+
+
+def _rewrite_reference_links(markdown: str) -> tuple[str, list[_ReferenceSource]]:
+    markdown = _strip_model_generated_source_section(markdown)
+    references_by_url: dict[str, _ReferenceSource] = {}
+    in_code_block = False
+
+    def replace_match(match: re.Match[str]) -> str:
+        nonlocal references_by_url
+        if in_code_block:
+            return match.group(0)
+
+        label = match.group(1).strip()
+        url, existing_title = _parse_markdown_link_destination(match.group(2))
+        reference_match = _reference_link_label_pattern.match(label)
+        if not reference_match and existing_title:
+            reference_match = _reference_link_label_pattern.match(existing_title)
+        if not reference_match:
+            return match.group(0)
+
+        normalized_url = _normalize_reference_url(url)
+        if normalized_url not in references_by_url:
+            label_text = reference_match.group(1).replace(" ", "")
+            description = existing_title or label
+            references_by_url[normalized_url] = _ReferenceSource(
+                number=len(references_by_url) + 1,
+                label=label_text,
+                description=description,
+                url=url,
+            )
+
+        source = references_by_url[normalized_url]
+        return f"[[{source.number}]]({_format_markdown_link_url(source.url)})"
+
+    rewritten_lines: list[str] = []
+    for line in markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+            rewritten_lines.append(line)
+            continue
+        rewritten_line = _markdown_link_pattern.sub(replace_match, line)
+        rewritten_lines.append(_dedupe_adjacent_reference_links(rewritten_line))
+
+    return "\n".join(rewritten_lines).strip(), list(references_by_url.values())
+
+
+def _dedupe_adjacent_reference_links(markdown: str) -> str:
+    previous = None
+    current = markdown
+    while current != previous:
+        previous = current
+        current = _adjacent_reference_pattern.sub(r"\g<ref>", current)
+    return current
+
+
+def _parse_markdown_link_destination(raw_destination: str) -> tuple[str, str]:
+    destination = raw_destination.strip()
+    title_match = _markdown_link_title_pattern.match(destination)
+    if not title_match:
+        return destination, ""
+    return title_match.group("url").strip(), title_match.group("title").strip()
+
+
+def _strip_model_generated_source_section(markdown: str) -> str:
+    lines = markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    in_code_block = False
+    cutoff: int | None = None
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        if _source_section_heading_pattern.match(stripped):
+            cutoff = _trim_source_section_separator(lines, index)
+            break
+
+    if cutoff is None:
+        return markdown
+    return "\n".join(lines[:cutoff]).rstrip()
+
+
+def _trim_source_section_separator(lines: list[str], source_index: int) -> int:
+    index = source_index
+    while index > 0 and not lines[index - 1].strip():
+        index -= 1
+    if index > 0 and re.fullmatch(r"[-*_]\s*[-*_]\s*[-*_\s]*", lines[index - 1].strip()):
+        index -= 1
+    return index
+
+
+def _normalize_reference_url(url: str) -> str:
+    return url.replace("\\", "/").strip()
+
+
+def _format_markdown_link_url(url: str) -> str:
+    return _build_document_download_url(url)
+
+
+def _build_document_download_url(raw_path: str) -> str:
+    base_url = settings.public_base_url or "http://localhost:8000"
+    normalized_path = _normalize_reference_url(raw_path)
+    query = urlencode({"path": normalized_path}, quote_via=quote)
+    return f"{base_url.rstrip('/')}/api/v1/documents/download?{query}"
+
+
+def _build_reference_sources_panel(sources: list[_ReferenceSource]) -> dict[str, Any]:
+    source_lines: list[str] = []
+    for source in sources:
+        description = source.description.strip() or source.label
+        source_lines.append(f"[[{source.number}]]({_format_markdown_link_url(source.url)}) {description}")
+
+    return {
+        "tag": "collapsible_panel",
+        "expanded": False,
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": "知识来源",
+            }
+        },
+        "elements": [_build_markdown_element("\n".join(source_lines))],
     }
 
 

@@ -50,6 +50,7 @@ services:
       FEISHU_APP_ID: ${FEISHU_APP_ID:-}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
       FEISHU_VERIFICATION_TOKEN: ${FEISHU_VERIFICATION_TOKEN:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://shopper-washable-crock.ngrok-free.dev}
     volumes:
       - ./app:/app/app
       - ./data:/app/data
