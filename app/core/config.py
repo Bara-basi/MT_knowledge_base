@@ -119,7 +119,7 @@ class Settings:
     reranker_max_length: int = int(os.getenv("RERANKER_MAX_LENGTH", "512"))
     rerank_score_threshold: float | None = _env_optional_float(
         "RERANK_SCORE_THRESHOLD",
-        0,
+        0.0004,
     )
     rerank_score_cliff_delta: float = float(
         os.getenv("RERANK_SCORE_CLIFF_DELTA", "1")
@@ -147,6 +147,23 @@ class Settings:
     )
     siliconflow_write_timeout: float = float(os.getenv("SILICONFLOW_WRITE_TIMEOUT", "60"))
     siliconflow_pool_timeout: float = float(os.getenv("SILICONFLOW_POOL_TIMEOUT", "10"))
+    immediate_feedback_model: str = os.getenv(
+        "IMMEDIATE_FEEDBACK_MODEL",
+        "deepseek-ai/DeepSeek-V4-Flash",
+    )
+    immediate_feedback_timeout: float = float(os.getenv("IMMEDIATE_FEEDBACK_TIMEOUT", "3"))
+    immediate_feedback_connect_timeout: float = float(
+        os.getenv("IMMEDIATE_FEEDBACK_CONNECT_TIMEOUT", "1")
+    )
+    immediate_feedback_max_tokens: int = int(os.getenv("IMMEDIATE_FEEDBACK_MAX_TOKENS", "80"))
+    immediate_feedback_enable_thinking: str = os.getenv(
+        "IMMEDIATE_FEEDBACK_ENABLE_THINKING",
+        "off",
+    )
+    immediate_feedback_retry_without_thinking_options: bool = _env_bool(
+        "IMMEDIATE_FEEDBACK_RETRY_WITHOUT_THINKING_OPTIONS",
+        True,
+    )
 
     n8n_query_webhook_url: str = os.getenv(
         "N8N_QUERY_WEBHOOK_URL",

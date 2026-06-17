@@ -305,6 +305,9 @@ class EmbeddingService:
         bm25_model_file: str | Path | None = None,
     ) -> list[dict[str, Any]]:
         chunk_list = list(chunks)
+        if not chunk_list:
+            return []
+
         embedding_texts = [self.build_embedding_text(chunk) for chunk in chunk_list]
         vectors = self.embed_texts(embedding_texts)
         if bm25_model is None:

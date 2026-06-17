@@ -13,7 +13,6 @@ except ModuleNotFoundError:
 
 
 URL_PATTERN = re.compile(r"https?://[^\s<>()，。；;、\"'）】]+", re.IGNORECASE)
-ATTACHMENT_LINK_PATTERN = re.compile(r"\[[^\[\]\r\n]*\.(?:pptx?|xlsx?|mp4)\]", re.IGNORECASE)
 
 
 def enrich_links(
@@ -81,7 +80,7 @@ def _log(message: str) -> None:
 
 
 def _clean_dirty_links(text: str) -> str:
-    return ATTACHMENT_LINK_PATTERN.sub("", text).strip()
+    return str(text or "").strip()
 
 
 def _get_optional_client(llm_client: LLMClient | None) -> LLMClient | None:

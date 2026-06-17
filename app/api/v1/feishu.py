@@ -9,17 +9,24 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+
+try:
+    from PIL import Image
+except Exception:  # pragma: no cover - Pillow is optional at runtime.
+    Image = None
 
 from app.api.v1.query import ask_knowledge_base
 from app.core.config import settings
 from app.schemas.query import QueryRequest
 from app.services.chat_records import create_chat_record, record_chat_answer
 from app.services.evaluate.evaluate import evaluate_answer_fallback
+from app.services.llm import LLMAPIError, LLMConfigError, LLMClient, LLMSettings
 
 
 router = APIRouter(prefix="/feishu", tags=["feishu"])
@@ -40,7 +47,12 @@ _source_section_heading_pattern = re.compile(
     r"^\s*(?:#{1,6}\s*)?(?:\*\*)?(知识来源|引用文献|参考来源)(?:\*\*)?\s*[:：]?\s*$"
 )
 _feedback_interval_seconds = 1.5
+_comfort_feedback_interval_seconds = 60.0
+_stream_update_min_interval_seconds = 0.25
+_pseudo_stream_update_delay_seconds = 0.12
 _feedback_texts_cache: list[str] | None = None
+_local_to_lark_mapping_dir = Path("data") / "metadata" / "local2lark_mapping"
+_local_to_lark_mapping_cache: dict[str, str] | None = None
 
 
 @dataclass
@@ -49,6 +61,34 @@ class _ReferenceSource:
     label: str
     description: str
     url: str
+
+
+@dataclass
+class _PendingImage:
+    image_key: str
+    alt_text: str
+    size: tuple[int, int] | None
+
+
+@dataclass
+class _FeishuFeedbackHandle:
+    state: _FeishuFeedbackState
+    stop_event: asyncio.Event
+    task: asyncio.Task[None]
+    comfort_task: asyncio.Task[None]
+
+    @property
+    def message_id(self) -> str:
+        return self.state.message_id
+
+
+@dataclass
+class _FeishuFeedbackState:
+    message_id: str
+    question: str
+    prefix_text: str
+    status_text: str
+    update_lock: asyncio.Lock
 
 _n8n_progress_texts = {
     "understanding": "🤔 正在理解问题...",
@@ -225,62 +265,15 @@ async def _answer_feishu_message(
         question_len=len(question),
     )
 
-    feedback_message_id: str | None = None
-    feedback_stop_event: asyncio.Event | None = None
-    feedback_task: asyncio.Task[None] | None = None
     n8n_started_after = time.time()
-    if message_id:
-        feedback_message_id = await _try_send_feishu_markdown_message(
-            chat_id=chat_id,
-            reply_to_message_id=message_id,
-            markdown_text=_get_initial_feedback_text(),
-            log_content=False,
-        )
-        if not feedback_message_id:
-            feedback_message_id = await _try_send_feishu_markdown_reply(
-                message_id,
-                _get_initial_feedback_text(),
-                log_content=False,
-            )
-        if feedback_message_id:
-            feedback_stop_event = asyncio.Event()
-            feedback_task = _create_feishu_feedback_task(
-                message_id=feedback_message_id,
-                stop_event=feedback_stop_event,
-                event_id=event_id,
-                dedupe_key=dedupe_key,
-                n8n_started_after=n8n_started_after,
-            )
-            _debug(
-                "feedback card started",
-                event_id=event_id,
-                message_id=message_id,
-                feedback_message_id=feedback_message_id,
-                dedupe_key=dedupe_key,
-            )
-    elif chat_id:
-        feedback_message_id = await _try_send_feishu_markdown_message(
-            chat_id=chat_id,
-            reply_to_message_id=None,
-            markdown_text=_get_initial_feedback_text(),
-            log_content=False,
-        )
-        if feedback_message_id:
-            feedback_stop_event = asyncio.Event()
-            feedback_task = _create_feishu_feedback_task(
-                message_id=feedback_message_id,
-                stop_event=feedback_stop_event,
-                event_id=event_id,
-                dedupe_key=dedupe_key,
-                n8n_started_after=n8n_started_after,
-            )
-            _debug(
-                "feedback card started",
-                event_id=event_id,
-                message_id=message_id,
-                feedback_message_id=feedback_message_id,
-                dedupe_key=dedupe_key,
-            )
+    feedback_handle_task = _schedule_initial_feishu_feedback(
+        question=question,
+        chat_id=chat_id,
+        message_id=message_id,
+        event_id=event_id,
+        dedupe_key=dedupe_key,
+        n8n_started_after=n8n_started_after,
+    )
 
     try:
         await create_chat_record(
@@ -337,6 +330,21 @@ async def _answer_feishu_message(
             answer_len=len(response.answer),
             answer_preview=_preview(response.answer),
         )
+        if _is_transient_feedback_answer(response.answer):
+            _debug(
+                "query returned transient feedback; final reply skipped",
+                event_id=event_id,
+                message_id=message_id,
+                dedupe_key=dedupe_key,
+                answer_preview=_preview(response.answer),
+            )
+            feedback_handle = await _resolve_initial_feishu_feedback(
+                feedback_handle_task,
+                wait=True,
+            )
+            await _stop_feishu_feedback_loop(feedback_handle)
+            return
+
         try:
             await record_chat_answer(
                 user_id=sender_id,
@@ -370,10 +378,11 @@ async def _answer_feishu_message(
             dedupe_key=dedupe_key,
             error=detail,
         )
-        await _stop_feishu_feedback_loop(feedback_stop_event, feedback_task)
+        feedback_handle = await _resolve_initial_feishu_feedback(feedback_handle_task, wait=False)
+        await _stop_feishu_feedback_loop(feedback_handle)
         failed_text = _get_failed_feedback_text()
-        if feedback_message_id:
-            await _try_update_feishu_markdown_message(feedback_message_id, failed_text)
+        if feedback_handle:
+            await _try_update_feishu_markdown_message(feedback_handle.message_id, failed_text)
         elif message_id:
             await _try_reply_feishu_markdown(message_id, failed_text)
         elif chat_id:
@@ -384,7 +393,8 @@ async def _answer_feishu_message(
             )
         return
 
-    await _stop_feishu_feedback_loop(feedback_stop_event, feedback_task)
+    feedback_handle = await _resolve_initial_feishu_feedback(feedback_handle_task, wait=False)
+    await _stop_feishu_feedback_loop(feedback_handle)
 
     if not message_id:
         _debug(
@@ -395,13 +405,16 @@ async def _answer_feishu_message(
         )
         return
 
-    if feedback_message_id:
-        sent = await _try_update_feishu_markdown_message(feedback_message_id, response.answer)
+    if feedback_handle:
+        sent = await _pseudo_stream_feishu_final_answer(
+            message_id=feedback_handle.message_id,
+            answer=response.answer,
+        )
     else:
-        sent_message_id = await _try_send_feishu_markdown_message(
+        sent_message_id = await _pseudo_stream_new_feishu_final_answer(
             chat_id=chat_id,
             reply_to_message_id=message_id,
-            markdown_text=response.answer,
+            answer=response.answer,
         )
         sent = sent_message_id is not None
     _debug(
@@ -496,9 +509,519 @@ async def _run_feishu_answer_evaluation(
         )
 
 
+def _schedule_initial_feishu_feedback(
+    *,
+    question: str,
+    chat_id: str | None,
+    message_id: str | None,
+    event_id: str | None,
+    dedupe_key: str | None,
+    n8n_started_after: float,
+) -> asyncio.Task[_FeishuFeedbackHandle | None] | None:
+    if not message_id and not chat_id:
+        _debug(
+            "initial feedback skipped",
+            reason="missing_message_and_chat_id",
+            event_id=event_id,
+            dedupe_key=dedupe_key,
+        )
+        return None
+
+    task = asyncio.create_task(
+        _send_initial_feishu_feedback(
+            question=question,
+            chat_id=chat_id,
+            message_id=message_id,
+            event_id=event_id,
+            dedupe_key=dedupe_key,
+            n8n_started_after=n8n_started_after,
+        )
+    )
+    task.add_done_callback(_log_initial_feishu_feedback_task_failure)
+    return task
+
+
+async def _resolve_initial_feishu_feedback(
+    task: asyncio.Task[_FeishuFeedbackHandle | None] | None,
+    *,
+    wait: bool = True,
+) -> _FeishuFeedbackHandle | None:
+    if not task:
+        return None
+    if not wait and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            return None
+    try:
+        return await task
+    except asyncio.CancelledError:
+        return None
+    except Exception as exc:  # noqa: BLE001 - feedback cannot block the final answer.
+        logger.exception("Unexpected Feishu initial feedback task failure: %s", exc)
+        return None
+
+
+def _log_initial_feishu_feedback_task_failure(
+    task: asyncio.Task[_FeishuFeedbackHandle | None],
+) -> None:
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except Exception as exc:  # noqa: BLE001 - keep background task failures visible.
+        logger.exception("Unexpected Feishu initial feedback task failure: %s", exc)
+
+
+async def _send_initial_feishu_feedback(
+    *,
+    question: str,
+    chat_id: str | None,
+    message_id: str | None,
+    event_id: str | None,
+    dedupe_key: str | None,
+    n8n_started_after: float,
+) -> _FeishuFeedbackHandle | None:
+    streamed_initial = await _send_streaming_initial_feedback_card(
+        question=question,
+        chat_id=chat_id,
+        message_id=message_id,
+    )
+    if streamed_initial is None:
+        _debug(
+            "initial feedback skipped",
+            reason="greeting_model_returned_null",
+            event_id=event_id,
+            message_id=message_id,
+            dedupe_key=dedupe_key,
+        )
+        return None
+    feedback_message_id, prefix_text, status_text = streamed_initial
+
+    if not feedback_message_id:
+        _debug(
+            "initial feedback send skipped",
+            reason="send_failed",
+            event_id=event_id,
+            message_id=message_id,
+            dedupe_key=dedupe_key,
+        )
+        return None
+
+    stop_event = asyncio.Event()
+    feedback_state = _FeishuFeedbackState(
+        message_id=feedback_message_id,
+        question=question,
+        prefix_text=prefix_text,
+        status_text=status_text,
+        update_lock=asyncio.Lock(),
+    )
+    feedback_task = _create_feishu_feedback_task(
+        state=feedback_state,
+        stop_event=stop_event,
+        event_id=event_id,
+        dedupe_key=dedupe_key,
+        n8n_started_after=n8n_started_after,
+    )
+    comfort_task = asyncio.create_task(
+        _run_feishu_comfort_feedback_loop(
+            state=feedback_state,
+            stop_event=stop_event,
+            event_id=event_id,
+            dedupe_key=dedupe_key,
+        )
+    )
+    _debug(
+        "feedback card started",
+        event_id=event_id,
+        message_id=message_id,
+        feedback_message_id=feedback_message_id,
+        dedupe_key=dedupe_key,
+    )
+    return _FeishuFeedbackHandle(
+        state=feedback_state,
+        stop_event=stop_event,
+        task=feedback_task,
+        comfort_task=comfort_task,
+    )
+
+
+async def _send_streaming_initial_feedback_card(
+    *,
+    question: str,
+    chat_id: str | None,
+    message_id: str | None,
+) -> tuple[str | None, str, str] | None:
+    status_text = _get_initial_feedback_text()
+    prefix_buffer = ""
+    feedback_message_id: str | None = None
+    last_update_at = 0.0
+
+    try:
+        async for chunk in _stream_immediate_feedback_greeting(question):
+            prefix_buffer += chunk
+            prefix_text = _clean_immediate_feedback_greeting(prefix_buffer)
+            if prefix_text is None:
+                continue
+            if not prefix_text:
+                continue
+
+            if feedback_message_id is None:
+                feedback_message_id = await _send_initial_feedback_card(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    markdown_text=_compose_feedback_card_text(prefix_text, status_text),
+                )
+                last_update_at = time.monotonic()
+                continue
+
+            now = time.monotonic()
+            if now - last_update_at >= _stream_update_min_interval_seconds:
+                await _try_update_feishu_markdown_message(
+                    feedback_message_id,
+                    _compose_feedback_card_text(prefix_text, status_text),
+                    log_content=False,
+                )
+                last_update_at = now
+
+        final_prefix = _clean_immediate_feedback_greeting(prefix_buffer)
+        if final_prefix is None:
+            return None
+        if not final_prefix:
+            raise LLMAPIError("Immediate feedback stream returned empty text")
+        if feedback_message_id is None:
+            feedback_message_id = await _send_initial_feedback_card(
+                chat_id=chat_id,
+                message_id=message_id,
+                markdown_text=_compose_feedback_card_text(final_prefix, status_text),
+            )
+        else:
+            await _try_update_feishu_markdown_message(
+                feedback_message_id,
+                _compose_feedback_card_text(final_prefix, status_text),
+                log_content=False,
+            )
+        return feedback_message_id, final_prefix, status_text
+    except (asyncio.TimeoutError, LLMAPIError, LLMConfigError) as exc:
+        _warn("initial feedback stream fallback", error=str(exc))
+    except Exception as exc:  # noqa: BLE001 - initial feedback should stay best-effort.
+        logger.exception("Failed to stream initial Feishu greeting: %s", exc)
+
+    initial_parts = await _build_initial_feedback_parts(question)
+    if initial_parts is None:
+        return None
+    prefix_text, status_text = initial_parts
+    feedback_message_id = await _send_initial_feedback_card(
+        chat_id=chat_id,
+        message_id=message_id,
+        markdown_text=_compose_feedback_card_text(prefix_text, status_text),
+    )
+    return feedback_message_id, prefix_text, status_text
+
+
+async def _send_initial_feedback_card(
+    *,
+    chat_id: str | None,
+    message_id: str | None,
+    markdown_text: str,
+) -> str | None:
+    if message_id:
+        feedback_message_id = await _try_send_feishu_markdown_message(
+            chat_id=chat_id,
+            reply_to_message_id=message_id,
+            markdown_text=markdown_text,
+            log_content=False,
+        )
+        if feedback_message_id:
+            return feedback_message_id
+        return await _try_send_feishu_markdown_reply(
+            message_id,
+            markdown_text,
+            log_content=False,
+        )
+    if chat_id:
+        return await _try_send_feishu_markdown_message(
+            chat_id=chat_id,
+            reply_to_message_id=None,
+            markdown_text=markdown_text,
+            log_content=False,
+        )
+    return None
+
+
+async def _build_initial_feedback_text(question: str) -> str | None:
+    parts = await _build_initial_feedback_parts(question)
+    if parts is None:
+        return None
+    return _compose_feedback_card_text(*parts)
+
+
+async def _build_initial_feedback_parts(question: str) -> tuple[str, str] | None:
+    feedback_text = _get_initial_feedback_text()
+    greeting_text = await _generate_immediate_feedback_greeting(question)
+    if greeting_text is None:
+        return None
+    return greeting_text.strip(), feedback_text.strip()
+
+
+async def _generate_immediate_feedback_greeting(question: str) -> str | None:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_generate_immediate_feedback_greeting_sync, question),
+            timeout=max(settings.immediate_feedback_timeout, 0.1),
+        )
+    except (asyncio.TimeoutError, LLMAPIError, LLMConfigError) as exc:
+        _warn("immediate feedback greeting fallback", error=str(exc))
+    except Exception as exc:  # noqa: BLE001 - feedback must stay best-effort.
+        logger.exception("Failed to generate immediate Feishu greeting: %s", exc)
+    return _get_local_immediate_feedback_greeting(question)
+
+
+async def _stream_immediate_feedback_greeting(question: str):
+    messages = _build_immediate_feedback_messages(question)
+    async for chunk in _stream_openai_chat_completion(
+        messages=messages,
+        model=settings.immediate_feedback_model,
+        temperature=0.3,
+        max_tokens=settings.immediate_feedback_max_tokens,
+    ):
+        yield chunk
+
+
+def _generate_immediate_feedback_greeting_sync(question: str) -> str | None:
+    if not settings.siliconflow_api_key:
+        raise LLMConfigError("Missing SILICONFLOW_API_KEY for immediate feedback greeting")
+
+    llm_settings = LLMSettings(
+        api_key=settings.siliconflow_api_key,
+        base_url=settings.siliconflow_base_url,
+        model=settings.immediate_feedback_model,
+        timeout=settings.immediate_feedback_timeout,
+        connect_timeout=settings.immediate_feedback_connect_timeout,
+        read_timeout=settings.immediate_feedback_timeout,
+        write_timeout=settings.immediate_feedback_timeout,
+        pool_timeout=min(settings.immediate_feedback_timeout, 1.0),
+    )
+    client = LLMClient(llm_settings)
+    messages = _build_immediate_feedback_messages(question)
+    chat_kwargs = {
+        "model": settings.immediate_feedback_model,
+        "temperature": 0.3,
+        "max_tokens": settings.immediate_feedback_max_tokens,
+    }
+    reply = _chat_immediate_feedback_greeting(
+        client,
+        messages,
+        chat_kwargs,
+        extra_body=_build_immediate_feedback_extra_body(),
+    )
+    return _clean_immediate_feedback_greeting(reply)
+
+
+def _build_immediate_feedback_messages(question: str) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": (
+                    "你是一个企业内部知识库助手的“快速响应模式”。"
+
+                    "你的任务是：在用户提问后，立即生成一个自然、像真人一样的短回复，用于缓解等待焦虑。"
+
+                    "要求："
+                    "1. 不要给出正式答案"
+                    "2. 不要引用制度或文档内容"
+                    "3. 不要编造具体事实"
+                    "4. 不要输出长段解释"
+                    "5. 语气要自然、像人在帮忙查资料"
+                    "6. 可以表达“好，正在查找 / 正在确认 / 我帮你看看 / 等会，我查一下资料”等状态"
+                    "7. 长度控制在1~2句话"
+                    "8. 如果用户只是在打招呼、提问过于简单、日常闲聊，或只是抱怨/倾诉而不需要检索知识库，请只输出 null"
+                    ""
+                    "你可以表达的内容包括："
+                    "- 正在帮用户查找"
+                    "- 正在匹配相关信息"
+                    "- 很快会返回结果"
+                    "- 这个问题需要稍等确认"
+                    "- 评价用户的提问(结合实际，比如有趣、有点棘手、需要推理等)"
+                    "- 如果用户很复杂，提示用户可能要花点时间"
+
+                    "禁止："
+                    "- 不要给结论"
+                    "- 不要假装已经查完"
+                    "- 不要引用具体制度条款"
+                    "- 不要输出步骤答案"
+                    "- 除 null 场景外，不要输出 null 以外的控制词"
+
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"用户问题：{_truncate_question_for_feedback(question)}",
+        },
+    ]
+
+
+def _build_immediate_feedback_extra_body() -> dict[str, Any]:
+    value = str(settings.immediate_feedback_enable_thinking).strip().lower()
+    if value in {"", "auto"}:
+        return {}
+    if value in {"off", "false", "0", "no", "n"}:
+        return {"enable_thinking": False}
+    if value in {"on", "true", "1", "yes", "y"}:
+        return {"enable_thinking": True}
+    return {"enable_thinking": settings.immediate_feedback_enable_thinking}
+
+
+def _chat_immediate_feedback_greeting(
+    client: LLMClient,
+    messages: list[dict[str, str]],
+    chat_kwargs: dict[str, Any],
+    *,
+    extra_body: dict[str, Any],
+) -> str:
+    try:
+        return client.chat(
+            messages,
+            **chat_kwargs,
+            extra_body=extra_body,
+        )
+    except LLMAPIError:
+        if not getattr(settings, "immediate_feedback_retry_without_thinking_options", True):
+            raise
+        return client.chat(
+            messages,
+            **chat_kwargs,
+        )
+
+
+async def _stream_openai_chat_completion(
+    *,
+    messages: list[dict[str, str]],
+    model: str,
+    temperature: float,
+    max_tokens: int,
+):
+    if not settings.siliconflow_api_key:
+        raise LLMConfigError("Missing SILICONFLOW_API_KEY for streaming feedback")
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": True,
+    }
+    payload.update(_build_immediate_feedback_extra_body())
+    timeout = httpx.Timeout(
+        timeout=settings.immediate_feedback_timeout,
+        connect=settings.immediate_feedback_connect_timeout,
+        read=settings.immediate_feedback_timeout,
+        write=settings.immediate_feedback_timeout,
+        pool=min(settings.immediate_feedback_timeout, 1.0),
+    )
+    headers = {
+        "Authorization": f"Bearer {settings.siliconflow_api_key}",
+        "Content-Type": "application/json",
+    }
+    url = f"{settings.siliconflow_base_url}/chat/completions"
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("POST", url, json=payload, headers=headers) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line:
+                    continue
+                if line.startswith("data:"):
+                    line = line[len("data:") :].strip()
+                if not line:
+                    continue
+                if line == "[DONE]":
+                    break
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                for choice in event.get("choices") or []:
+                    delta = choice.get("delta") or {}
+                    content = delta.get("content")
+                    if isinstance(content, str) and content:
+                        yield content
+
+
+def _truncate_question_for_feedback(question: str) -> str:
+    text = re.sub(r"\s+", " ", question).strip()
+    return text[:300]
+
+
+def _clean_immediate_feedback_greeting(text: str) -> str | None:
+    if _is_null_immediate_feedback(text):
+        return None
+    lines = [line.strip().strip("\"'") for line in text.splitlines() if line.strip()]
+    cleaned = " ".join(lines[:2])
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if _is_null_immediate_feedback(cleaned):
+        return None
+    if len(cleaned) > 120:
+        cleaned = f"{cleaned[:117].rstrip()}..."
+    return cleaned
+
+
+def _is_null_immediate_feedback(text: str) -> bool:
+    normalized = text.strip().strip("`").strip().strip("\"'").strip().lower()
+    return normalized in {"null", "none"}
+
+
+def _get_local_immediate_feedback_greeting(question: str) -> str:
+    normalized = _truncate_question_for_feedback(question)
+    if len(normalized) >= 80:
+        return "收到，这个问题信息量有点大，我先检索知识库再帮你整理清楚。"
+    if any(keyword in normalized for keyword in ("怎么", "如何", "为什么", "哪些", "是否", "能不能")):
+        return "收到，我先帮你查一下相关资料，再整理成好读的答复。"
+    return "收到，我先看一下知识库里的相关内容，马上给你整理答复。"
+
+
+def _compose_feedback_card_text(prefix_text: str, status_text: str) -> str:
+    prefix_text = prefix_text.strip()
+    status_text = status_text.strip()
+    if prefix_text and status_text:
+        return f"{prefix_text}\n\n{status_text}"
+    return prefix_text or status_text
+
+
+def _is_transient_feedback_answer(answer: str) -> bool:
+    normalized_answer = _normalize_feedback_status_text(answer)
+    if not normalized_answer:
+        return False
+
+    status_texts = set(_n8n_progress_texts.values())
+    status_texts.update(_load_feedback_texts())
+    status_texts.add(_get_failed_feedback_text())
+    status_texts.update(
+        {
+            "正在理解问题",
+            "正在检索知识库",
+            "正在整理资料",
+            "正在组织答案",
+            "处理失败，请稍后重试",
+        }
+    )
+
+    normalized_statuses = {
+        _normalize_feedback_status_text(text)
+        for text in status_texts
+        if text and _normalize_feedback_status_text(text)
+    }
+    return normalized_answer in normalized_statuses
+
+
+def _normalize_feedback_status_text(text: str) -> str:
+    return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", text).strip().lower()
+
+
 def _create_feishu_feedback_task(
     *,
-    message_id: str,
+    state: _FeishuFeedbackState,
     stop_event: asyncio.Event,
     event_id: str | None,
     dedupe_key: str | None,
@@ -507,7 +1030,7 @@ def _create_feishu_feedback_task(
     if _n8n_progress_polling_configured():
         return asyncio.create_task(
             _run_n8n_progress_feedback_loop(
-                message_id=message_id,
+                state=state,
                 stop_event=stop_event,
                 event_id=event_id,
                 dedupe_key=dedupe_key,
@@ -517,12 +1040,253 @@ def _create_feishu_feedback_task(
 
     return asyncio.create_task(
         _run_feishu_feedback_loop(
-            message_id=message_id,
+            state=state,
             stop_event=stop_event,
             event_id=event_id,
             dedupe_key=dedupe_key,
         )
     )
+
+
+async def _run_feishu_comfort_feedback_loop(
+    *,
+    state: _FeishuFeedbackState,
+    stop_event: asyncio.Event,
+    event_id: str | None,
+    dedupe_key: str | None,
+) -> None:
+    minute = 0
+    try:
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    stop_event.wait(),
+                    timeout=max(_comfort_feedback_interval_seconds, 0.1),
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+
+            minute += 1
+            updated = await _stream_comfort_feedback_prefix(
+                state=state,
+                minute=minute,
+            )
+            if not updated:
+                await _update_feishu_feedback_prefix(
+                    state,
+                    _get_local_comfort_feedback_text(minute, state.status_text),
+                )
+    except Exception as exc:  # noqa: BLE001 - comfort feedback must not block answers.
+        _warn(
+            "comfort feedback loop failed",
+            event_id=event_id,
+            dedupe_key=dedupe_key,
+            message_id=state.message_id,
+            error=str(exc),
+        )
+
+
+async def _generate_comfort_feedback_text(
+    *,
+    question: str,
+    minute: int,
+    status_text: str,
+) -> str:
+    try:
+        text = await asyncio.wait_for(
+            asyncio.to_thread(
+                _generate_comfort_feedback_text_sync,
+                question,
+                minute,
+                status_text,
+            ),
+            timeout=max(settings.immediate_feedback_timeout, 0.1),
+        )
+        cleaned = _clean_comfort_feedback_text(text)
+        if cleaned:
+            return cleaned
+    except (asyncio.TimeoutError, LLMAPIError, LLMConfigError) as exc:
+        _warn("comfort feedback model fallback", error=str(exc))
+    except Exception as exc:  # noqa: BLE001 - comfort feedback must stay best-effort.
+        logger.exception("Failed to generate comfort feedback text: %s", exc)
+    return _get_local_comfort_feedback_text(minute, status_text)
+
+
+async def _stream_comfort_feedback_prefix(
+    *,
+    state: _FeishuFeedbackState,
+    minute: int,
+) -> bool:
+    buffer = ""
+    last_update_at = 0.0
+    try:
+        async for chunk in _stream_comfort_feedback_text(
+            question=state.question,
+            minute=minute,
+            status_text=state.status_text,
+        ):
+            buffer += chunk
+            cleaned = _clean_comfort_feedback_text(buffer)
+            if not cleaned:
+                continue
+            now = time.monotonic()
+            if now - last_update_at >= _stream_update_min_interval_seconds:
+                await _update_feishu_feedback_prefix(state, cleaned)
+                last_update_at = now
+        final_text = _clean_comfort_feedback_text(buffer)
+        if final_text:
+            await _update_feishu_feedback_prefix(state, final_text)
+            return True
+    except (asyncio.TimeoutError, LLMAPIError, LLMConfigError) as exc:
+        _warn("comfort feedback stream fallback", error=str(exc))
+    except Exception as exc:  # noqa: BLE001 - comfort feedback must stay best-effort.
+        logger.exception("Failed to stream comfort feedback text: %s", exc)
+    return False
+
+
+async def _stream_comfort_feedback_text(
+    *,
+    question: str,
+    minute: int,
+    status_text: str,
+):
+    messages = _build_comfort_feedback_messages(
+        question=question,
+        minute=minute,
+        status_text=status_text,
+    )
+    async for chunk in _stream_openai_chat_completion(
+        messages=messages,
+        model=settings.immediate_feedback_model,
+        temperature=0.45,
+        max_tokens=min(settings.immediate_feedback_max_tokens, 60),
+    ):
+        yield chunk
+
+
+def _generate_comfort_feedback_text_sync(
+    question: str,
+    minute: int,
+    status_text: str,
+) -> str:
+    if not settings.siliconflow_api_key:
+        raise LLMConfigError("Missing SILICONFLOW_API_KEY for comfort feedback")
+
+    llm_settings = LLMSettings(
+        api_key=settings.siliconflow_api_key,
+        base_url=settings.siliconflow_base_url,
+        model=settings.immediate_feedback_model,
+        timeout=settings.immediate_feedback_timeout,
+        connect_timeout=settings.immediate_feedback_connect_timeout,
+        read_timeout=settings.immediate_feedback_timeout,
+        write_timeout=settings.immediate_feedback_timeout,
+        pool_timeout=min(settings.immediate_feedback_timeout, 1.0),
+    )
+    client = LLMClient(llm_settings)
+    messages = _build_comfort_feedback_messages(
+        question=question,
+        minute=minute,
+        status_text=status_text,
+    )
+    return _chat_immediate_feedback_greeting(
+        client,
+        messages,
+        {
+            "model": settings.immediate_feedback_model,
+            "temperature": 0.45,
+            "max_tokens": min(settings.immediate_feedback_max_tokens, 60),
+        },
+        extra_body=_build_immediate_feedback_extra_body(),
+    )
+
+
+def _build_comfort_feedback_messages(
+    *,
+    question: str,
+    minute: int,
+    status_text: str,
+) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是企业知识库助手的等待安抚机器人。用户已经等了一会儿，"
+                "你需要根据用户问题和当前处理状态，生成一句自然、贴近问题的安慰语。"
+                "不要回答问题，不要给结论，不要编造事实，不要反问。"
+                "控制在35字以内，像同事在帮忙处理。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"用户问题：{_truncate_question_for_feedback(question)}\n"
+                f"已等待：约{minute}分钟\n"
+                f"当前状态：{status_text}\n"
+                "请只输出安慰语本身。"
+            ),
+        },
+    ]
+
+
+def _clean_comfort_feedback_text(text: str) -> str:
+    lines = [line.strip().strip("\"'") for line in text.splitlines() if line.strip()]
+    cleaned = " ".join(lines[:2])
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned or _is_null_immediate_feedback(cleaned):
+        return ""
+    if len(cleaned) > 80:
+        cleaned = f"{cleaned[:77].rstrip()}..."
+    return cleaned
+
+
+def _get_local_comfort_feedback_text(minute: int, status_text: str) -> str:
+    status_hint = _status_text_to_comfort_hint(status_text)
+    templates = [
+        f"快好了，我还在{status_hint}，整理清楚后马上发你。",
+        f"还差一点，我再{status_hint}，请稍等一下。",
+        f"资料还在处理中，我继续{status_hint}，不会让你干等太久。",
+        f"我还在跟进这个问题，先{status_hint}，整理好就回复你。",
+    ]
+    return templates[(max(minute, 1) - 1) % len(templates)]
+
+
+def _status_text_to_comfort_hint(status_text: str) -> str:
+    normalized = _normalize_feedback_status_text(status_text)
+    if "检索" in normalized:
+        return "检索知识库"
+    if "整理" in normalized:
+        return "整理资料"
+    if "组织" in normalized or "答案" in normalized:
+        return "组织答案"
+    if "理解" in normalized:
+        return "确认问题方向"
+    return "处理相关资料"
+
+
+async def _update_feishu_feedback_prefix(
+    state: _FeishuFeedbackState,
+    prefix_text: str,
+) -> bool:
+    state.prefix_text = prefix_text.strip()
+    return await _update_feishu_feedback_card(state)
+
+
+async def _update_feishu_feedback_status(
+    state: _FeishuFeedbackState,
+    status_text: str,
+) -> bool:
+    state.status_text = status_text.strip()
+    return await _update_feishu_feedback_card(state)
+
+
+async def _update_feishu_feedback_card(state: _FeishuFeedbackState) -> bool:
+    async with state.update_lock:
+        return await _try_update_feishu_markdown_message(
+            state.message_id,
+            _compose_feedback_card_text(state.prefix_text, state.status_text),
+            log_content=False,
+        )
 
 
 def _n8n_progress_polling_configured() -> bool:
@@ -547,7 +1311,7 @@ def _get_n8n_api_base_url() -> str:
 
 async def _run_n8n_progress_feedback_loop(
     *,
-    message_id: str,
+    state: _FeishuFeedbackState,
     stop_event: asyncio.Event,
     event_id: str | None,
     dedupe_key: str | None,
@@ -571,11 +1335,7 @@ async def _run_n8n_progress_feedback_loop(
                 text = _n8n_progress_texts[stage]
                 if text != last_text:
                     last_text = text
-                    await _try_update_feishu_markdown_message(
-                        message_id,
-                        text,
-                        log_content=False,
-                    )
+                    await _update_feishu_feedback_status(state, text)
     except Exception as exc:  # noqa: BLE001 - progress feedback should never block answers.
         _warn(
             "n8n progress polling failed; falling back to legacy feedback loop",
@@ -584,7 +1344,7 @@ async def _run_n8n_progress_feedback_loop(
             error=str(exc),
         )
         await _run_feishu_feedback_loop(
-            message_id=message_id,
+            state=state,
             stop_event=stop_event,
             event_id=event_id,
             dedupe_key=dedupe_key,
@@ -789,14 +1549,14 @@ def _parse_n8n_time(value: Any) -> float | None:
 
 async def _run_feishu_feedback_loop(
     *,
-    message_id: str,
+    state: _FeishuFeedbackState,
     stop_event: asyncio.Event,
     event_id: str | None,
     dedupe_key: str | None,
 ) -> None:
     feedback_texts = _load_feedback_texts()
     if not feedback_texts:
-        _debug("feedback loop skipped", reason="missing_feedback_texts", message_id=message_id)
+        _debug("feedback loop skipped", reason="missing_feedback_texts", message_id=state.message_id)
         return
 
     index = 1 % len(feedback_texts)
@@ -809,17 +1569,16 @@ async def _run_feishu_feedback_loop(
 
         text = feedback_texts[index]
         index = (index + 1) % len(feedback_texts)
-        await _try_update_feishu_markdown_message(message_id, text, log_content=False)
+        await _update_feishu_feedback_status(state, text)
 
 
 async def _stop_feishu_feedback_loop(
-    stop_event: asyncio.Event | None,
-    task: asyncio.Task[None] | None,
+    handle: _FeishuFeedbackHandle | None,
 ) -> None:
-    if stop_event:
-        stop_event.set()
-    if task:
-        await task
+    if not handle:
+        return
+    handle.stop_event.set()
+    await asyncio.gather(handle.task, handle.comfort_task, return_exceptions=True)
 
 
 def _load_feedback_texts() -> list[str]:
@@ -932,6 +1691,92 @@ async def _try_send_feishu_markdown_reply(
 
 async def _try_reply_feishu_markdown(message_id: str, markdown_text: str) -> bool:
     return await _try_send_feishu_markdown_reply(message_id, markdown_text) is not None
+
+
+async def _pseudo_stream_feishu_final_answer(
+    *,
+    message_id: str,
+    answer: str,
+) -> bool:
+    chunks = _build_pseudo_stream_chunks(answer)
+    if not chunks:
+        return await _try_update_feishu_markdown_message(message_id, answer)
+
+    sent = True
+    for index, chunk in enumerate(chunks):
+        sent = await _try_update_feishu_markdown_message(
+            message_id,
+            chunk,
+            log_content=index == len(chunks) - 1,
+        )
+        if not sent:
+            return False
+        if index < len(chunks) - 1:
+            await asyncio.sleep(_pseudo_stream_update_delay_seconds)
+    return sent
+
+
+async def _pseudo_stream_new_feishu_final_answer(
+    *,
+    chat_id: str | None,
+    reply_to_message_id: str | None,
+    answer: str,
+) -> str | None:
+    chunks = _build_pseudo_stream_chunks(answer)
+    if not chunks:
+        return await _try_send_feishu_markdown_message(
+            chat_id=chat_id,
+            reply_to_message_id=reply_to_message_id,
+            markdown_text=answer,
+        )
+
+    sent_message_id = await _try_send_feishu_markdown_message(
+        chat_id=chat_id,
+        reply_to_message_id=reply_to_message_id,
+        markdown_text=chunks[0],
+        log_content=False,
+    )
+    if not sent_message_id:
+        return None
+
+    for index, chunk in enumerate(chunks[1:], start=1):
+        await asyncio.sleep(_pseudo_stream_update_delay_seconds)
+        updated = await _try_update_feishu_markdown_message(
+            sent_message_id,
+            chunk,
+            log_content=index == len(chunks) - 1,
+        )
+        if not updated:
+            return sent_message_id
+    return sent_message_id
+
+
+def _build_pseudo_stream_chunks(text: str) -> list[str]:
+    cleaned = text.strip()
+    if not cleaned:
+        return []
+    if len(cleaned) <= 160:
+        return [cleaned]
+
+    chunks: list[str] = []
+    step = 120
+    index = step
+    while index < len(cleaned):
+        boundary = _find_stream_chunk_boundary(cleaned, index, window=40)
+        chunks.append(cleaned[:boundary].rstrip())
+        index = boundary + step
+    if not chunks or chunks[-1] != cleaned:
+        chunks.append(cleaned)
+    return chunks
+
+
+def _find_stream_chunk_boundary(text: str, target: int, *, window: int) -> int:
+    end = min(len(text), target + window)
+    start = max(0, target - window)
+    for index in range(min(end, len(text) - 1), start, -1):
+        if text[index] in "。！？；\n，,.;!?":
+            return index + 1
+    return min(target, len(text))
 
 
 async def _try_update_feishu_markdown_message(
@@ -1287,26 +2132,48 @@ async def _build_feishu_card_content(markdown_text: str, token: str) -> str:
 async def _build_feishu_card_elements(markdown_text: str, token: str) -> list[dict[str, Any]]:
     elements: list[dict[str, Any]] = []
     markdown_buffer: list[str] = []
+    image_buffer: list[_PendingImage] = []
     cursor = 0
 
     for match in _pseudo_tag_pattern.finditer(markdown_text):
-        markdown_buffer.append(markdown_text[cursor : match.start()])
+        before_tag = markdown_text[cursor : match.start()]
         tag = match.group(1).lower()
         value = match.group(2).strip()
 
         if tag == "link":
+            _flush_image_buffer(elements, image_buffer)
+            markdown_buffer.append(before_tag)
             markdown_buffer.append(_link_tag_to_markdown(value))
         elif tag == "img":
-            _flush_markdown_buffer(elements, markdown_buffer)
+            markdown_buffer.append(before_tag)
+            if "".join(markdown_buffer).strip():
+                _flush_image_buffer(elements, image_buffer)
+                _flush_markdown_buffer(elements, markdown_buffer)
+            else:
+                markdown_buffer.clear()
             image_key = await _upload_local_image(value, token)
             if image_key:
                 alt_text = Path(value.replace("\\", "/")).name or "image"
-                elements.append(_build_image_element(image_key, alt_text))
+                image_buffer.append(
+                    _PendingImage(
+                        image_key=image_key,
+                        alt_text=alt_text,
+                        size=_get_local_image_size(value),
+                    )
+                )
 
         cursor = match.end()
 
     markdown_buffer.append(markdown_text[cursor:])
-    _flush_markdown_buffer(elements, markdown_buffer)
+    if image_buffer:
+        if "".join(markdown_buffer).strip():
+            _flush_image_buffer(elements, image_buffer)
+            _flush_markdown_buffer(elements, markdown_buffer)
+        else:
+            markdown_buffer.clear()
+            _flush_image_buffer(elements, image_buffer)
+    else:
+        _flush_markdown_buffer(elements, markdown_buffer)
     return elements
 
 
@@ -1319,6 +2186,86 @@ def _build_image_element(image_key: str, alt_text: str) -> dict[str, Any]:
             "content": alt_text,
         },
     }
+
+
+def _flush_image_buffer(elements: list[dict[str, Any]], images: list[_PendingImage]) -> None:
+    index = 0
+    while index < len(images):
+        current = images[index]
+        next_image = images[index + 1] if index + 1 < len(images) else None
+        if next_image and _image_sizes_are_similar(current.size, next_image.size):
+            elements.append(_build_two_column_image_element(current, next_image))
+            index += 2
+            continue
+        elements.append(_build_half_width_image_element(current))
+        index += 1
+    images.clear()
+
+
+def _build_half_width_image_element(image: _PendingImage) -> dict[str, Any]:
+    return _build_image_column_set([image, None])
+
+
+def _build_two_column_image_element(left: _PendingImage, right: _PendingImage) -> dict[str, Any]:
+    return _build_image_column_set([left, right])
+
+
+def _build_image_column_set(images: list[_PendingImage | None]) -> dict[str, Any]:
+    columns: list[dict[str, Any]] = []
+    for image in images:
+        columns.append(
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "vertical_align": "top",
+                "elements": [
+                    _build_image_element(image.image_key, image.alt_text)
+                ]
+                if image
+                else [],
+            }
+        )
+    return {
+        "tag": "column_set",
+        "flex_mode": "bisect",
+        "background_style": "default",
+        "columns": columns,
+    }
+
+
+def _image_sizes_are_similar(
+    left: tuple[int, int] | None,
+    right: tuple[int, int] | None,
+) -> bool:
+    if not left or not right:
+        return False
+    left_width, left_height = left
+    right_width, right_height = right
+    if min(left_width, left_height, right_width, right_height) <= 0:
+        return False
+
+    left_area = left_width * left_height
+    right_area = right_width * right_height
+    area_ratio = min(left_area, right_area) / max(left_area, right_area)
+    left_aspect = left_width / left_height
+    right_aspect = right_width / right_height
+    aspect_ratio = min(left_aspect, right_aspect) / max(left_aspect, right_aspect)
+    return area_ratio >= 0.55 and aspect_ratio >= 0.65
+
+
+def _get_local_image_size(raw_path: str) -> tuple[int, int] | None:
+    if Image is None:
+        return None
+    image_path = _resolve_local_image_path(raw_path)
+    if image_path is None:
+        return None
+    try:
+        with Image.open(image_path) as image:
+            width, height = image.size
+    except Exception:
+        return None
+    return int(width), int(height)
 
 
 def _flush_markdown_buffer(elements: list[dict[str, Any]], buffer: list[str]) -> None:
@@ -1433,7 +2380,84 @@ def _normalize_reference_url(url: str) -> str:
 
 
 def _format_markdown_link_url(url: str) -> str:
-    return _build_document_download_url(url)
+    if _is_lark_document_url(url):
+        return url
+    return _resolve_lark_document_url(url) or _build_document_download_url(url)
+
+
+def _is_lark_document_url(url: str) -> bool:
+    parsed = urlparse(url.strip())
+    host = parsed.netloc.lower()
+    return host.endswith("feishu.cn") or host.endswith("larksuite.com")
+
+
+def _resolve_lark_document_url(raw_path: str) -> str | None:
+    file_name = _extract_reference_file_name(raw_path)
+    if not file_name:
+        return None
+
+    mapping = _load_local_to_lark_mapping()
+    return mapping.get(_normalize_document_name(file_name))
+
+
+def _extract_reference_file_name(raw_path: str) -> str:
+    normalized_path = unquote(_normalize_reference_url(raw_path)).strip().strip("\"'")
+    if not normalized_path:
+        return ""
+
+    parsed = urlparse(normalized_path)
+    query_path = ""
+    if parsed.query:
+        query_path = (parse_qs(parsed.query).get("path") or [""])[0]
+
+    candidate = unquote(query_path or parsed.path or normalized_path)
+    candidate = candidate.replace("\\", "/").strip().strip("\"'")
+    return PurePosixPath(candidate).name
+
+
+def _normalize_document_name(file_name: str) -> str:
+    return re.sub(r"\s+", "", file_name).strip().lower()
+
+
+def _load_local_to_lark_mapping() -> dict[str, str]:
+    global _local_to_lark_mapping_cache
+
+    if _local_to_lark_mapping_cache is not None:
+        return _local_to_lark_mapping_cache
+
+    mapping: dict[str, str] = {}
+    if not _local_to_lark_mapping_dir.exists():
+        _local_to_lark_mapping_cache = mapping
+        return mapping
+
+    for mapping_path in sorted(_local_to_lark_mapping_dir.glob("*.json")):
+        try:
+            with mapping_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            _warn(
+                "local-to-lark mapping ignored because it cannot be loaded",
+                path=str(mapping_path),
+                error=str(exc),
+            )
+            continue
+
+        if not isinstance(data, dict):
+            _warn(
+                "local-to-lark mapping ignored because root value is not an object",
+                path=str(mapping_path),
+            )
+            continue
+
+        for file_name, lark_url in data.items():
+            if not isinstance(file_name, str) or not isinstance(lark_url, str):
+                continue
+            key = _normalize_document_name(file_name)
+            if key and key not in mapping:
+                mapping[key] = lark_url
+
+    _local_to_lark_mapping_cache = mapping
+    return mapping
 
 
 def _build_document_download_url(raw_path: str) -> str:

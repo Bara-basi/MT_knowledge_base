@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.services.chunking.splitter import save_chunks, split_items
+from app.services.chunking.splitter import build_file_id, save_chunks, split_items
 from app.services.chunking.splitter import load_items_from_txt
 from app.services.embedding import (
     EmbeddingService,
@@ -22,7 +22,7 @@ from app.services.parser.parser import parse_document
 from app.services.vector_store import VectorStoreService
 
 
-SUPPORTED_EXTENSIONS = {".docx", ".pptx", ".xlsx"}
+SUPPORTED_EXTENSIONS = {".docx", ".pptx", ".xlsx", ".pdf"}
 BM25_MODES = {"auto", "existing", "train-input"}
 
 
@@ -224,7 +224,7 @@ def ingest_document(
         image_analysis_workers=image_analysis_workers,
     )
     bm25_model_file = bm25_model_file or default_bm25_model_file()
-    if bm25_model is None:
+    if prepared.chunks and bm25_model is None:
         if Path(bm25_model_file).exists():
             bm25_model = load_bm25_embedding_function(bm25_model_file)
         else:
@@ -307,6 +307,9 @@ def resolve_bm25_model(
         for prepared in prepared_documents
         for chunk in prepared.chunks
     ]
+    if not all_chunks:
+        return bm25_model_file, None, "skipped: no chunks in input batch"
+
     bm25_model_file, bm25_model = embedding_service.save_global_bm25_model_file(
         all_chunks,
         bm25_model_file,
@@ -337,6 +340,7 @@ def embed_prepared_document(
         upsert_result = vector_store_service.upsert_embedding_file(
             prepared.embedding_file,
             flush=flush,
+            delete_file_ids=[] if prepared.chunks else [document_file_id(prepared.file_path)],
         )
         upsert_count = int(upsert_result["upsert_count"])
 
@@ -348,6 +352,12 @@ def embed_prepared_document(
         chunk_count=len(prepared.chunks),
         upsert_count=upsert_count,
     )
+
+
+def document_file_id(file_path: Path) -> str:
+    suffix = file_path.suffix.lower()
+    file_type = "doc" if suffix == ".docx" else suffix.lstrip(".") or "unknown"
+    return build_file_id(file_type, file_path.stem or "unknown")
 
 
 if __name__ == "__main__":

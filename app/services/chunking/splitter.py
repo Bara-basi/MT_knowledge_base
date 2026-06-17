@@ -240,12 +240,21 @@ def _append_table_chunk(
     if table_title:
         state.metadata["path"] = _append_path_segment(state.metadata.get("path", ""), table_title)
     state.chunk_type = "table"
+    table_link_indexes: list[tuple[int, str]] = []
     if isinstance(item.get("links"), dict):
-        for description, url in item["links"].items():
+        for offset, (description, url) in enumerate(item["links"].items(), start=1):
             if str(description).strip() and str(url).strip():
-                state.links.append(_link_metadata(str(description), str(url), item_index))
+                link_index = _table_link_index(item_index, offset)
+                state.links.append(_link_metadata(str(description), str(url), link_index))
+                table_link_indexes.append((link_index, str(description)))
     state.lines.append(str(item.get("text", "")).strip())
+    for link_index, description in table_link_indexes:
+        state.lines.append(_format_link_tag(link_index, description))
     _flush_chunk(chunks, state, document_metadata)
+
+
+def _table_link_index(item_index: int, offset: int) -> int:
+    return item_index * 10000 + offset
 
 
 def _flush_chunk(chunks: list[Chunk], state: ChunkState, document_metadata: dict[str, Any]) -> None:

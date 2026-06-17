@@ -125,7 +125,13 @@ def _extract_sheet_items(worksheet: Worksheet, context: ParseContext) -> list[di
     header_row_index = first_data_row
     note_row = _special_note_row(worksheet, first_data_row)
     if note_row is not None:
-        items.extend(_row_table_items([note_row], source=f"sheet:{worksheet.title}:row:{first_data_row}"))
+        items.extend(
+            _row_table_items(
+                [note_row],
+                source=f"sheet:{worksheet.title}:row:{first_data_row}",
+                links=_row_links(worksheet, first_data_row),
+            )
+        )
         items.extend(image_items_by_row.pop(first_data_row, []))
         header_row_index = _next_non_empty_row(worksheet, first_data_row + 1) or first_data_row + 1
 
@@ -137,7 +143,7 @@ def _extract_sheet_items(worksheet: Worksheet, context: ParseContext) -> list[di
         row = _row_object(worksheet, row_index, headers)
         if row:
             source = f"sheet:{worksheet.title}:row:{row_index}"
-            items.extend(_row_table_items([row], source=source))
+            items.extend(_row_table_items([row], source=source, links=_row_links(worksheet, row_index, headers)))
         items.extend(image_items_by_row.pop(row_index, []))
 
     for remaining_row in sorted(image_items_by_row):
@@ -201,6 +207,39 @@ def _row_object(worksheet: Worksheet, row_index: int, headers: list[str]) -> dic
 
 def _row_values(worksheet: Worksheet, row_index: int) -> list[str]:
     return [_cell_value(worksheet.cell(row_index, column_index)) for column_index in range(1, worksheet.max_column + 1)]
+
+
+def _row_links(worksheet: Worksheet, row_index: int, headers: list[str] | None = None) -> dict[str, str]:
+    links: dict[str, str] = {}
+    for column_index in range(1, worksheet.max_column + 1):
+        cell = worksheet.cell(row_index, column_index)
+        hyperlink = getattr(cell, "hyperlink", None)
+        if hyperlink is None:
+            continue
+
+        url = str(getattr(hyperlink, "target", None) or getattr(hyperlink, "location", None) or "").strip()
+        if not url:
+            continue
+
+        header = headers[column_index - 1] if headers and column_index <= len(headers) else ""
+        description = (
+            _normalize_cell_value(getattr(cell, "value", None))
+            or str(getattr(hyperlink, "display", "") or "").strip()
+            or header
+            or url
+        )
+        links[_unique_link_description(description, links)] = url
+    return links
+
+
+def _unique_link_description(description: str, links: dict[str, str]) -> str:
+    if description not in links:
+        return description
+
+    index = 2
+    while f"{description} {index}" in links:
+        index += 1
+    return f"{description} {index}"
 
 
 def _cell_value(cell: Cell | MergedCell) -> str:
@@ -275,17 +314,23 @@ def _unique_headers(headers: list[str]) -> list[str]:
     return unique_headers
 
 
-def _row_table_items(rows: list[dict[str, str]], *, source: str) -> list[dict[str, str]]:
+def _row_table_items(
+    rows: list[dict[str, str]],
+    *,
+    source: str,
+    links: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
     if not rows:
         return []
-    return [
-        {
-            "type": "table",
-            "style": "表格",
-            "source": source,
-            "text": json.dumps(rows, ensure_ascii=False, separators=(",", ":")),
-        }
-    ]
+    item: dict[str, Any] = {
+        "type": "table",
+        "style": "表格",
+        "source": source,
+        "text": json.dumps(rows, ensure_ascii=False, separators=(",", ":")),
+    }
+    if links:
+        item["links"] = dict(links)
+    return [item]
 
 
 def write_items_to_txt(items: list[dict[str, Any]], source_file: str | Path) -> Path:

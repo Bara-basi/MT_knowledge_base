@@ -13,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.services.parser.parser import parse_document
 
 
-SUPPORTED_EXTENSIONS = {".docx", ".pptx", ".xlsx"}
+SUPPORTED_EXTENSIONS = {".docx", ".pptx", ".xlsx", ".pdf"}
 
 
 @dataclass

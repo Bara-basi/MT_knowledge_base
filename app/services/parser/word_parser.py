@@ -39,7 +39,6 @@ VML_IMAGE_DATA_TAG = "{urn:schemas-microsoft-com:vml}imagedata"
 TABLE_JSON_MAX_CHARS = 800
 EMPTY_CELL_TEXT = "（空）"
 MAX_REPEATED_MERGED_CELL_CHARS = 15
-ATTACHMENT_LINK_PATTERN = re.compile(r"\[[^\[\]\r\n]*\.(?:pptx?|xlsx?|mp4)\]", re.IGNORECASE)
 CITATION_MARK_PATTERN = re.compile(r"(?:【\d+】|\[\d+])")
 SOURCE_LINE_PATTERN = re.compile(r"^(?:资料来源|数据来源|参考资料|视频来源|参考内容|出处)\s*[:：]\s*(?P<value>.*)$")
 REFERENCE_SECTION_KEYWORDS = ("参考文献", "引用文献","相关链接")
@@ -688,11 +687,7 @@ def _append_hyperlink_items(
     relationship_id = hyperlink.get(qn("r:id"))
     target = ""
     if relationship_id:
-        related_part = paragraph.part.related_parts.get(relationship_id)
-        target = str(getattr(related_part, "target_ref", "") or "")
-
-    if _is_dirty_ppt_link(display_text) or _is_dirty_ppt_link(target):
-        return
+        target = _relationship_target(paragraph, relationship_id)
 
     if target and display_text and target != display_text and not _looks_like_url(display_text):
         text_parts.append(display_text)
@@ -714,12 +709,7 @@ def _append_hyperlink_items(
 
 
 def _clean_text(text: str) -> str:
-    text = ATTACHMENT_LINK_PATTERN.sub("", text)
     return CITATION_MARK_PATTERN.sub("", text)
-
-
-def _is_dirty_ppt_link(text: str) -> bool:
-    return bool(text and ATTACHMENT_LINK_PATTERN.search(text.strip()))
 
 
 def _looks_like_url(text: str) -> bool:
@@ -757,8 +747,7 @@ def _link_only_paragraph_url(paragraph: Paragraph) -> str:
         relationship_id = hyperlink.get(qn("r:id"))
         if not relationship_id:
             continue
-        related_part = paragraph.part.related_parts.get(relationship_id)
-        target = str(getattr(related_part, "target_ref", "") or "").strip()
+        target = _relationship_target(paragraph, relationship_id).strip()
         if _looks_like_url(target):
             targets.append(target)
 
@@ -778,11 +767,20 @@ def _paragraph_hyperlink_targets(paragraph: Paragraph) -> list[str]:
         relationship_id = hyperlink.get(qn("r:id"))
         if not relationship_id:
             continue
-        related_part = paragraph.part.related_parts.get(relationship_id)
-        target = str(getattr(related_part, "target_ref", "") or "").strip()
+        target = _relationship_target(paragraph, relationship_id).strip()
         if target:
             targets.append(target)
     return targets
+
+
+def _relationship_target(paragraph: Paragraph, relationship_id: str) -> str:
+    related_part = paragraph.part.related_parts.get(relationship_id)
+    target = str(getattr(related_part, "target_ref", "") or "")
+    if target:
+        return target
+
+    relationship = paragraph.part.rels.get(relationship_id)
+    return str(getattr(relationship, "target_ref", "") or getattr(relationship, "_target", "") or "")
 
 
 def _paragraph_style(paragraph: Paragraph) -> str:

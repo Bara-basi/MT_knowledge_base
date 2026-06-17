@@ -14,7 +14,8 @@ PDF_CASES = [
     PROJECT_ROOT
     / "data"
     / "raw"
-    / "structed_pdf"
+    / "迈拓思学院"
+    / "公司相关"
     / "嘉兴迈拓不锈钢有限公司 规章制度.pdf",
     PROJECT_ROOT
     / "data"
