@@ -10,8 +10,8 @@ import requests
 
 
 BASE_URL = "https://open.feishu.cn/open-apis"
-DEFAULT_WIKI_URL = "https://tmqhw1h9zt.feishu.cn/wiki/K3SnwkJ5eiI1pAkyM4IcaQqCnSh"
-DOWNLOAD_DIR = pathlib.Path("./data/raw")
+DEFAULT_WIKI_URL = "https://tmqhw1h9zt.feishu.cn/wiki/UGf8wQSiyiFboakqne0cBrMRnLd"
+DOWNLOAD_DIR = pathlib.Path("./data/raw/人力资源部（全体伙伴）")
 
 REQUEST_TIMEOUT = 30
 DOWNLOAD_TIMEOUT = 120

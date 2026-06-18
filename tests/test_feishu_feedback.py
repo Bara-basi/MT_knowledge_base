@@ -10,15 +10,6 @@ from app.api.v1 import feishu
 from app.schemas.query import QueryResponse
 
 
-@pytest.fixture(autouse=True)
-def disable_real_feedback_stream(monkeypatch):
-    async def fake_stream(_question: str):
-        raise feishu.LLMAPIError("stream disabled in tests")
-        yield ""
-
-    monkeypatch.setattr(feishu, "_stream_immediate_feedback_greeting", fake_stream)
-
-
 def test_feishu_feedback_card_updates_until_final_answer(monkeypatch) -> None:
     sent_messages: list[tuple[str | None, str | None, str]] = []
     updates: list[tuple[str, str]] = []
@@ -178,69 +169,47 @@ def test_feishu_feedback_status_update_keeps_prefix(monkeypatch) -> None:
     ]
 
 
-def test_streaming_initial_feedback_updates_same_card(monkeypatch) -> None:
-    events: list[str] = []
+def test_feishu_feedback_update_keeps_cancel_footer_after_late_refresh(monkeypatch) -> None:
+    updates: list[tuple[str | None, str | None]] = []
 
-    async def fake_stream(_question: str):
-        yield "收到，"
-        await asyncio.sleep(0)
-        yield "我先查一下资料。"
-
-    async def fake_send_message(
-        *,
-        chat_id: str | None,
-        reply_to_message_id: str | None,
+    async def fake_update_message(
+        message_id: str,
         markdown_text: str,
+        *,
+        stop_cancel_id: str | None = None,
+        canceled_text: str | None = None,
         **_kwargs,
-    ) -> str:
-        events.append(f"send:{markdown_text}")
-        return "feedback-message-id"
-
-    async def fake_update_message(message_id: str, markdown_text: str, **_kwargs) -> bool:
-        events.append(f"update:{markdown_text}")
+    ) -> bool:
+        updates.append((stop_cancel_id, canceled_text))
         return True
 
-    monkeypatch.setattr(feishu, "_stream_immediate_feedback_greeting", fake_stream)
-    monkeypatch.setattr(feishu, "_stream_update_min_interval_seconds", 0)
-    monkeypatch.setattr(feishu, "_load_feedback_texts", lambda: ["🤔 正在理解问题..."])
-    monkeypatch.setattr(feishu, "_try_send_feishu_markdown_message", fake_send_message)
     monkeypatch.setattr(feishu, "_try_update_feishu_markdown_message", fake_update_message)
-
-    result = asyncio.run(
-        feishu._send_streaming_initial_feedback_card(
-            question="question",
-            chat_id="chat-id",
-            message_id="incoming-message-id",
-        )
+    state = feishu._FeishuFeedbackState(
+        message_id="feedback-message-id",
+        question="question",
+        prefix_text="prefix",
+        status_text="status",
+        update_lock=asyncio.Lock(),
+        cancel_id="cancel-1",
+        canceled_text="cancelled",
     )
 
-    assert result == ("feedback-message-id", "收到，我先查一下资料。", "🤔 正在理解问题...")
-    assert events[0] == "send:收到，\n\n🤔 正在理解问题..."
-    assert events[-1] == "update:收到，我先查一下资料。\n\n🤔 正在理解问题..."
+    asyncio.run(feishu._update_feishu_feedback_status(state, "late status"))
+
+    assert updates == [(None, "cancelled")]
 
 
-def test_pseudo_stream_final_answer_updates_in_chunks(monkeypatch) -> None:
-    updates: list[str] = []
-
-    async def fake_update_message(message_id: str, markdown_text: str, **_kwargs) -> bool:
-        assert message_id == "answer-message-id"
-        updates.append(markdown_text)
-        return True
-
-    answer = "第一段内容。" * 40
-    monkeypatch.setattr(feishu, "_pseudo_stream_update_delay_seconds", 0)
-    monkeypatch.setattr(feishu, "_try_update_feishu_markdown_message", fake_update_message)
-
-    sent = asyncio.run(
-        feishu._pseudo_stream_feishu_final_answer(
-            message_id="answer-message-id",
-            answer=answer,
-        )
+def test_feishu_cancelled_feedback_text_omits_status_line() -> None:
+    state = feishu._FeishuFeedbackState(
+        message_id="feedback-message-id",
+        question="question",
+        prefix_text="prefix",
+        status_text="status should not show",
+        update_lock=asyncio.Lock(),
+        canceled_text="cancelled",
     )
 
-    assert sent is True
-    assert len(updates) > 1
-    assert updates[-1] == answer
+    assert feishu._compose_cancelled_feedback_card_text(state) == "prefix"
 
 
 def test_feishu_initial_feedback_skips_when_greeting_model_returns_null(monkeypatch) -> None:
@@ -357,20 +326,18 @@ def test_feishu_comfort_feedback_keeps_status_while_answer_is_slow(monkeypatch) 
         question: str,
         minute: int,
         status_text: str,
-    ):
+    ) -> str:
         assert question == "question"
         assert minute == 1
         assert status_text == "🤔 正在理解问题..."
-        yield "这个问题我还在对照资料，"
-        await asyncio.sleep(0)
-        yield "马上整理给你。"
+        return "这个问题我还在对照资料，马上整理给你。"
 
     monkeypatch.setattr(feishu, "_feedback_interval_seconds", 10)
     monkeypatch.setattr(feishu, "_comfort_feedback_interval_seconds", 0.05)
     monkeypatch.setattr(feishu, "_n8n_progress_polling_configured", lambda: False)
     monkeypatch.setattr(feishu, "_load_feedback_texts", lambda: ["🤔 正在理解问题..."])
     monkeypatch.setattr(feishu, "_generate_immediate_feedback_greeting", fake_greeting)
-    monkeypatch.setattr(feishu, "_stream_comfort_feedback_text", fake_comfort_feedback_text)
+    monkeypatch.setattr(feishu, "_generate_comfort_feedback_text", fake_comfort_feedback_text)
     monkeypatch.setattr(feishu, "_try_send_feishu_markdown_message", fake_send_message)
     monkeypatch.setattr(feishu, "_try_update_feishu_markdown_message", fake_update_message)
     monkeypatch.setattr(feishu, "ask_knowledge_base", fake_ask_knowledge_base)
@@ -732,6 +699,72 @@ def test_feishu_card_rewrites_reference_links_and_appends_source_panel() -> None
     }
 
 
+def test_feishu_card_rewrites_reference_tags_and_appends_source_panel() -> None:
+    expected_url = feishu._build_document_download_url("data/raw/a.docx")
+    markdown = "Answer from KB<reference>data/raw/a.docx</Reference>"
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    elements = card["body"]["elements"]
+    assert elements[0]["content"] == f"Answer from KB[[1]]({expected_url})"
+    assert elements[1]["elements"][0]["content"] == f"[[1]]({expected_url}) a.docx"
+
+
+def test_feishu_card_deduplicates_reference_tags() -> None:
+    expected_url = feishu._build_document_download_url("data/raw/a.docx")
+    markdown = (
+        "First<reference>data/raw/a.docx</reference>\n"
+        "Second<Reference>data\\raw\\a.docx</Reference>"
+    )
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    elements = card["body"]["elements"]
+    assert elements[0]["content"] == f"First[[1]]({expected_url})\nSecond[[1]]({expected_url})"
+    assert elements[1]["elements"][0]["content"] == f"[[1]]({expected_url}) a.docx"
+
+
+def test_feishu_card_joins_reference_tags_split_across_lines() -> None:
+    url_a = feishu._build_document_download_url("data/raw/a.docx")
+    url_b = feishu._build_document_download_url("data/raw/b.docx")
+    url_c = feishu._build_document_download_url("data/raw/c.docx")
+    markdown = (
+        "结论内容。<reference>data/raw/a.docx</reference>\n"
+        "<Reference>data/raw/b.docx</Reference>\n"
+        "<reference>data/raw/c.docx</reference>"
+    )
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    main_content = card["body"]["elements"][0]["content"]
+    assert main_content == f"结论内容。[[1]]({url_a})[[2]]({url_b})[[3]]({url_c})"
+    assert f"[[1]]({url_a})\n[[2]]({url_b})" not in main_content
+
+
+def test_feishu_card_joins_existing_short_references_split_across_lines() -> None:
+    url_a = feishu._build_document_download_url("data/raw/a.docx")
+    url_b = feishu._build_document_download_url("data/raw/b.docx")
+    markdown = f"结论内容。[[1]]({url_a})\n[[2]]({url_b})"
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    assert card["body"]["elements"][0]["content"] == f"结论内容。[[1]]({url_a})[[2]]({url_b})"
+
+
+def test_feishu_card_keeps_reference_tags_inside_code_blocks() -> None:
+    markdown = "```\n<reference>data/raw/a.docx</reference>\n```"
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    assert card["body"]["elements"][0]["content"] == markdown
+    assert len(card["body"]["elements"]) == 1
+
+
 def test_feishu_card_rewrites_legacy_reference_title_links() -> None:
     expected_url = feishu._format_markdown_link_url(
         "data/raw/结构化word文档/造船行业.docx"
@@ -869,20 +902,44 @@ def test_format_markdown_link_url_keeps_existing_lark_url() -> None:
     assert feishu._format_markdown_link_url(raw_url) == raw_url
 
 
-def test_n8n_progress_stage_advances_after_rewrite_finishes() -> None:
+def test_n8n_progress_stage_recognizes_workflow_trigger_by_id() -> None:
     execution = {
         "workflowData": {
             "nodes": [
                 {
-                    "id": "54aad033-e2d6-4b2a-aa73-027f9fc839ce",
-                    "name": "renamed rewrite node",
+                    "id": "e0e954af-c14c-47d1-917a-bdbc69eba580",
+                    "name": "renamed trigger node",
                 }
             ]
         },
         "data": {
             "resultData": {
                 "runData": {
-                    "renamed rewrite node": [
+                    "renamed trigger node": [
+                        {"startTime": "2026-06-15T01:00:00.000Z"}
+                    ]
+                }
+            }
+        },
+    }
+
+    assert feishu._extract_n8n_progress_stage(execution) == "understanding"
+
+
+def test_n8n_progress_stage_advances_after_switch_finishes() -> None:
+    execution = {
+        "workflowData": {
+            "nodes": [
+                {
+                    "id": "bdb2ff5c-c9b8-40f1-b623-dc8b912c0600",
+                    "name": "renamed switch node",
+                }
+            ]
+        },
+        "data": {
+            "resultData": {
+                "runData": {
+                    "renamed switch node": [
                         {"startTime": "2026-06-15T01:00:00.000Z"}
                     ]
                 }
@@ -957,13 +1014,78 @@ def test_n8n_progress_stage_ignores_fast_chat_node() -> None:
     assert feishu._extract_n8n_progress_stage(execution) is None
 
 
-def test_n8n_progress_stage_returns_latest_mapped_stage() -> None:
+def test_n8n_progress_stage_ignores_rewrite_node_id() -> None:
     execution = {
         "workflowData": {
             "nodes": [
                 {
                     "id": "54aad033-e2d6-4b2a-aa73-027f9fc839ce",
                     "name": "renamed rewrite node",
+                }
+            ]
+        },
+        "data": {
+            "resultData": {
+                "runData": {
+                    "renamed rewrite node": [
+                        {"startTime": "2026-06-15T01:00:00.000Z"}
+                    ]
+                }
+            }
+        },
+    }
+
+    assert feishu._extract_n8n_progress_stage(execution) is None
+
+
+def test_n8n_progress_stage_ignores_retrieval_child_workflow_nodes() -> None:
+    execution = {
+        "workflowData": {
+            "nodes": [
+                {
+                    "id": "db342e62-4de8-486a-9443-ddfafc679b77",
+                    "name": "renamed child code node",
+                }
+            ]
+        },
+        "data": {
+            "resultData": {
+                "runData": {
+                    "renamed child code node": [
+                        {"startTime": "2026-06-15T01:00:00.000Z"}
+                    ]
+                }
+            }
+        },
+    }
+
+    assert feishu._extract_n8n_progress_stage(execution) is None
+
+
+def test_optimistic_n8n_progress_stage_advances_by_elapsed_time() -> None:
+    assert feishu._optimistic_n8n_progress_stage(elapsed_seconds=1.0) is None
+    assert feishu._optimistic_n8n_progress_stage(elapsed_seconds=1.5) == "retrieving"
+    assert feishu._optimistic_n8n_progress_stage(elapsed_seconds=5.0) == "reranking"
+    assert feishu._optimistic_n8n_progress_stage(elapsed_seconds=10.0) == "generating"
+
+
+def test_latest_n8n_progress_stage_prefers_later_stage() -> None:
+    assert feishu._latest_n8n_progress_stage("understanding", "reranking") == "reranking"
+    assert feishu._latest_n8n_progress_stage("generating", "retrieving") == "generating"
+    assert feishu._latest_n8n_progress_stage(None, "retrieving") == "retrieving"
+
+
+def test_n8n_progress_stage_returns_latest_mapped_stage() -> None:
+    execution = {
+        "workflowData": {
+            "nodes": [
+                {
+                    "id": "e0e954af-c14c-47d1-917a-bdbc69eba580",
+                    "name": "renamed trigger node",
+                },
+                {
+                    "id": "bdb2ff5c-c9b8-40f1-b623-dc8b912c0600",
+                    "name": "renamed switch node",
                 },
                 {
                     "id": "53fb4814-a531-4422-b6ba-f38c3db5a9a4",
@@ -978,8 +1100,11 @@ def test_n8n_progress_stage_returns_latest_mapped_stage() -> None:
         "data": {
             "resultData": {
                 "runData": {
-                    "renamed rewrite node": [
+                    "renamed trigger node": [
                         {"startTime": "2026-06-15T01:00:00.000Z"}
+                    ],
+                    "renamed switch node": [
+                        {"startTime": "2026-06-15T01:00:01.000Z"}
                     ],
                     "renamed retrieval entry": [
                         {"startTime": "2026-06-15T01:00:02.000Z"}
@@ -993,3 +1118,344 @@ def test_n8n_progress_stage_returns_latest_mapped_stage() -> None:
     }
 
     assert feishu._extract_n8n_progress_stage(execution) == "generating"
+
+
+def test_feishu_waiting_card_adds_stop_button() -> None:
+    content = asyncio.run(
+        feishu._build_feishu_card_content(
+            "正在处理...",
+            "tenant-token",
+            stop_cancel_id="cancel-1",
+        )
+    )
+
+    card = json.loads(content)
+    button = card["body"]["elements"][-1]
+    assert button["tag"] == "button"
+    assert button["type"] == "danger"
+    assert button["behaviors"] == [
+        {
+            "type": "callback",
+            "value": {
+                "action": "stop_feishu_answer",
+                "cancel_id": "cancel-1",
+            },
+        }
+    ]
+
+
+def test_feishu_waiting_card_does_not_use_unsupported_action_container() -> None:
+    content = asyncio.run(
+        feishu._build_feishu_card_content(
+            "姝ｅ湪澶勭悊...",
+            "tenant-token",
+            stop_cancel_id="cancel-1",
+        )
+    )
+
+    card = json.loads(content)
+    assert all(element.get("tag") != "action" for element in card["body"]["elements"])
+
+
+def test_feishu_card_content_error_detection() -> None:
+    exc = feishu.HTTPException(
+        status_code=502,
+        detail="Failed to create card content; unsupported tag action",
+    )
+
+    assert feishu._is_feishu_card_content_error(exc) is True
+
+
+def test_feishu_card_action_value_can_be_extracted_from_button_behavior_payload() -> None:
+    value = feishu._extract_feishu_card_action_value(
+        {
+            "header": {"event_type": "card.action.trigger"},
+            "event": {
+                "action": {
+                    "value": {
+                        "action": "stop_feishu_answer",
+                        "cancel_id": "cancel-1",
+                    }
+                }
+            },
+        }
+    )
+
+    assert value == {
+        "action": "stop_feishu_answer",
+        "cancel_id": "cancel-1",
+    }
+
+
+def test_format_feishu_cancel_elapsed_omits_minutes_under_one_minute() -> None:
+    assert feishu._format_feishu_cancel_elapsed(started_at=10.0, canceled_at=13.2) == "您在3秒后取消回答"
+    assert feishu._format_feishu_cancel_elapsed(started_at=10.0, canceled_at=75.0) == "您在1分5秒后取消回答"
+
+
+def test_feishu_cancelled_card_shows_footer_without_stop_button() -> None:
+    content = asyncio.run(
+        feishu._build_feishu_card_content(
+            "正在处理...",
+            "tenant-token",
+            stop_cancel_id="cancel-1",
+            canceled_text="您在3秒后取消回答",
+        )
+    )
+
+    card = json.loads(content)
+    elements = card["body"]["elements"]
+    assert elements[-2] == {"tag": "hr"}
+    assert "您在3秒后取消回答" in elements[-1]["content"]
+    assert all(element.get("tag") != "action" for element in elements)
+
+
+def test_feishu_cancel_action_suppresses_final_answer(monkeypatch) -> None:
+    updates: list[tuple[str, str, str | None]] = []
+    sent_cancel_ids: list[str | None] = []
+    query_started = asyncio.Event()
+
+    async def fake_send_message(
+        *,
+        chat_id: str | None,
+        reply_to_message_id: str | None,
+        markdown_text: str,
+        stop_cancel_id: str | None = None,
+        **_kwargs,
+    ) -> str:
+        sent_cancel_ids.append(stop_cancel_id)
+        return "feedback-message-id"
+
+    async def fake_update_message(
+        message_id: str,
+        markdown_text: str,
+        *,
+        canceled_text: str | None = None,
+        **_kwargs,
+    ) -> bool:
+        updates.append((message_id, markdown_text, canceled_text))
+        return True
+
+    async def fake_ask_knowledge_base(_request):
+        query_started.set()
+        await asyncio.sleep(30)
+        return QueryResponse(question="question", answer="final answer")
+
+    async def fake_create_chat_record(**_kwargs) -> None:
+        return None
+
+    async def fake_record_chat_answer(**_kwargs) -> None:
+        raise AssertionError("cancelled answer should not be recorded")
+
+    async def fake_greeting(_question: str) -> str:
+        return ""
+
+    async def run_case() -> None:
+        task = asyncio.create_task(
+            feishu._answer_feishu_message(
+                question="question",
+                sender_id="user-id",
+                chat_id="chat-id",
+                message_id="incoming-message-id",
+                event_id="event-id",
+                chat_type="p2p",
+                dedupe_key="message:incoming-message-id",
+            )
+        )
+        await asyncio.wait_for(query_started.wait(), timeout=1)
+        while not sent_cancel_ids:
+            await asyncio.sleep(0)
+        assert sent_cancel_ids[0] is not None
+        cancelled = await feishu._cancel_feishu_answer(sent_cancel_ids[0])
+        assert cancelled is True
+        await asyncio.wait_for(task, timeout=1)
+
+    monkeypatch.setattr(feishu, "_load_feedback_texts", lambda: ["step 1"])
+    monkeypatch.setattr(feishu, "_generate_immediate_feedback_greeting", fake_greeting)
+    monkeypatch.setattr(feishu, "_n8n_progress_polling_configured", lambda: False)
+    monkeypatch.setattr(feishu, "_try_send_feishu_markdown_message", fake_send_message)
+    monkeypatch.setattr(feishu, "_try_update_feishu_markdown_message", fake_update_message)
+    monkeypatch.setattr(feishu, "ask_knowledge_base", fake_ask_knowledge_base)
+    monkeypatch.setattr(feishu, "create_chat_record", fake_create_chat_record)
+    monkeypatch.setattr(feishu, "record_chat_answer", fake_record_chat_answer)
+    monkeypatch.setattr(feishu, "_schedule_feishu_answer_evaluation", lambda **_kwargs: None)
+
+    asyncio.run(run_case())
+
+    assert any(canceled_text for _, _, canceled_text in updates)
+    assert all(markdown_text != "final answer" for _, markdown_text, _ in updates)
+
+
+def test_feishu_cancel_state_stays_available_for_stale_button_clicks(monkeypatch) -> None:
+    updates: list[str | None] = []
+
+    async def fake_update_message(
+        message_id: str,
+        markdown_text: str,
+        *,
+        canceled_text: str | None = None,
+        **_kwargs,
+    ) -> bool:
+        updates.append(canceled_text)
+        return True
+
+    async def run_case() -> None:
+        state = feishu._FeishuFeedbackState(
+            message_id="feedback-message-id",
+            question="question",
+            prefix_text="prefix",
+            status_text="status",
+            update_lock=asyncio.Lock(),
+            cancel_id="cancel-1",
+        )
+        handle = feishu._FeishuFeedbackHandle(
+            state=state,
+            stop_event=asyncio.Event(),
+            task=asyncio.create_task(asyncio.sleep(30)),
+            comfort_task=asyncio.create_task(asyncio.sleep(30)),
+        )
+        feishu._feishu_answer_cancel_states["cancel-1"] = feishu._FeishuAnswerCancelState(
+            cancel_id="cancel-1",
+            started_at=0.0,
+            incoming_message_id="incoming-message-id",
+            chat_id="chat-id",
+            question="question",
+            feedback_handle=handle,
+            answer_task=None,
+        )
+
+        assert await feishu._cancel_feishu_answer("cancel-1") is True
+        feishu._discard_feishu_answer_cancel_state("cancel-1")
+        assert "cancel-1" in feishu._feishu_answer_cancel_states
+        assert await feishu._cancel_feishu_answer("cancel-1") is True
+
+        handle.task.cancel()
+        handle.comfort_task.cancel()
+
+    monkeypatch.setattr(feishu, "_try_update_feishu_markdown_message", fake_update_message)
+
+    try:
+        asyncio.run(run_case())
+    finally:
+        feishu._feishu_answer_cancel_states.pop("cancel-1", None)
+
+    assert len(updates) >= 2
+    assert all(canceled_text for canceled_text in updates)
+
+
+def test_feishu_cancel_waits_for_feedback_tasks_before_cancel_card(monkeypatch) -> None:
+    updates: list[str | None] = []
+    feedback_task_cancelled = asyncio.Event()
+
+    async def fake_update_message(
+        message_id: str,
+        markdown_text: str,
+        *,
+        canceled_text: str | None = None,
+        **_kwargs,
+    ) -> bool:
+        updates.append(canceled_text)
+        return True
+
+    async def stale_feedback_task() -> None:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            feedback_task_cancelled.set()
+            raise
+
+    async def run_case() -> None:
+        state = feishu._FeishuFeedbackState(
+            message_id="feedback-message-id",
+            question="question",
+            prefix_text="prefix",
+            status_text="status",
+            update_lock=asyncio.Lock(),
+            cancel_id="cancel-2",
+        )
+        handle = feishu._FeishuFeedbackHandle(
+            state=state,
+            stop_event=asyncio.Event(),
+            task=asyncio.create_task(stale_feedback_task()),
+            comfort_task=asyncio.create_task(asyncio.sleep(30)),
+        )
+        feishu._feishu_answer_cancel_states["cancel-2"] = feishu._FeishuAnswerCancelState(
+            cancel_id="cancel-2",
+            started_at=0.0,
+            incoming_message_id="incoming-message-id",
+            chat_id="chat-id",
+            question="question",
+            feedback_handle=handle,
+            answer_task=None,
+        )
+
+        await asyncio.sleep(0)
+        assert await feishu._cancel_feishu_answer("cancel-2") is True
+        assert feedback_task_cancelled.is_set()
+        assert handle.task.done()
+        assert handle.comfort_task.done()
+
+    monkeypatch.setattr(feishu, "_try_update_feishu_markdown_message", fake_update_message)
+
+    try:
+        asyncio.run(run_case())
+    finally:
+        feishu._feishu_answer_cancel_states.pop("cancel-2", None)
+
+    assert len(updates) == 1
+    assert updates[-1]
+
+
+def test_feishu_card_action_response_contains_cancelled_card(monkeypatch) -> None:
+    async def fake_update_message(*_args, **_kwargs) -> bool:
+        return True
+
+    async def run_case() -> dict:
+        state = feishu._FeishuFeedbackState(
+            message_id="feedback-message-id",
+            question="question",
+            prefix_text="prefix",
+            status_text="status",
+            update_lock=asyncio.Lock(),
+            cancel_id="cancel-3",
+        )
+        handle = feishu._FeishuFeedbackHandle(
+            state=state,
+            stop_event=asyncio.Event(),
+            task=asyncio.create_task(asyncio.sleep(30)),
+            comfort_task=asyncio.create_task(asyncio.sleep(30)),
+        )
+        feishu._feishu_answer_cancel_states["cancel-3"] = feishu._FeishuAnswerCancelState(
+            cancel_id="cancel-3",
+            started_at=0.0,
+            incoming_message_id="incoming-message-id",
+            chat_id="chat-id",
+            question="question",
+            feedback_handle=handle,
+            answer_task=None,
+        )
+        await asyncio.sleep(0)
+        return await feishu._handle_feishu_card_action(
+            {
+                "event": {
+                    "action": {
+                        "value": {
+                            "action": "stop_feishu_answer",
+                            "cancel_id": "cancel-3",
+                        }
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr(feishu, "_try_update_feishu_markdown_message", fake_update_message)
+
+    try:
+        result = asyncio.run(run_case())
+    finally:
+        feishu._feishu_answer_cancel_states.pop("cancel-3", None)
+
+    assert result["cancelled"] is True
+    assert result["card"]["type"] == "raw"
+    elements = result["card"]["data"]["body"]["elements"]
+    assert all(element.get("tag") != "button" for element in elements)
+    assert elements[-2] == {"tag": "hr"}

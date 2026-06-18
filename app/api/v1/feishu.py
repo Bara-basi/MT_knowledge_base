@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -37,19 +38,22 @@ _tenant_access_token_expires_at = 0.0
 _seen_message_keys: dict[str, float] = {}
 _seen_message_ttl_seconds = 3600
 _pseudo_tag_pattern = re.compile(r"<(img|link)>(.*?)</\1>", re.IGNORECASE | re.DOTALL)
+_reference_tag_pattern = re.compile(r"<reference\b[^>]*>(.*?)</reference>", re.IGNORECASE | re.DOTALL)
 _markdown_link_pattern = re.compile(r"(?<!!)\[([^\]\n]+)\]\(([^)\n]+)\)")
 _markdown_link_title_pattern = re.compile(r"^(?P<url>.+?)\s+\"(?P<title>[^\"]*)\"\s*$")
 _reference_link_label_pattern = re.compile(r"^\s*(片段\s*\d+)\s*[,，:：]\s*(.+?)\s*$")
+_short_reference_link_pattern = r"\[\[\d+\]\]\([^)]+\)"
+_adjacent_any_reference_separator_pattern = re.compile(
+    rf"(?P<ref>{_short_reference_link_pattern})[ \t\r\n]+(?=(?:{_short_reference_link_pattern}))"
+)
 _adjacent_reference_pattern = re.compile(
-    r"(?P<ref>\[\[(?P<number>\d+)\]\]\([^)]+\))(?P<separator>\s*)(?P=ref)"
+    rf"(?P<ref>{_short_reference_link_pattern})(?P<separator>\s*)(?P=ref)"
 )
 _source_section_heading_pattern = re.compile(
     r"^\s*(?:#{1,6}\s*)?(?:\*\*)?(知识来源|引用文献|参考来源)(?:\*\*)?\s*[:：]?\s*$"
 )
 _feedback_interval_seconds = 1.5
 _comfort_feedback_interval_seconds = 60.0
-_stream_update_min_interval_seconds = 0.25
-_pseudo_stream_update_delay_seconds = 0.12
 _feedback_texts_cache: list[str] | None = None
 _local_to_lark_mapping_dir = Path("data") / "metadata" / "local2lark_mapping"
 _local_to_lark_mapping_cache: dict[str, str] | None = None
@@ -89,6 +93,23 @@ class _FeishuFeedbackState:
     prefix_text: str
     status_text: str
     update_lock: asyncio.Lock
+    cancel_id: str | None = None
+    canceled_text: str | None = None
+
+
+@dataclass
+class _FeishuAnswerCancelState:
+    cancel_id: str
+    started_at: float
+    incoming_message_id: str | None
+    chat_id: str | None
+    question: str
+    answer_task: asyncio.Task[None] | None = None
+    feedback_handle: _FeishuFeedbackHandle | None = None
+    canceled_at: float | None = None
+
+
+_feishu_answer_cancel_states: dict[str, _FeishuAnswerCancelState] = {}
 
 _n8n_progress_texts = {
     "understanding": "🤔 正在理解问题...",
@@ -97,53 +118,31 @@ _n8n_progress_texts = {
     "generating": "✍️ 正在组织答案...",
 }
 _n8n_progress_stage_order = ("understanding", "retrieving", "reranking", "generating")
+_n8n_optimistic_progress_thresholds = (
+    (10.0, "generating"),
+    (5.0, "reranking"),
+    (1.5, "retrieving"),
+)
 
 # n8n execution data is only reliable after a node appears in runData.
-# These mappings intentionally treat a completed node as the signal for the next stage.
+# Node names are only labels in n8n and can be duplicated or renamed, so progress
+# detection is intentionally based on authoritative node ids from the workflow.
 _n8n_completed_node_stage_ids = {
-    "understanding": set(),
+    "understanding": {
+        "e0e954af-c14c-47d1-917a-bdbc69eba580",
+    },
     "retrieving": {
-        "54aad033-e2d6-4b2a-aa73-027f9fc839ce",
+        "bdb2ff5c-c9b8-40f1-b623-dc8b912c0600",
     },
     "reranking": {
         "53fb4814-a531-4422-b6ba-f38c3db5a9a4",
         "18cbcf26-ca22-443f-aa09-3c4173e60983",
         "a509efe4-649b-4cf7-b32a-5ad35a45a60a",
         "8a620c5f-620a-481a-96f1-880f595ebb74",
-        "db342e62-4de8-486a-9443-ddfafc679b77",
     },
     "generating": {
         "6113024b-7803-4ce2-930a-c893ff1ff7fd",
     },
-}
-_n8n_completed_node_stage_names = {
-    "understanding": set(),
-    "retrieving": {"query转写", "query_rewrite"},
-    "reranking": {
-        "前往问答检索",
-        "前往问答检索1",
-        "前往问答检索2",
-        "前往问答检索3",
-        "Code in JavaScript",
-    },
-    "generating": {"合并item并去重"},
-}
-
-# Current-node mappings are kept as a fallback for long-running nodes that are visible mid-run.
-_n8n_current_node_stage_ids = {
-    "understanding": set(),
-    "retrieving": {
-        "c3d63d86-f11f-4e59-a65e-d6d12c630a5f",
-        "4370e0b8-88ff-459f-8625-5a48e20edb06",
-    },
-    "reranking": {"be8a0486-cbf0-4b6e-95c2-9dc978abcbc7"},
-    "generating": {"8ab6c4c9-2d7a-4835-b80b-1caadbca9561"},
-}
-_n8n_current_node_stage_names = {
-    "understanding": set(),
-    "retrieving": {"When Executed by Another Workflow", "HTTP Request"},
-    "reranking": {"合并多路召回结果"},
-    "generating": {"检索回答", "检索问答"},
 }
 
 @router.post("/events")
@@ -181,6 +180,11 @@ async def handle_feishu_events(
     event_type = header.get("event_type") or payload.get("type")
     event_id = header.get("event_id")
     _debug("event identified", event_type=event_type, event_id=event_id)
+
+    if _is_feishu_card_action_event(event_type, payload):
+        result = await _handle_feishu_card_action(payload)
+        _debug("card action handled", event_type=event_type, result=result)
+        return result
 
     if event_type != "im.message.receive_v1":
         _debug("event ignored", reason="unsupported_event_type", event_type=event_type)
@@ -266,6 +270,11 @@ async def _answer_feishu_message(
     )
 
     n8n_started_after = time.time()
+    cancel_id = _register_feishu_answer_cancel_state(
+        question=question,
+        chat_id=chat_id,
+        message_id=message_id,
+    )
     feedback_handle_task = _schedule_initial_feishu_feedback(
         question=question,
         chat_id=chat_id,
@@ -273,6 +282,7 @@ async def _answer_feishu_message(
         event_id=event_id,
         dedupe_key=dedupe_key,
         n8n_started_after=n8n_started_after,
+        cancel_id=cancel_id,
     )
 
     try:
@@ -343,6 +353,24 @@ async def _answer_feishu_message(
                 wait=True,
             )
             await _stop_feishu_feedback_loop(feedback_handle)
+            _discard_feishu_answer_cancel_state(cancel_id)
+            return
+
+        if _is_feishu_answer_cancelled(cancel_id):
+            _debug(
+                "query result ignored",
+                reason="answer_cancelled",
+                event_id=event_id,
+                message_id=message_id,
+                dedupe_key=dedupe_key,
+                cancel_id=cancel_id,
+            )
+            feedback_handle = await _resolve_initial_feishu_feedback(
+                feedback_handle_task,
+                wait=False,
+            )
+            await _stop_feishu_feedback_loop(feedback_handle)
+            _discard_feishu_answer_cancel_state(cancel_id)
             return
 
         try:
@@ -368,6 +396,18 @@ async def _answer_feishu_message(
                 dedupe_key=dedupe_key,
                 error=str(exc),
             )
+    except asyncio.CancelledError:
+        _debug(
+            "answer task cancelled",
+            event_id=event_id,
+            message_id=message_id,
+            dedupe_key=dedupe_key,
+            cancel_id=cancel_id,
+        )
+        feedback_handle = await _resolve_initial_feishu_feedback(feedback_handle_task, wait=False)
+        await _stop_feishu_feedback_loop(feedback_handle)
+        _discard_feishu_answer_cancel_state(cancel_id)
+        return
     except HTTPException as exc:
         detail = _detail_to_text(exc.detail)
         logger.exception("Failed to query knowledge base for Feishu message: %s", detail)
@@ -380,6 +420,17 @@ async def _answer_feishu_message(
         )
         feedback_handle = await _resolve_initial_feishu_feedback(feedback_handle_task, wait=False)
         await _stop_feishu_feedback_loop(feedback_handle)
+        if _is_feishu_answer_cancelled(cancel_id):
+            _debug(
+                "query failure ignored",
+                reason="answer_cancelled",
+                event_id=event_id,
+                message_id=message_id,
+                dedupe_key=dedupe_key,
+                cancel_id=cancel_id,
+            )
+            _discard_feishu_answer_cancel_state(cancel_id)
+            return
         failed_text = _get_failed_feedback_text()
         if feedback_handle:
             await _try_update_feishu_markdown_message(feedback_handle.message_id, failed_text)
@@ -391,10 +442,23 @@ async def _answer_feishu_message(
                 reply_to_message_id=None,
                 markdown_text=failed_text,
             )
+        _discard_feishu_answer_cancel_state(cancel_id)
         return
 
     feedback_handle = await _resolve_initial_feishu_feedback(feedback_handle_task, wait=False)
     await _stop_feishu_feedback_loop(feedback_handle)
+
+    if _is_feishu_answer_cancelled(cancel_id):
+        _debug(
+            "reply skipped",
+            reason="answer_cancelled",
+            event_id=event_id,
+            message_id=message_id,
+            dedupe_key=dedupe_key,
+            cancel_id=cancel_id,
+        )
+        _discard_feishu_answer_cancel_state(cancel_id)
+        return
 
     if not message_id:
         _debug(
@@ -403,18 +467,19 @@ async def _answer_feishu_message(
             event_id=event_id,
             dedupe_key=dedupe_key,
         )
+        _discard_feishu_answer_cancel_state(cancel_id)
         return
 
     if feedback_handle:
-        sent = await _pseudo_stream_feishu_final_answer(
-            message_id=feedback_handle.message_id,
-            answer=response.answer,
+        sent = await _try_update_feishu_markdown_message(
+            feedback_handle.message_id,
+            response.answer,
         )
     else:
-        sent_message_id = await _pseudo_stream_new_feishu_final_answer(
+        sent_message_id = await _try_send_feishu_markdown_message(
             chat_id=chat_id,
             reply_to_message_id=message_id,
-            answer=response.answer,
+            markdown_text=response.answer,
         )
         sent = sent_message_id is not None
     _debug(
@@ -433,6 +498,7 @@ async def _answer_feishu_message(
         message_id=message_id,
         dedupe_key=dedupe_key,
     )
+    _discard_feishu_answer_cancel_state(cancel_id)
 
 
 def _schedule_feishu_answer_evaluation(
@@ -517,6 +583,7 @@ def _schedule_initial_feishu_feedback(
     event_id: str | None,
     dedupe_key: str | None,
     n8n_started_after: float,
+    cancel_id: str | None = None,
 ) -> asyncio.Task[_FeishuFeedbackHandle | None] | None:
     if not message_id and not chat_id:
         _debug(
@@ -535,6 +602,7 @@ def _schedule_initial_feishu_feedback(
             event_id=event_id,
             dedupe_key=dedupe_key,
             n8n_started_after=n8n_started_after,
+            cancel_id=cancel_id,
         )
     )
     task.add_done_callback(_log_initial_feishu_feedback_task_failure)
@@ -582,13 +650,15 @@ async def _send_initial_feishu_feedback(
     event_id: str | None,
     dedupe_key: str | None,
     n8n_started_after: float,
+    cancel_id: str | None = None,
 ) -> _FeishuFeedbackHandle | None:
-    streamed_initial = await _send_streaming_initial_feedback_card(
+    initial_feedback = await _send_initial_feedback_card_with_greeting(
         question=question,
         chat_id=chat_id,
         message_id=message_id,
+        cancel_id=cancel_id,
     )
-    if streamed_initial is None:
+    if initial_feedback is None:
         _debug(
             "initial feedback skipped",
             reason="greeting_model_returned_null",
@@ -597,7 +667,7 @@ async def _send_initial_feishu_feedback(
             dedupe_key=dedupe_key,
         )
         return None
-    feedback_message_id, prefix_text, status_text = streamed_initial
+    feedback_message_id, prefix_text, status_text = initial_feedback
 
     if not feedback_message_id:
         _debug(
@@ -616,6 +686,7 @@ async def _send_initial_feishu_feedback(
         prefix_text=prefix_text,
         status_text=status_text,
         update_lock=asyncio.Lock(),
+        cancel_id=cancel_id,
     )
     feedback_task = _create_feishu_feedback_task(
         state=feedback_state,
@@ -639,75 +710,23 @@ async def _send_initial_feishu_feedback(
         feedback_message_id=feedback_message_id,
         dedupe_key=dedupe_key,
     )
-    return _FeishuFeedbackHandle(
+    handle = _FeishuFeedbackHandle(
         state=feedback_state,
         stop_event=stop_event,
         task=feedback_task,
         comfort_task=comfort_task,
     )
+    _bind_feishu_answer_feedback(cancel_id, handle)
+    return handle
 
 
-async def _send_streaming_initial_feedback_card(
+async def _send_initial_feedback_card_with_greeting(
     *,
     question: str,
     chat_id: str | None,
     message_id: str | None,
+    cancel_id: str | None = None,
 ) -> tuple[str | None, str, str] | None:
-    status_text = _get_initial_feedback_text()
-    prefix_buffer = ""
-    feedback_message_id: str | None = None
-    last_update_at = 0.0
-
-    try:
-        async for chunk in _stream_immediate_feedback_greeting(question):
-            prefix_buffer += chunk
-            prefix_text = _clean_immediate_feedback_greeting(prefix_buffer)
-            if prefix_text is None:
-                continue
-            if not prefix_text:
-                continue
-
-            if feedback_message_id is None:
-                feedback_message_id = await _send_initial_feedback_card(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    markdown_text=_compose_feedback_card_text(prefix_text, status_text),
-                )
-                last_update_at = time.monotonic()
-                continue
-
-            now = time.monotonic()
-            if now - last_update_at >= _stream_update_min_interval_seconds:
-                await _try_update_feishu_markdown_message(
-                    feedback_message_id,
-                    _compose_feedback_card_text(prefix_text, status_text),
-                    log_content=False,
-                )
-                last_update_at = now
-
-        final_prefix = _clean_immediate_feedback_greeting(prefix_buffer)
-        if final_prefix is None:
-            return None
-        if not final_prefix:
-            raise LLMAPIError("Immediate feedback stream returned empty text")
-        if feedback_message_id is None:
-            feedback_message_id = await _send_initial_feedback_card(
-                chat_id=chat_id,
-                message_id=message_id,
-                markdown_text=_compose_feedback_card_text(final_prefix, status_text),
-            )
-        else:
-            await _try_update_feishu_markdown_message(
-                feedback_message_id,
-                _compose_feedback_card_text(final_prefix, status_text),
-                log_content=False,
-            )
-        return feedback_message_id, final_prefix, status_text
-    except (asyncio.TimeoutError, LLMAPIError, LLMConfigError) as exc:
-        _warn("initial feedback stream fallback", error=str(exc))
-    except Exception as exc:  # noqa: BLE001 - initial feedback should stay best-effort.
-        logger.exception("Failed to stream initial Feishu greeting: %s", exc)
-
     initial_parts = await _build_initial_feedback_parts(question)
     if initial_parts is None:
         return None
@@ -716,6 +735,7 @@ async def _send_streaming_initial_feedback_card(
         chat_id=chat_id,
         message_id=message_id,
         markdown_text=_compose_feedback_card_text(prefix_text, status_text),
+        cancel_id=cancel_id,
     )
     return feedback_message_id, prefix_text, status_text
 
@@ -725,6 +745,7 @@ async def _send_initial_feedback_card(
     chat_id: str | None,
     message_id: str | None,
     markdown_text: str,
+    cancel_id: str | None = None,
 ) -> str | None:
     if message_id:
         feedback_message_id = await _try_send_feishu_markdown_message(
@@ -732,6 +753,7 @@ async def _send_initial_feedback_card(
             reply_to_message_id=message_id,
             markdown_text=markdown_text,
             log_content=False,
+            stop_cancel_id=cancel_id,
         )
         if feedback_message_id:
             return feedback_message_id
@@ -739,6 +761,7 @@ async def _send_initial_feedback_card(
             message_id,
             markdown_text,
             log_content=False,
+            stop_cancel_id=cancel_id,
         )
     if chat_id:
         return await _try_send_feishu_markdown_message(
@@ -746,6 +769,7 @@ async def _send_initial_feedback_card(
             reply_to_message_id=None,
             markdown_text=markdown_text,
             log_content=False,
+            stop_cancel_id=cancel_id,
         )
     return None
 
@@ -776,17 +800,6 @@ async def _generate_immediate_feedback_greeting(question: str) -> str | None:
     except Exception as exc:  # noqa: BLE001 - feedback must stay best-effort.
         logger.exception("Failed to generate immediate Feishu greeting: %s", exc)
     return _get_local_immediate_feedback_greeting(question)
-
-
-async def _stream_immediate_feedback_greeting(question: str):
-    messages = _build_immediate_feedback_messages(question)
-    async for chunk in _stream_openai_chat_completion(
-        messages=messages,
-        model=settings.immediate_feedback_model,
-        temperature=0.3,
-        max_tokens=settings.immediate_feedback_max_tokens,
-    ):
-        yield chunk
 
 
 def _generate_immediate_feedback_greeting_sync(question: str) -> str | None:
@@ -895,60 +908,6 @@ def _chat_immediate_feedback_greeting(
         )
 
 
-async def _stream_openai_chat_completion(
-    *,
-    messages: list[dict[str, str]],
-    model: str,
-    temperature: float,
-    max_tokens: int,
-):
-    if not settings.siliconflow_api_key:
-        raise LLMConfigError("Missing SILICONFLOW_API_KEY for streaming feedback")
-
-    payload: dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "stream": True,
-    }
-    payload.update(_build_immediate_feedback_extra_body())
-    timeout = httpx.Timeout(
-        timeout=settings.immediate_feedback_timeout,
-        connect=settings.immediate_feedback_connect_timeout,
-        read=settings.immediate_feedback_timeout,
-        write=settings.immediate_feedback_timeout,
-        pool=min(settings.immediate_feedback_timeout, 1.0),
-    )
-    headers = {
-        "Authorization": f"Bearer {settings.siliconflow_api_key}",
-        "Content-Type": "application/json",
-    }
-    url = f"{settings.siliconflow_base_url}/chat/completions"
-
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream("POST", url, json=payload, headers=headers) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if not line:
-                    continue
-                if line.startswith("data:"):
-                    line = line[len("data:") :].strip()
-                if not line:
-                    continue
-                if line == "[DONE]":
-                    break
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                for choice in event.get("choices") or []:
-                    delta = choice.get("delta") or {}
-                    content = delta.get("content")
-                    if isinstance(content, str) and content:
-                        yield content
-
-
 def _truncate_question_for_feedback(question: str) -> str:
     text = re.sub(r"\s+", " ", question).strip()
     return text[:300]
@@ -987,6 +946,10 @@ def _compose_feedback_card_text(prefix_text: str, status_text: str) -> str:
     if prefix_text and status_text:
         return f"{prefix_text}\n\n{status_text}"
     return prefix_text or status_text
+
+
+def _compose_cancelled_feedback_card_text(state: _FeishuFeedbackState) -> str:
+    return state.prefix_text.strip() or state.question.strip() or " "
 
 
 def _is_transient_feedback_answer(answer: str) -> bool:
@@ -1068,15 +1031,14 @@ async def _run_feishu_comfort_feedback_loop(
                 pass
 
             minute += 1
-            updated = await _stream_comfort_feedback_prefix(
-                state=state,
+            comfort_text = await _generate_comfort_feedback_text(
+                question=state.question,
                 minute=minute,
+                status_text=state.status_text,
             )
-            if not updated:
-                await _update_feishu_feedback_prefix(
-                    state,
-                    _get_local_comfort_feedback_text(minute, state.status_text),
-                )
+            if stop_event.is_set():
+                break
+            await _update_feishu_feedback_prefix(state, comfort_text)
     except Exception as exc:  # noqa: BLE001 - comfort feedback must not block answers.
         _warn(
             "comfort feedback loop failed",
@@ -1111,58 +1073,6 @@ async def _generate_comfort_feedback_text(
     except Exception as exc:  # noqa: BLE001 - comfort feedback must stay best-effort.
         logger.exception("Failed to generate comfort feedback text: %s", exc)
     return _get_local_comfort_feedback_text(minute, status_text)
-
-
-async def _stream_comfort_feedback_prefix(
-    *,
-    state: _FeishuFeedbackState,
-    minute: int,
-) -> bool:
-    buffer = ""
-    last_update_at = 0.0
-    try:
-        async for chunk in _stream_comfort_feedback_text(
-            question=state.question,
-            minute=minute,
-            status_text=state.status_text,
-        ):
-            buffer += chunk
-            cleaned = _clean_comfort_feedback_text(buffer)
-            if not cleaned:
-                continue
-            now = time.monotonic()
-            if now - last_update_at >= _stream_update_min_interval_seconds:
-                await _update_feishu_feedback_prefix(state, cleaned)
-                last_update_at = now
-        final_text = _clean_comfort_feedback_text(buffer)
-        if final_text:
-            await _update_feishu_feedback_prefix(state, final_text)
-            return True
-    except (asyncio.TimeoutError, LLMAPIError, LLMConfigError) as exc:
-        _warn("comfort feedback stream fallback", error=str(exc))
-    except Exception as exc:  # noqa: BLE001 - comfort feedback must stay best-effort.
-        logger.exception("Failed to stream comfort feedback text: %s", exc)
-    return False
-
-
-async def _stream_comfort_feedback_text(
-    *,
-    question: str,
-    minute: int,
-    status_text: str,
-):
-    messages = _build_comfort_feedback_messages(
-        question=question,
-        minute=minute,
-        status_text=status_text,
-    )
-    async for chunk in _stream_openai_chat_completion(
-        messages=messages,
-        model=settings.immediate_feedback_model,
-        temperature=0.45,
-        max_tokens=min(settings.immediate_feedback_max_tokens, 60),
-    ):
-        yield chunk
 
 
 def _generate_comfort_feedback_text_sync(
@@ -1282,10 +1192,13 @@ async def _update_feishu_feedback_status(
 
 async def _update_feishu_feedback_card(state: _FeishuFeedbackState) -> bool:
     async with state.update_lock:
+        canceled_text = state.canceled_text
         return await _try_update_feishu_markdown_message(
             state.message_id,
             _compose_feedback_card_text(state.prefix_text, state.status_text),
             log_content=False,
+            stop_cancel_id=None if canceled_text else state.cancel_id,
+            canceled_text=canceled_text,
         )
 
 
@@ -1320,22 +1233,29 @@ async def _run_n8n_progress_feedback_loop(
     last_stage = "understanding"
     last_text = _n8n_progress_texts[last_stage]
     poll_interval = max(settings.n8n_progress_poll_interval, 0.2)
+    loop_started_at = time.monotonic()
 
     try:
         while not stop_event.is_set():
+            stage = await _poll_n8n_progress_stage(started_after=started_after)
+            optimistic_stage = _optimistic_n8n_progress_stage(
+                elapsed_seconds=time.monotonic() - loop_started_at,
+            )
+            next_stage = _latest_n8n_progress_stage(stage, optimistic_stage)
+            if stop_event.is_set():
+                break
+            if next_stage and _n8n_stage_index(next_stage) > _n8n_stage_index(last_stage):
+                last_stage = next_stage
+                text = _n8n_progress_texts[next_stage]
+                if text != last_text:
+                    last_text = text
+                    await _update_feishu_feedback_status(state, text)
+
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=poll_interval)
                 break
             except asyncio.TimeoutError:
                 pass
-
-            stage = await _poll_n8n_progress_stage(started_after=started_after)
-            if stage and _n8n_stage_index(stage) > _n8n_stage_index(last_stage):
-                last_stage = stage
-                text = _n8n_progress_texts[stage]
-                if text != last_text:
-                    last_text = text
-                    await _update_feishu_feedback_status(state, text)
     except Exception as exc:  # noqa: BLE001 - progress feedback should never block answers.
         _warn(
             "n8n progress polling failed; falling back to legacy feedback loop",
@@ -1376,18 +1296,26 @@ async def _poll_n8n_progress_stage(*, started_after: float) -> str | None:
     async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
         executions: list[dict[str, Any]] = []
         for workflow_id in workflow_ids:
-            executions.extend(
-                await _list_recent_n8n_executions(
-                    client=client,
-                    base_url=base_url,
-                    workflow_id=workflow_id,
-                    started_after=started_after,
+            for status in (None, "running", "success", "error"):
+                executions.extend(
+                    await _list_recent_n8n_executions(
+                        client=client,
+                        base_url=base_url,
+                        workflow_id=workflow_id,
+                        started_after=started_after,
+                        status=status,
+                    )
                 )
-            )
+
+        executions_by_id = {
+            str(execution.get("id")): execution
+            for execution in executions
+            if execution.get("id")
+        }
 
         stage: str | None = None
         for execution in sorted(
-            executions,
+            executions_by_id.values(),
             key=lambda item: _parse_n8n_time(item.get("startedAt")) or 0.0,
         ):
             execution_id = execution.get("id")
@@ -1414,10 +1342,15 @@ async def _list_recent_n8n_executions(
     base_url: str,
     workflow_id: str,
     started_after: float,
+    status: str | None = None,
 ) -> list[dict[str, Any]]:
+    params: dict[str, Any] = {"workflowId": workflow_id, "limit": 10, "includeData": "false"}
+    if status:
+        params["status"] = status
+
     response = await client.get(
         f"{base_url}/api/v1/executions",
-        params={"workflowId": workflow_id, "limit": 10, "includeData": "false"},
+        params=params,
     )
     response.raise_for_status()
     payload = response.json()
@@ -1518,14 +1451,24 @@ def _stage_for_n8n_node(*, node_id: Any, node_name: str) -> str | None:
     for stage in _n8n_progress_stage_order:
         if node_id_text and node_id_text in _n8n_completed_node_stage_ids[stage]:
             return stage
-        if node_name in _n8n_completed_node_stage_names[stage]:
-            return stage
-    for stage in _n8n_progress_stage_order:
-        if node_id_text and node_id_text in _n8n_current_node_stage_ids[stage]:
-            return stage
-        if node_name in _n8n_current_node_stage_names[stage]:
+    return None
+
+
+def _optimistic_n8n_progress_stage(*, elapsed_seconds: float) -> str | None:
+    for threshold, stage in _n8n_optimistic_progress_thresholds:
+        if elapsed_seconds >= threshold:
             return stage
     return None
+
+
+def _latest_n8n_progress_stage(*stages: str | None) -> str | None:
+    latest_stage: str | None = None
+    for stage in stages:
+        if stage and (
+            latest_stage is None or _n8n_stage_index(stage) > _n8n_stage_index(latest_stage)
+        ):
+            latest_stage = stage
+    return latest_stage
 
 
 def _n8n_stage_index(stage: str | None) -> int:
@@ -1569,6 +1512,8 @@ async def _run_feishu_feedback_loop(
 
         text = feedback_texts[index]
         index = (index + 1) % len(feedback_texts)
+        if stop_event.is_set():
+            break
         await _update_feishu_feedback_status(state, text)
 
 
@@ -1639,6 +1584,8 @@ async def _try_send_feishu_markdown_message(
     reply_to_message_id: str | None,
     markdown_text: str,
     log_content: bool = True,
+    stop_cancel_id: str | None = None,
+    canceled_text: str | None = None,
 ) -> str | None:
     if chat_id:
         fields: dict[str, Any] = {"chat_id": chat_id, "markdown_len": len(markdown_text)}
@@ -1650,8 +1597,25 @@ async def _try_send_feishu_markdown_message(
                 chat_id,
                 markdown_text,
                 log_content=log_content,
+                stop_cancel_id=stop_cancel_id,
+                canceled_text=canceled_text,
             )
         except HTTPException as exc:
+            if stop_cancel_id and _is_feishu_card_content_error(exc):
+                _warn(
+                    "stop button card rejected; retrying without button",
+                    chat_id=chat_id,
+                    error=_detail_to_text(exc.detail),
+                )
+                try:
+                    return await _send_feishu_markdown_message_to_chat(
+                        chat_id,
+                        markdown_text,
+                        log_content=log_content,
+                        canceled_text=canceled_text,
+                    )
+                except HTTPException as fallback_exc:
+                    exc = fallback_exc
             detail = _detail_to_text(exc.detail)
             logger.exception("Failed to send Feishu markdown card to chat %s: %s", chat_id, detail)
             _debug("markdown send failed", chat_id=chat_id, error=detail)
@@ -1661,6 +1625,8 @@ async def _try_send_feishu_markdown_message(
             reply_to_message_id,
             markdown_text,
             log_content=log_content,
+            stop_cancel_id=stop_cancel_id,
+            canceled_text=canceled_text,
         )
 
     return None
@@ -1671,6 +1637,8 @@ async def _try_send_feishu_markdown_reply(
     markdown_text: str,
     *,
     log_content: bool = True,
+    stop_cancel_id: str | None = None,
+    canceled_text: str | None = None,
 ) -> str | None:
     fields: dict[str, Any] = {"message_id": message_id, "markdown_len": len(markdown_text)}
     if log_content:
@@ -1681,8 +1649,25 @@ async def _try_send_feishu_markdown_reply(
             message_id,
             markdown_text,
             log_content=log_content,
+            stop_cancel_id=stop_cancel_id,
+            canceled_text=canceled_text,
         )
     except HTTPException as exc:
+        if stop_cancel_id and _is_feishu_card_content_error(exc):
+            _warn(
+                "stop button reply card rejected; retrying without button",
+                message_id=message_id,
+                error=_detail_to_text(exc.detail),
+            )
+            try:
+                return await _send_feishu_markdown_reply(
+                    message_id,
+                    markdown_text,
+                    log_content=log_content,
+                    canceled_text=canceled_text,
+                )
+            except HTTPException as fallback_exc:
+                exc = fallback_exc
         detail = _detail_to_text(exc.detail)
         logger.exception("Failed to send Feishu markdown card %s: %s", message_id, detail)
         _debug("markdown reply failed", message_id=message_id, error=detail)
@@ -1693,97 +1678,13 @@ async def _try_reply_feishu_markdown(message_id: str, markdown_text: str) -> boo
     return await _try_send_feishu_markdown_reply(message_id, markdown_text) is not None
 
 
-async def _pseudo_stream_feishu_final_answer(
-    *,
-    message_id: str,
-    answer: str,
-) -> bool:
-    chunks = _build_pseudo_stream_chunks(answer)
-    if not chunks:
-        return await _try_update_feishu_markdown_message(message_id, answer)
-
-    sent = True
-    for index, chunk in enumerate(chunks):
-        sent = await _try_update_feishu_markdown_message(
-            message_id,
-            chunk,
-            log_content=index == len(chunks) - 1,
-        )
-        if not sent:
-            return False
-        if index < len(chunks) - 1:
-            await asyncio.sleep(_pseudo_stream_update_delay_seconds)
-    return sent
-
-
-async def _pseudo_stream_new_feishu_final_answer(
-    *,
-    chat_id: str | None,
-    reply_to_message_id: str | None,
-    answer: str,
-) -> str | None:
-    chunks = _build_pseudo_stream_chunks(answer)
-    if not chunks:
-        return await _try_send_feishu_markdown_message(
-            chat_id=chat_id,
-            reply_to_message_id=reply_to_message_id,
-            markdown_text=answer,
-        )
-
-    sent_message_id = await _try_send_feishu_markdown_message(
-        chat_id=chat_id,
-        reply_to_message_id=reply_to_message_id,
-        markdown_text=chunks[0],
-        log_content=False,
-    )
-    if not sent_message_id:
-        return None
-
-    for index, chunk in enumerate(chunks[1:], start=1):
-        await asyncio.sleep(_pseudo_stream_update_delay_seconds)
-        updated = await _try_update_feishu_markdown_message(
-            sent_message_id,
-            chunk,
-            log_content=index == len(chunks) - 1,
-        )
-        if not updated:
-            return sent_message_id
-    return sent_message_id
-
-
-def _build_pseudo_stream_chunks(text: str) -> list[str]:
-    cleaned = text.strip()
-    if not cleaned:
-        return []
-    if len(cleaned) <= 160:
-        return [cleaned]
-
-    chunks: list[str] = []
-    step = 120
-    index = step
-    while index < len(cleaned):
-        boundary = _find_stream_chunk_boundary(cleaned, index, window=40)
-        chunks.append(cleaned[:boundary].rstrip())
-        index = boundary + step
-    if not chunks or chunks[-1] != cleaned:
-        chunks.append(cleaned)
-    return chunks
-
-
-def _find_stream_chunk_boundary(text: str, target: int, *, window: int) -> int:
-    end = min(len(text), target + window)
-    start = max(0, target - window)
-    for index in range(min(end, len(text) - 1), start, -1):
-        if text[index] in "。！？；\n，,.;!?":
-            return index + 1
-    return min(target, len(text))
-
-
 async def _try_update_feishu_markdown_message(
     message_id: str,
     markdown_text: str,
     *,
     log_content: bool = True,
+    stop_cancel_id: str | None = None,
+    canceled_text: str | None = None,
 ) -> bool:
     fields: dict[str, Any] = {"message_id": message_id, "markdown_len": len(markdown_text)}
     if log_content:
@@ -1794,12 +1695,228 @@ async def _try_update_feishu_markdown_message(
             message_id,
             markdown_text,
             log_content=log_content,
+            stop_cancel_id=stop_cancel_id,
+            canceled_text=canceled_text,
         )
     except HTTPException as exc:
+        if stop_cancel_id and _is_feishu_card_content_error(exc):
+            _warn(
+                "stop button update card rejected; retrying without button",
+                message_id=message_id,
+                error=_detail_to_text(exc.detail),
+            )
+            try:
+                return await _update_feishu_markdown_message(
+                    message_id,
+                    markdown_text,
+                    log_content=log_content,
+                    canceled_text=canceled_text,
+                )
+            except HTTPException as fallback_exc:
+                exc = fallback_exc
         detail = _detail_to_text(exc.detail)
         logger.exception("Failed to update Feishu markdown card %s: %s", message_id, detail)
         _debug("markdown update failed", message_id=message_id, error=detail)
         return False
+
+
+def _register_feishu_answer_cancel_state(
+    *,
+    question: str,
+    chat_id: str | None,
+    message_id: str | None,
+) -> str:
+    _cleanup_feishu_answer_cancel_states()
+    cancel_id = uuid.uuid4().hex
+    _feishu_answer_cancel_states[cancel_id] = _FeishuAnswerCancelState(
+        cancel_id=cancel_id,
+        started_at=time.monotonic(),
+        incoming_message_id=message_id,
+        chat_id=chat_id,
+        question=question,
+        answer_task=asyncio.current_task(),
+    )
+    return cancel_id
+
+
+def _bind_feishu_answer_feedback(
+    cancel_id: str | None,
+    feedback_handle: _FeishuFeedbackHandle | None,
+) -> None:
+    if not cancel_id or not feedback_handle:
+        return
+    cancel_state = _feishu_answer_cancel_states.get(cancel_id)
+    if cancel_state:
+        cancel_state.feedback_handle = feedback_handle
+
+
+def _discard_feishu_answer_cancel_state(cancel_id: str | None) -> None:
+    if cancel_id:
+        cancel_state = _feishu_answer_cancel_states.get(cancel_id)
+        if cancel_state and cancel_state.canceled_at is not None:
+            return
+        _feishu_answer_cancel_states.pop(cancel_id, None)
+
+
+def _cleanup_feishu_answer_cancel_states() -> None:
+    now = time.monotonic()
+    expired_ids = [
+        cancel_id
+        for cancel_id, state in _feishu_answer_cancel_states.items()
+        if now - state.started_at > 7200
+    ]
+    for cancel_id in expired_ids:
+        _feishu_answer_cancel_states.pop(cancel_id, None)
+
+
+def _is_feishu_answer_cancelled(cancel_id: str | None) -> bool:
+    if not cancel_id:
+        return False
+    cancel_state = _feishu_answer_cancel_states.get(cancel_id)
+    return bool(cancel_state and cancel_state.canceled_at is not None)
+
+
+def _is_feishu_card_action_event(event_type: Any, payload: dict[str, Any]) -> bool:
+    if event_type == "card.action.trigger":
+        return True
+    if payload.get("type") == "card.action.trigger":
+        return True
+    action = _extract_feishu_card_action_value(payload)
+    return isinstance(action, dict) and action.get("action") == "stop_feishu_answer"
+
+
+async def _handle_feishu_card_action(payload: dict[str, Any]) -> dict[str, Any]:
+    value = _extract_feishu_card_action_value(payload)
+    if not isinstance(value, dict) or value.get("action") != "stop_feishu_answer":
+        return {"ok": True, "ignored": True, "reason": "unsupported_card_action"}
+
+    cancel_id = value.get("cancel_id")
+    if not isinstance(cancel_id, str) or not cancel_id:
+        return {"ok": False, "ignored": True, "reason": "missing_cancel_id"}
+
+    cancelled = await _cancel_feishu_answer(cancel_id)
+    result: dict[str, Any] = {
+        "ok": True,
+        "cancelled": cancelled,
+        "toast": {
+            "type": "info",
+            "content": "已停止回答" if cancelled else "回答已结束或无法停止",
+        },
+    }
+    callback_card = await _build_feishu_cancel_callback_card(cancel_id)
+    if callback_card:
+        result["card"] = {
+            "type": "raw",
+            "data": callback_card,
+        }
+    return result
+
+
+def _extract_feishu_card_action_value(payload: dict[str, Any]) -> dict[str, Any] | None:
+    event = payload.get("event")
+    if not isinstance(event, dict):
+        event = {}
+
+    candidates: list[Any] = [
+        event.get("action"),
+        payload.get("action"),
+        event.get("action_info"),
+        payload.get("action_info"),
+    ]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        value = candidate.get("value")
+        if isinstance(value, dict):
+            return value
+        if candidate.get("action") == "stop_feishu_answer":
+            return candidate
+    return None
+
+
+async def _cancel_feishu_answer(cancel_id: str) -> bool:
+    cancel_state = _feishu_answer_cancel_states.get(cancel_id)
+    if not cancel_state:
+        _debug("answer cancel ignored", reason="missing_cancel_state", cancel_id=cancel_id)
+        return False
+
+    if cancel_state.canceled_at is None:
+        cancel_state.canceled_at = time.monotonic()
+
+    feedback_handle = cancel_state.feedback_handle
+    if feedback_handle:
+        feedback_handle.stop_event.set()
+        canceled_text = _format_feishu_cancel_elapsed(
+            started_at=cancel_state.started_at,
+            canceled_at=cancel_state.canceled_at,
+        )
+        state = feedback_handle.state
+        state.canceled_text = canceled_text
+        await _cancel_feishu_feedback_updates(feedback_handle)
+        await _rewrite_cancelled_feishu_feedback_card(state)
+
+    answer_task = cancel_state.answer_task
+    current_task = asyncio.current_task()
+    if answer_task and answer_task is not current_task and not answer_task.done():
+        answer_task.cancel()
+
+    _debug(
+        "answer cancel requested",
+        cancel_id=cancel_id,
+        incoming_message_id=cancel_state.incoming_message_id,
+        chat_id=cancel_state.chat_id,
+        has_feedback=bool(feedback_handle),
+    )
+    return True
+
+
+async def _build_feishu_cancel_callback_card(cancel_id: str) -> dict[str, Any] | None:
+    cancel_state = _feishu_answer_cancel_states.get(cancel_id)
+    feedback_handle = cancel_state.feedback_handle if cancel_state else None
+    if not feedback_handle:
+        return None
+
+    state = feedback_handle.state
+    if not state.canceled_text:
+        if not cancel_state or cancel_state.canceled_at is None:
+            return None
+        state.canceled_text = _format_feishu_cancel_elapsed(
+            started_at=cancel_state.started_at,
+            canceled_at=cancel_state.canceled_at,
+        )
+
+    content = await _build_feishu_card_content(
+        _compose_cancelled_feedback_card_text(state),
+        "",
+        canceled_text=state.canceled_text,
+    )
+    return json.loads(content)
+
+
+async def _cancel_feishu_feedback_updates(handle: _FeishuFeedbackHandle) -> None:
+    handle.stop_event.set()
+    for task in (handle.task, handle.comfort_task):
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(handle.task, handle.comfort_task, return_exceptions=True)
+
+
+async def _rewrite_cancelled_feishu_feedback_card(state: _FeishuFeedbackState) -> bool:
+    async with state.update_lock:
+        return await _try_update_feishu_markdown_message(
+            state.message_id,
+            _compose_cancelled_feedback_card_text(state),
+            log_content=False,
+            canceled_text=state.canceled_text,
+        )
+
+
+def _format_feishu_cancel_elapsed(*, started_at: float, canceled_at: float) -> str:
+    elapsed_seconds = max(0, int(round(canceled_at - started_at)))
+    minutes, seconds = divmod(elapsed_seconds, 60)
+    if minutes <= 0:
+        return f"您在{seconds}秒后取消回答"
+    return f"您在{minutes}分{seconds}秒后取消回答"
 
 
 def _verify_feishu_token(payload: dict[str, Any]) -> None:
@@ -1885,6 +2002,8 @@ async def _send_feishu_markdown_message_to_chat(
     markdown_text: str,
     *,
     log_content: bool = True,
+    stop_cancel_id: str | None = None,
+    canceled_text: str | None = None,
 ) -> str | None:
     if not settings.feishu_app_id or not settings.feishu_app_secret:
         _debug(
@@ -1898,7 +2017,12 @@ async def _send_feishu_markdown_message_to_chat(
     token = await _get_tenant_access_token()
     timeout = httpx.Timeout(settings.feishu_timeout)
     url = f"{settings.feishu_base_url}/open-apis/im/v1/messages"
-    content = await _build_feishu_card_content(markdown_text, token)
+    content = await _build_feishu_card_content(
+        markdown_text,
+        token,
+        stop_cancel_id=stop_cancel_id,
+        canceled_text=canceled_text,
+    )
     fields: dict[str, Any] = {"chat_id": chat_id, "url": url}
     if log_content:
         fields["content_preview"] = _preview(content)
@@ -1958,6 +2082,8 @@ async def _send_feishu_markdown_reply(
     markdown_text: str,
     *,
     log_content: bool = True,
+    stop_cancel_id: str | None = None,
+    canceled_text: str | None = None,
 ) -> str | None:
     if not settings.feishu_app_id or not settings.feishu_app_secret:
         _debug(
@@ -1971,7 +2097,12 @@ async def _send_feishu_markdown_reply(
     token = await _get_tenant_access_token()
     timeout = httpx.Timeout(settings.feishu_timeout)
     url = f"{settings.feishu_base_url}/open-apis/im/v1/messages/{message_id}/reply"
-    content = await _build_feishu_card_content(markdown_text, token)
+    content = await _build_feishu_card_content(
+        markdown_text,
+        token,
+        stop_cancel_id=stop_cancel_id,
+        canceled_text=canceled_text,
+    )
     fields: dict[str, Any] = {"message_id": message_id, "url": url}
     if log_content:
         fields["content_preview"] = _preview(content)
@@ -2029,6 +2160,8 @@ async def _update_feishu_markdown_message(
     markdown_text: str,
     *,
     log_content: bool = True,
+    stop_cancel_id: str | None = None,
+    canceled_text: str | None = None,
 ) -> bool:
     if not settings.feishu_app_id or not settings.feishu_app_secret:
         _debug(
@@ -2042,7 +2175,12 @@ async def _update_feishu_markdown_message(
     token = await _get_tenant_access_token()
     timeout = httpx.Timeout(settings.feishu_timeout)
     url = f"{settings.feishu_base_url}/open-apis/im/v1/messages/{message_id}"
-    content = await _build_feishu_card_content(markdown_text, token)
+    content = await _build_feishu_card_content(
+        markdown_text,
+        token,
+        stop_cancel_id=stop_cancel_id,
+        canceled_text=canceled_text,
+    )
     fields: dict[str, Any] = {"message_id": message_id, "url": url}
     if log_content:
         fields["content_preview"] = _preview(content)
@@ -2106,11 +2244,21 @@ def _extract_feishu_message_id(result: dict[str, Any]) -> str | None:
     return None
 
 
-async def _build_feishu_card_content(markdown_text: str, token: str) -> str:
+async def _build_feishu_card_content(
+    markdown_text: str,
+    token: str,
+    *,
+    stop_cancel_id: str | None = None,
+    canceled_text: str | None = None,
+) -> str:
     markdown_text, reference_sources = _rewrite_reference_links(markdown_text)
     elements = await _build_feishu_card_elements(markdown_text, token)
     if reference_sources:
         elements.append(_build_reference_sources_panel(reference_sources))
+    if canceled_text:
+        elements.extend(_build_cancelled_feedback_footer(canceled_text))
+    elif stop_cancel_id:
+        elements.append(_build_stop_answer_button(stop_cancel_id))
     if not elements:
         elements = [_build_markdown_element(" ")]
 
@@ -2127,6 +2275,34 @@ async def _build_feishu_card_content(markdown_text: str, token: str) -> str:
         },
         ensure_ascii=False,
     )
+
+
+def _build_stop_answer_button(cancel_id: str) -> dict[str, Any]:
+    return {
+        "tag": "button",
+        "text": {
+            "tag": "plain_text",
+            "content": "⏹ 停止回答",
+        },
+        "type": "danger",
+        "width": "default",
+        "behaviors": [
+            {
+                "type": "callback",
+                "value": {
+                    "action": "stop_feishu_answer",
+                    "cancel_id": cancel_id,
+                },
+            }
+        ],
+    }
+
+
+def _build_cancelled_feedback_footer(canceled_text: str) -> list[dict[str, Any]]:
+    return [
+        {"tag": "hr"},
+        _build_markdown_element(f"<font color='grey'>{canceled_text}</font>"),
+    ]
 
 
 async def _build_feishu_card_elements(markdown_text: str, token: str) -> list[dict[str, Any]]:
@@ -2289,8 +2465,34 @@ def _rewrite_reference_links(markdown: str) -> tuple[str, list[_ReferenceSource]
     references_by_url: dict[str, _ReferenceSource] = {}
     in_code_block = False
 
-    def replace_match(match: re.Match[str]) -> str:
+    def register_reference(url: str, label: str, description: str) -> _ReferenceSource:
         nonlocal references_by_url
+        normalized_url = _normalize_reference_url(url)
+        if normalized_url not in references_by_url:
+            references_by_url[normalized_url] = _ReferenceSource(
+                number=len(references_by_url) + 1,
+                label=label,
+                description=description,
+                url=url,
+            )
+        return references_by_url[normalized_url]
+
+    def format_short_reference(source: _ReferenceSource) -> str:
+        return f"[[{source.number}]]({_format_markdown_link_url(source.url)})"
+
+    def replace_reference_tag(match: re.Match[str]) -> str:
+        if in_code_block:
+            return match.group(0)
+
+        raw_path = match.group(1).strip()
+        if not raw_path:
+            return ""
+
+        description = _extract_reference_file_name(raw_path) or raw_path
+        source = register_reference(raw_path, f"引用{len(references_by_url) + 1}", description)
+        return format_short_reference(source)
+
+    def replace_match(match: re.Match[str]) -> str:
         if in_code_block:
             return match.group(0)
 
@@ -2302,19 +2504,10 @@ def _rewrite_reference_links(markdown: str) -> tuple[str, list[_ReferenceSource]
         if not reference_match:
             return match.group(0)
 
-        normalized_url = _normalize_reference_url(url)
-        if normalized_url not in references_by_url:
-            label_text = reference_match.group(1).replace(" ", "")
-            description = existing_title or label
-            references_by_url[normalized_url] = _ReferenceSource(
-                number=len(references_by_url) + 1,
-                label=label_text,
-                description=description,
-                url=url,
-            )
-
-        source = references_by_url[normalized_url]
-        return f"[[{source.number}]]({_format_markdown_link_url(source.url)})"
+        label_text = reference_match.group(1).replace(" ", "")
+        description = existing_title or label
+        source = register_reference(url, label_text, description)
+        return format_short_reference(source)
 
     rewritten_lines: list[str] = []
     for line in markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
@@ -2322,10 +2515,12 @@ def _rewrite_reference_links(markdown: str) -> tuple[str, list[_ReferenceSource]
             in_code_block = not in_code_block
             rewritten_lines.append(line)
             continue
-        rewritten_line = _markdown_link_pattern.sub(replace_match, line)
+        rewritten_line = _reference_tag_pattern.sub(replace_reference_tag, line)
+        rewritten_line = _markdown_link_pattern.sub(replace_match, rewritten_line)
         rewritten_lines.append(_dedupe_adjacent_reference_links(rewritten_line))
 
-    return "\n".join(rewritten_lines).strip(), list(references_by_url.values())
+    rewritten_markdown = _join_adjacent_reference_links("\n".join(rewritten_lines))
+    return rewritten_markdown.strip(), list(references_by_url.values())
 
 
 def _dedupe_adjacent_reference_links(markdown: str) -> str:
@@ -2335,6 +2530,40 @@ def _dedupe_adjacent_reference_links(markdown: str) -> str:
         previous = current
         current = _adjacent_reference_pattern.sub(r"\g<ref>", current)
     return current
+
+
+def _join_adjacent_reference_links(markdown: str) -> str:
+    parts: list[str] = []
+    buffer: list[str] = []
+    in_code_block = False
+
+    def flush_buffer() -> None:
+        if not buffer:
+            return
+        current = "".join(buffer)
+        previous = None
+        while current != previous:
+            previous = current
+            current = _adjacent_any_reference_separator_pattern.sub(r"\g<ref>", current)
+        parts.append(current)
+        buffer.clear()
+
+    for line in markdown.splitlines(keepends=True):
+        if line.strip().startswith("```"):
+            was_in_code_block = in_code_block
+            if not was_in_code_block:
+                flush_buffer()
+            parts.append(line)
+            in_code_block = not was_in_code_block
+            continue
+
+        if in_code_block:
+            parts.append(line)
+        else:
+            buffer.append(line)
+
+    flush_buffer()
+    return "".join(parts)
 
 
 def _parse_markdown_link_destination(raw_destination: str) -> tuple[str, str]:
@@ -2775,6 +3004,11 @@ def _detail_to_text(detail: Any) -> str:
     if isinstance(detail, str):
         return detail
     return json.dumps(detail, ensure_ascii=False, default=str)
+
+
+def _is_feishu_card_content_error(exc: HTTPException) -> bool:
+    detail = _detail_to_text(exc.detail)
+    return "Failed to create card content" in detail or "unsupported tag" in detail
 
 
 def _preview(value: Any, max_length: int = 160) -> str:

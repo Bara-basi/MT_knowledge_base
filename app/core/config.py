@@ -174,7 +174,7 @@ class Settings:
     n8n_api_base_url: str = os.getenv("N8N_API_BASE_URL", "").rstrip("/")
     n8n_api_key: str = os.getenv("N8N_API_KEY", "")
     n8n_progress_enabled: bool = _env_bool("N8N_PROGRESS_ENABLED", True)
-    n8n_progress_poll_interval: float = float(os.getenv("N8N_PROGRESS_POLL_INTERVAL", "1.5"))
+    n8n_progress_poll_interval: float = float(os.getenv("N8N_PROGRESS_POLL_INTERVAL", "0.5"))
     n8n_progress_lookback_seconds: float = float(
         os.getenv("N8N_PROGRESS_LOOKBACK_SECONDS", "5")
     )
