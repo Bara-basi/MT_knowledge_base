@@ -1157,6 +1157,129 @@ def test_feishu_waiting_card_does_not_use_unsupported_action_container() -> None
     assert all(element.get("tag") != "action" for element in card["body"]["elements"])
 
 
+def test_feishu_final_answer_card_adds_radio_feedback_buttons() -> None:
+    feedback_url = feishu._get_answer_feedback_form_url()
+    content = asyncio.run(
+        feishu._build_feishu_card_content(
+            "final answer",
+            "tenant-token",
+            answer_feedback_id="feedback-1",
+        )
+    )
+
+    card = json.loads(content)
+    elements = card["body"]["elements"]
+    feedback_panel = elements[-1]
+    assert feedback_panel["tag"] == "collapsible_panel"
+    assert feedback_panel["expanded"] is False
+    assert feedback_panel["header"] == {
+        "title": {"tag": "plain_text", "content": "反馈"}
+    }
+
+    feedback_elements = feedback_panel["elements"]
+    button_row = feedback_elements[1]
+    assert button_row["tag"] == "column_set"
+
+    helpful_button = button_row["columns"][0]["elements"][0]
+    issue_button = button_row["columns"][1]["elements"][0]
+    assert helpful_button["text"]["content"] == "👍 有帮助"
+    assert helpful_button["behaviors"] == [
+        {
+            "type": "callback",
+            "value": {
+                "action": "answer_feedback",
+                "feedback_id": "feedback-1",
+                "choice": "helpful",
+            },
+        }
+    ]
+    assert issue_button["text"]["content"] == "👎 有问题，去反馈"
+    assert issue_button["behaviors"][0]["value"] == {
+        "action": "answer_feedback",
+        "feedback_id": "feedback-1",
+        "choice": "issue",
+    }
+    assert issue_button["behaviors"][1]["type"] == "open_url"
+    assert issue_button["behaviors"][1]["default_url"] == feedback_url
+    assert f"[去反馈]({feedback_url})" in feedback_elements[-1]["content"]
+
+
+def test_feishu_final_answer_feedback_selected_locks_other_choice() -> None:
+    content = asyncio.run(
+        feishu._build_feishu_card_content(
+            "final answer",
+            "tenant-token",
+            answer_feedback_id="feedback-1",
+            answer_feedback_selected="helpful",
+        )
+    )
+
+    card = json.loads(content)
+    feedback_panel = card["body"]["elements"][-1]
+    button_row = feedback_panel["elements"][1]
+    helpful_button = button_row["columns"][0]["elements"][0]
+    issue_button = button_row["columns"][1]["elements"][0]
+    assert helpful_button["type"] == "primary"
+    assert helpful_button["text"]["content"] == "👍 已标记有帮助"
+    assert "disabled" not in helpful_button
+    assert issue_button["disabled"] is True
+
+
+def test_feishu_answer_feedback_action_keeps_first_choice(monkeypatch) -> None:
+    async def fake_get_token() -> str:
+        return "tenant-token"
+
+    async def run_case() -> tuple[dict, dict]:
+        feishu._feishu_answer_feedback_states["feedback-1"] = feishu._FeishuAnswerFeedbackState(
+            feedback_id="feedback-1",
+            answer="final answer",
+            selected=None,
+            created_at=feishu.time.monotonic(),
+        )
+        first = await feishu._handle_feishu_card_action(
+            {
+                "event": {
+                    "action": {
+                        "value": {
+                            "action": "answer_feedback",
+                            "feedback_id": "feedback-1",
+                            "choice": "issue",
+                        }
+                    }
+                }
+            }
+        )
+        second = await feishu._handle_feishu_card_action(
+            {
+                "event": {
+                    "action": {
+                        "value": {
+                            "action": "answer_feedback",
+                            "feedback_id": "feedback-1",
+                            "choice": "helpful",
+                        }
+                    }
+                }
+            }
+        )
+        return first, second
+
+    monkeypatch.setattr(feishu, "_get_tenant_access_token", fake_get_token)
+
+    try:
+        first_result, second_result = asyncio.run(run_case())
+    finally:
+        feishu._feishu_answer_feedback_states.pop("feedback-1", None)
+
+    assert first_result["selected"] == "issue"
+    assert second_result["selected"] == "issue"
+    assert second_result["toast"]["type"] == "info"
+    first_elements = first_result["card"]["data"]["body"]["elements"]
+    first_feedback_panel = first_elements[-1]
+    first_button_row = first_feedback_panel["elements"][1]
+    assert first_button_row["columns"][1]["elements"][0]["type"] == "danger"
+
+
 def test_feishu_card_content_error_detection() -> None:
     exc = feishu.HTTPException(
         status_code=502,

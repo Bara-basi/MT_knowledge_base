@@ -109,7 +109,16 @@ class _FeishuAnswerCancelState:
     canceled_at: float | None = None
 
 
+@dataclass
+class _FeishuAnswerFeedbackState:
+    feedback_id: str
+    answer: str
+    selected: str | None
+    created_at: float
+
+
 _feishu_answer_cancel_states: dict[str, _FeishuAnswerCancelState] = {}
+_feishu_answer_feedback_states: dict[str, _FeishuAnswerFeedbackState] = {}
 
 _n8n_progress_texts = {
     "understanding": "🤔 正在理解问题...",
@@ -470,16 +479,19 @@ async def _answer_feishu_message(
         _discard_feishu_answer_cancel_state(cancel_id)
         return
 
+    answer_feedback_id = _register_feishu_answer_feedback_state(response.answer)
     if feedback_handle:
         sent = await _try_update_feishu_markdown_message(
             feedback_handle.message_id,
             response.answer,
+            answer_feedback_id=answer_feedback_id,
         )
     else:
         sent_message_id = await _try_send_feishu_markdown_message(
             chat_id=chat_id,
             reply_to_message_id=message_id,
             markdown_text=response.answer,
+            answer_feedback_id=answer_feedback_id,
         )
         sent = sent_message_id is not None
     _debug(
@@ -1586,6 +1598,8 @@ async def _try_send_feishu_markdown_message(
     log_content: bool = True,
     stop_cancel_id: str | None = None,
     canceled_text: str | None = None,
+    answer_feedback_id: str | None = None,
+    answer_feedback_selected: str | None = None,
 ) -> str | None:
     if chat_id:
         fields: dict[str, Any] = {"chat_id": chat_id, "markdown_len": len(markdown_text)}
@@ -1599,11 +1613,13 @@ async def _try_send_feishu_markdown_message(
                 log_content=log_content,
                 stop_cancel_id=stop_cancel_id,
                 canceled_text=canceled_text,
+                answer_feedback_id=answer_feedback_id,
+                answer_feedback_selected=answer_feedback_selected,
             )
         except HTTPException as exc:
-            if stop_cancel_id and _is_feishu_card_content_error(exc):
+            if (stop_cancel_id or answer_feedback_id) and _is_feishu_card_content_error(exc):
                 _warn(
-                    "stop button card rejected; retrying without button",
+                    "interactive card controls rejected; retrying without controls",
                     chat_id=chat_id,
                     error=_detail_to_text(exc.detail),
                 )
@@ -1627,6 +1643,8 @@ async def _try_send_feishu_markdown_message(
             log_content=log_content,
             stop_cancel_id=stop_cancel_id,
             canceled_text=canceled_text,
+            answer_feedback_id=answer_feedback_id,
+            answer_feedback_selected=answer_feedback_selected,
         )
 
     return None
@@ -1639,6 +1657,8 @@ async def _try_send_feishu_markdown_reply(
     log_content: bool = True,
     stop_cancel_id: str | None = None,
     canceled_text: str | None = None,
+    answer_feedback_id: str | None = None,
+    answer_feedback_selected: str | None = None,
 ) -> str | None:
     fields: dict[str, Any] = {"message_id": message_id, "markdown_len": len(markdown_text)}
     if log_content:
@@ -1651,11 +1671,13 @@ async def _try_send_feishu_markdown_reply(
             log_content=log_content,
             stop_cancel_id=stop_cancel_id,
             canceled_text=canceled_text,
+            answer_feedback_id=answer_feedback_id,
+            answer_feedback_selected=answer_feedback_selected,
         )
     except HTTPException as exc:
-        if stop_cancel_id and _is_feishu_card_content_error(exc):
+        if (stop_cancel_id or answer_feedback_id) and _is_feishu_card_content_error(exc):
             _warn(
-                "stop button reply card rejected; retrying without button",
+                "interactive reply controls rejected; retrying without controls",
                 message_id=message_id,
                 error=_detail_to_text(exc.detail),
             )
@@ -1685,6 +1707,8 @@ async def _try_update_feishu_markdown_message(
     log_content: bool = True,
     stop_cancel_id: str | None = None,
     canceled_text: str | None = None,
+    answer_feedback_id: str | None = None,
+    answer_feedback_selected: str | None = None,
 ) -> bool:
     fields: dict[str, Any] = {"message_id": message_id, "markdown_len": len(markdown_text)}
     if log_content:
@@ -1697,11 +1721,13 @@ async def _try_update_feishu_markdown_message(
             log_content=log_content,
             stop_cancel_id=stop_cancel_id,
             canceled_text=canceled_text,
+            answer_feedback_id=answer_feedback_id,
+            answer_feedback_selected=answer_feedback_selected,
         )
     except HTTPException as exc:
-        if stop_cancel_id and _is_feishu_card_content_error(exc):
+        if (stop_cancel_id or answer_feedback_id) and _is_feishu_card_content_error(exc):
             _warn(
-                "stop button update card rejected; retrying without button",
+                "interactive update controls rejected; retrying without controls",
                 message_id=message_id,
                 error=_detail_to_text(exc.detail),
             )
@@ -1737,6 +1763,29 @@ def _register_feishu_answer_cancel_state(
         answer_task=asyncio.current_task(),
     )
     return cancel_id
+
+
+def _register_feishu_answer_feedback_state(answer: str) -> str:
+    _cleanup_feishu_answer_feedback_states()
+    feedback_id = uuid.uuid4().hex
+    _feishu_answer_feedback_states[feedback_id] = _FeishuAnswerFeedbackState(
+        feedback_id=feedback_id,
+        answer=answer,
+        selected=None,
+        created_at=time.monotonic(),
+    )
+    return feedback_id
+
+
+def _cleanup_feishu_answer_feedback_states() -> None:
+    now = time.monotonic()
+    expired_ids = [
+        feedback_id
+        for feedback_id, state in _feishu_answer_feedback_states.items()
+        if now - state.created_at > 7 * 24 * 3600
+    ]
+    for feedback_id in expired_ids:
+        _feishu_answer_feedback_states.pop(feedback_id, None)
 
 
 def _bind_feishu_answer_feedback(
@@ -1782,12 +1831,19 @@ def _is_feishu_card_action_event(event_type: Any, payload: dict[str, Any]) -> bo
     if payload.get("type") == "card.action.trigger":
         return True
     action = _extract_feishu_card_action_value(payload)
-    return isinstance(action, dict) and action.get("action") == "stop_feishu_answer"
+    return isinstance(action, dict) and action.get("action") in {
+        "stop_feishu_answer",
+        "answer_feedback",
+    }
 
 
 async def _handle_feishu_card_action(payload: dict[str, Any]) -> dict[str, Any]:
     value = _extract_feishu_card_action_value(payload)
-    if not isinstance(value, dict) or value.get("action") != "stop_feishu_answer":
+    if not isinstance(value, dict):
+        return {"ok": True, "ignored": True, "reason": "unsupported_card_action"}
+    if value.get("action") == "answer_feedback":
+        return await _handle_feishu_answer_feedback_action(value)
+    if value.get("action") != "stop_feishu_answer":
         return {"ok": True, "ignored": True, "reason": "unsupported_card_action"}
 
     cancel_id = value.get("cancel_id")
@@ -1829,9 +1885,62 @@ def _extract_feishu_card_action_value(payload: dict[str, Any]) -> dict[str, Any]
         value = candidate.get("value")
         if isinstance(value, dict):
             return value
-        if candidate.get("action") == "stop_feishu_answer":
+        if candidate.get("action") in {"stop_feishu_answer", "answer_feedback"}:
             return candidate
     return None
+
+
+async def _handle_feishu_answer_feedback_action(value: dict[str, Any]) -> dict[str, Any]:
+    feedback_id = value.get("feedback_id")
+    choice = value.get("choice")
+    if not isinstance(feedback_id, str) or not feedback_id:
+        return {"ok": False, "ignored": True, "reason": "missing_feedback_id"}
+    if choice not in {"helpful", "issue"}:
+        return {"ok": False, "ignored": True, "reason": "invalid_feedback_choice"}
+
+    _cleanup_feishu_answer_feedback_states()
+    feedback_state = _feishu_answer_feedback_states.get(feedback_id)
+    if not feedback_state:
+        return {
+            "ok": True,
+            "ignored": True,
+            "reason": "feedback_state_expired",
+            "toast": {
+                "type": "info",
+                "content": "反馈入口已过期，可以通过卡片里的链接继续提交问题。",
+            },
+        }
+
+    if feedback_state.selected is None:
+        feedback_state.selected = choice
+        toast_content = (
+            "已收到，你的反馈会帮助我们继续优化知识库。"
+            if choice == "helpful"
+            else "已为你打开反馈表，请补充一下问题细节。"
+        )
+    else:
+        toast_content = "这条回答已经记录过反馈了。"
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "selected": feedback_state.selected,
+        "toast": {
+            "type": "success" if feedback_state.selected == choice else "info",
+            "content": toast_content,
+        },
+    }
+    token = await _get_tenant_access_token() if settings.feishu_app_id and settings.feishu_app_secret else ""
+    content = await _build_feishu_card_content(
+        feedback_state.answer,
+        token,
+        answer_feedback_id=feedback_state.feedback_id,
+        answer_feedback_selected=feedback_state.selected,
+    )
+    result["card"] = {
+        "type": "raw",
+        "data": json.loads(content),
+    }
+    return result
 
 
 async def _cancel_feishu_answer(cancel_id: str) -> bool:
@@ -2004,6 +2113,8 @@ async def _send_feishu_markdown_message_to_chat(
     log_content: bool = True,
     stop_cancel_id: str | None = None,
     canceled_text: str | None = None,
+    answer_feedback_id: str | None = None,
+    answer_feedback_selected: str | None = None,
 ) -> str | None:
     if not settings.feishu_app_id or not settings.feishu_app_secret:
         _debug(
@@ -2022,6 +2133,8 @@ async def _send_feishu_markdown_message_to_chat(
         token,
         stop_cancel_id=stop_cancel_id,
         canceled_text=canceled_text,
+        answer_feedback_id=answer_feedback_id,
+        answer_feedback_selected=answer_feedback_selected,
     )
     fields: dict[str, Any] = {"chat_id": chat_id, "url": url}
     if log_content:
@@ -2084,6 +2197,8 @@ async def _send_feishu_markdown_reply(
     log_content: bool = True,
     stop_cancel_id: str | None = None,
     canceled_text: str | None = None,
+    answer_feedback_id: str | None = None,
+    answer_feedback_selected: str | None = None,
 ) -> str | None:
     if not settings.feishu_app_id or not settings.feishu_app_secret:
         _debug(
@@ -2102,6 +2217,8 @@ async def _send_feishu_markdown_reply(
         token,
         stop_cancel_id=stop_cancel_id,
         canceled_text=canceled_text,
+        answer_feedback_id=answer_feedback_id,
+        answer_feedback_selected=answer_feedback_selected,
     )
     fields: dict[str, Any] = {"message_id": message_id, "url": url}
     if log_content:
@@ -2162,6 +2279,8 @@ async def _update_feishu_markdown_message(
     log_content: bool = True,
     stop_cancel_id: str | None = None,
     canceled_text: str | None = None,
+    answer_feedback_id: str | None = None,
+    answer_feedback_selected: str | None = None,
 ) -> bool:
     if not settings.feishu_app_id or not settings.feishu_app_secret:
         _debug(
@@ -2180,6 +2299,8 @@ async def _update_feishu_markdown_message(
         token,
         stop_cancel_id=stop_cancel_id,
         canceled_text=canceled_text,
+        answer_feedback_id=answer_feedback_id,
+        answer_feedback_selected=answer_feedback_selected,
     )
     fields: dict[str, Any] = {"message_id": message_id, "url": url}
     if log_content:
@@ -2250,6 +2371,8 @@ async def _build_feishu_card_content(
     *,
     stop_cancel_id: str | None = None,
     canceled_text: str | None = None,
+    answer_feedback_id: str | None = None,
+    answer_feedback_selected: str | None = None,
 ) -> str:
     markdown_text, reference_sources = _rewrite_reference_links(markdown_text)
     elements = await _build_feishu_card_elements(markdown_text, token)
@@ -2259,6 +2382,13 @@ async def _build_feishu_card_content(
         elements.extend(_build_cancelled_feedback_footer(canceled_text))
     elif stop_cancel_id:
         elements.append(_build_stop_answer_button(stop_cancel_id))
+    if answer_feedback_id:
+        elements.extend(
+            _build_answer_feedback_footer(
+                feedback_id=answer_feedback_id,
+                selected=answer_feedback_selected,
+            )
+        )
     if not elements:
         elements = [_build_markdown_element(" ")]
 
@@ -2296,6 +2426,131 @@ def _build_stop_answer_button(cancel_id: str) -> dict[str, Any]:
             }
         ],
     }
+
+
+def _build_answer_feedback_footer(
+    *,
+    feedback_id: str,
+    selected: str | None = None,
+) -> list[dict[str, Any]]:
+    selected = selected if selected in {"helpful", "issue"} else None
+    feedback_elements = [
+        _build_markdown_element(
+            "<font color='grey'>这条回答对你有帮助吗？你的反馈会帮助知识库持续变好。</font>"
+        ),
+        {
+            "tag": "column_set",
+            "flex_mode": "bisect",
+            "background_style": "default",
+            "columns": [
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "top",
+                    "elements": [
+                        _build_answer_feedback_button(
+                            feedback_id=feedback_id,
+                            choice="helpful",
+                            selected=selected,
+                        )
+                    ],
+                },
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "top",
+                    "elements": [
+                        _build_answer_feedback_button(
+                            feedback_id=feedback_id,
+                            choice="issue",
+                            selected=selected,
+                        )
+                    ],
+                },
+            ],
+        },
+        _build_markdown_element(
+            f"<font color='grey'>有问题也可以直接[去反馈]({_format_markdown_link_url(_get_answer_feedback_form_url())})。</font>"
+        ),
+    ]
+    return [
+        {
+            "tag": "collapsible_panel",
+            "expanded": False,
+            "header": {
+                "title": {
+                    "tag": "plain_text",
+                    "content": "反馈",
+                }
+            },
+            "elements": feedback_elements,
+        }
+    ]
+
+
+def _build_answer_feedback_button(
+    *,
+    feedback_id: str,
+    choice: str,
+    selected: str | None,
+) -> dict[str, Any]:
+    is_selected = selected == choice
+    is_locked = selected is not None
+    if choice == "helpful":
+        content = "👍 已标记有帮助" if is_selected else "👍 有帮助"
+        button_type = "primary" if is_selected else "default"
+        behaviors = [
+            {
+                "type": "callback",
+                "value": {
+                    "action": "answer_feedback",
+                    "feedback_id": feedback_id,
+                    "choice": "helpful",
+                },
+            }
+        ]
+    else:
+        content = "👎 已选择去反馈" if is_selected else "👎 有问题，去反馈"
+        button_type = "danger" if is_selected else "default"
+        behaviors = [
+            {
+                "type": "callback",
+                "value": {
+                    "action": "answer_feedback",
+                    "feedback_id": feedback_id,
+                    "choice": "issue",
+                },
+            },
+            {
+                "type": "open_url",
+                "default_url": _get_answer_feedback_form_url(),
+                "pc_url": _get_answer_feedback_form_url(),
+                "ios_url": _get_answer_feedback_form_url(),
+                "android_url": _get_answer_feedback_form_url(),
+            },
+        ]
+
+    button: dict[str, Any] = {
+        "tag": "button",
+        "text": {
+            "tag": "plain_text",
+            "content": content,
+        },
+        "type": button_type,
+        "width": "fill",
+        "behaviors": behaviors,
+    }
+    if is_locked and not is_selected:
+        button["disabled"] = True
+    return button
+
+
+def _get_answer_feedback_form_url() -> str:
+    return settings.feishu_feedback_form_url or (
+        "https://tmqhw1h9zt.feishu.cn/wiki/LbjCwUPA6iUbF5k2SFbcowT8nne"
+    )
 
 
 def _build_cancelled_feedback_footer(canceled_text: str) -> list[dict[str, Any]]:

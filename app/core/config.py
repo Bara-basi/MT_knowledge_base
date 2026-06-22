@@ -189,6 +189,10 @@ class Settings:
     )
     feishu_base_url: str = os.getenv("FEISHU_BASE_URL", "https://open.feishu.cn").rstrip("/")
     feishu_timeout: float = float(os.getenv("FEISHU_TIMEOUT", "30"))
+    feishu_feedback_form_url: str = os.getenv(
+        "FEISHU_FEEDBACK_FORM_URL",
+        "https://tmqhw1h9zt.feishu.cn/wiki/LbjCwUPA6iUbF5k2SFbcowT8nne",
+    ).strip()
     public_base_url: str = os.getenv(
         "PUBLIC_BASE_URL",
         "https://shopper-washable-crock.ngrok-free.dev",
