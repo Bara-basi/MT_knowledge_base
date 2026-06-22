@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from typing import Any
 
@@ -10,8 +9,8 @@ from app.db.postgres import (
     ensure_chat_messages_table,
     insert_chat_message,
     update_chat_answer,
-    update_chat_fallback,
 )
+from app.services.privacy import encrypt_chat_text
 
 
 logger = logging.getLogger(__name__)
@@ -28,6 +27,7 @@ async def create_chat_record(
     session_id: str | None,
     conversation_id: str | None,
     question: str,
+    user_name: str | None = None,
 ) -> dict[str, Any]:
     """Persist the initial user question before the answer is available."""
 
@@ -39,6 +39,7 @@ async def create_chat_record(
     return await asyncio.to_thread(
         _create_chat_record_sync,
         user_id=ids["user_id"],
+        user_name=normalize_optional_text(user_name),
         session_id=ids["session_id"],
         conversation_id=ids["conversation_id"],
         question=question,
@@ -52,6 +53,7 @@ async def record_chat_answer(
     conversation_id: str | None,
     question: str,
     answer: str,
+    user_name: str | None = None,
 ) -> dict[str, Any]:
     """Persist the workflow answer to the existing user question row."""
 
@@ -63,37 +65,11 @@ async def record_chat_answer(
     return await asyncio.to_thread(
         _record_chat_answer_sync,
         user_id=ids["user_id"],
+        user_name=normalize_optional_text(user_name),
         session_id=ids["session_id"],
         conversation_id=ids["conversation_id"],
         question=question,
         answer=answer,
-    )
-
-
-async def record_chat_fallback(
-    *,
-    user_id: str | None,
-    session_id: str | None,
-    conversation_id: str | None,
-    question: str,
-    fallback: bool,
-    reason: str | dict[str, Any] | list[Any] | None = None,
-) -> dict[str, Any]:
-    """Persist fallback evaluation to the existing user question row."""
-
-    ids = normalize_record_ids(
-        user_id=user_id,
-        session_id=session_id,
-        conversation_id=conversation_id,
-    )
-    return await asyncio.to_thread(
-        _record_chat_fallback_sync,
-        user_id=ids["user_id"],
-        session_id=ids["session_id"],
-        conversation_id=ids["conversation_id"],
-        question=question,
-        fallback=fallback,
-        reason=serialize_reason(reason),
     )
 
 
@@ -111,17 +87,15 @@ def normalize_record_ids(
     }
 
 
-def serialize_reason(reason: str | dict[str, Any] | list[Any] | None) -> str:
-    if reason is None:
-        return ""
-    if isinstance(reason, str):
-        return reason.strip()
-    return json.dumps(reason, ensure_ascii=False, default=str)
+def normalize_optional_text(value: str | None) -> str | None:
+    cleaned = str(value).strip() if value is not None else ""
+    return cleaned or None
 
 
 def _create_chat_record_sync(
     *,
     user_id: str,
+    user_name: str | None,
     session_id: str,
     conversation_id: str,
     question: str,
@@ -129,15 +103,17 @@ def _create_chat_record_sync(
     ensure_chat_messages_table()
     return create_chat_message(
         user_id=user_id,
+        user_name=user_name,
         session_id=session_id,
         conversation_id=conversation_id,
-        question=question,
+        question=encrypt_chat_text(question),
     )
 
 
 def _record_chat_answer_sync(
     *,
     user_id: str,
+    user_name: str | None,
     session_id: str,
     conversation_id: str,
     question: str,
@@ -146,40 +122,19 @@ def _record_chat_answer_sync(
     ensure_chat_messages_table()
     row = update_chat_answer(
         user_id=user_id,
+        user_name=user_name,
         session_id=session_id,
         conversation_id=conversation_id,
-        question=question,
-        answer=answer,
+        answer=encrypt_chat_text(answer),
     )
     if row:
         return row
     logger.warning("Chat answer update missed; creating a completed row instead.")
     return insert_chat_message(
         user_id=user_id,
+        user_name=user_name,
         session_id=session_id,
         conversation_id=conversation_id,
-        question=question,
-        answer=answer,
-        fallback=False,
-        reason="",
-    )
-
-
-def _record_chat_fallback_sync(
-    *,
-    user_id: str,
-    session_id: str,
-    conversation_id: str,
-    question: str,
-    fallback: bool,
-    reason: str,
-) -> dict[str, Any]:
-    ensure_chat_messages_table()
-    return update_chat_fallback(
-        user_id=user_id,
-        session_id=session_id,
-        conversation_id=conversation_id,
-        question=question,
-        fallback=fallback,
-        reason=reason,
+        question=encrypt_chat_text(question),
+        answer=encrypt_chat_text(answer),
     )

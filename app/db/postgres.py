@@ -10,7 +10,8 @@ from psycopg.rows import dict_row
 from app.core.config import settings
 
 
-CHAT_MESSAGES_TABLE_COMMENT = "MTSCO knowledge base chat messages and fallback records"
+CHAT_MESSAGES_TABLE_COMMENT = "MTSCO knowledge base encrypted chat messages"
+FEISHU_ANSWER_FEEDBACK_TABLE = "feishu_answer_feedback_states"
 
 
 def get_postgres_connection() -> Connection[Any]:
@@ -55,18 +56,50 @@ def ensure_chat_messages_table(table_name: str | None = None) -> dict[str, Any]:
                     """
                     CREATE TABLE IF NOT EXISTS {table} (
                         user_id VARCHAR(128) NOT NULL,
+                        user_name TEXT,
                         session_id VARCHAR(128) NOT NULL,
                         conversation_id VARCHAR(128) NOT NULL,
+                        create_time TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                         question TEXT NOT NULL,
-                        answer TEXT NOT NULL DEFAULT '',
-                        fallback BOOLEAN NOT NULL DEFAULT FALSE,
-                        reason TEXT NOT NULL DEFAULT ''
+                        answer TEXT NOT NULL DEFAULT ''
                     )
                     """
                 ).format(table=table)
             )
             cur.execute(
+                sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS user_name TEXT").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL(
+                    "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS create_time "
+                    "TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP"
+                ).format(table=table)
+            )
+            cur.execute(
+                sql.SQL(
+                    "UPDATE {table} SET create_time = CURRENT_TIMESTAMP "
+                    "WHERE create_time IS NULL"
+                ).format(table=table)
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ALTER COLUMN create_time SET NOT NULL").format(
+                    table=table
+                )
+            )
+            cur.execute(
                 sql.SQL("ALTER TABLE {table} ALTER COLUMN answer SET DEFAULT ''").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} DROP COLUMN IF EXISTS fallback").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} DROP COLUMN IF EXISTS reason").format(
                     table=table
                 )
             )
@@ -101,8 +134,7 @@ def insert_chat_message(
     conversation_id: str,
     question: str,
     answer: str,
-    fallback: bool,
-    reason: str = "",
+    user_name: str | None = None,
     table_name: str | None = None,
 ) -> dict[str, Any]:
     """Insert one chat message row and return the inserted values."""
@@ -117,32 +149,30 @@ def insert_chat_message(
                     """
                     INSERT INTO {table} (
                         user_id,
+                        user_name,
                         session_id,
                         conversation_id,
                         question,
-                        answer,
-                        fallback,
-                        reason
+                        answer
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     RETURNING
                         user_id,
+                        user_name,
                         session_id,
                         conversation_id,
+                        create_time,
                         question,
-                        answer,
-                        fallback,
-                        reason
+                        answer
                     """
                 ).format(table=table),
                 (
                     user_id,
+                    user_name,
                     session_id,
                     conversation_id,
                     question,
                     answer,
-                    fallback,
-                    reason,
                 ),
             )
             row = cur.fetchone()
@@ -156,6 +186,7 @@ def create_chat_message(
     session_id: str,
     conversation_id: str,
     question: str,
+    user_name: str | None = None,
     table_name: str | None = None,
 ) -> dict[str, Any]:
     """Create the initial chat row before the QA workflow returns an answer."""
@@ -170,22 +201,23 @@ def create_chat_message(
                     """
                     INSERT INTO {table} (
                         user_id,
+                        user_name,
                         session_id,
                         conversation_id,
                         question
                     )
-                    VALUES (%s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s)
                     RETURNING
                         user_id,
+                        user_name,
                         session_id,
                         conversation_id,
+                        create_time,
                         question,
-                        answer,
-                        fallback,
-                        reason
+                        answer
                     """
                 ).format(table=table),
-                (user_id, session_id, conversation_id, question),
+                (user_id, user_name, session_id, conversation_id, question),
             )
             row = cur.fetchone()
 
@@ -197,8 +229,8 @@ def update_chat_answer(
     user_id: str,
     session_id: str,
     conversation_id: str,
-    question: str,
     answer: str,
+    user_name: str | None = None,
     table_name: str | None = None,
 ) -> dict[str, Any]:
     """Attach an answer to the latest matching chat row."""
@@ -212,82 +244,138 @@ def update_chat_answer(
                 sql.SQL(
                     """
                     UPDATE {table}
-                    SET answer = %s
+                    SET answer = %s,
+                        user_name = COALESCE(%s, user_name)
                     WHERE ctid = (
                         SELECT ctid
                         FROM {table}
                         WHERE user_id = %s
                           AND session_id = %s
                           AND conversation_id = %s
-                          AND question = %s
-                        ORDER BY ctid DESC
+                          AND answer = ''
+                        ORDER BY create_time DESC, ctid DESC
                         LIMIT 1
                     )
                     RETURNING
                         user_id,
+                        user_name,
                         session_id,
                         conversation_id,
+                        create_time,
                         question,
-                        answer,
-                        fallback,
-                        reason
+                        answer
                     """
                 ).format(table=table),
-                (answer, user_id, session_id, conversation_id, question),
+                (answer, user_name, user_id, session_id, conversation_id),
             )
             row = cur.fetchone()
 
     return dict(row or {})
 
 
-def update_chat_fallback(
+def ensure_feishu_answer_feedback_table() -> None:
+    table = sql.Identifier(FEISHU_ANSWER_FEEDBACK_TABLE)
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS {table} (
+                        feedback_id VARCHAR(64) PRIMARY KEY,
+                        answer TEXT NOT NULL,
+                        selected VARCHAR(16),
+                        create_time TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                ).format(table=table)
+            )
+
+
+def insert_feishu_answer_feedback_state(
     *,
-    user_id: str,
-    session_id: str,
-    conversation_id: str,
-    question: str,
-    fallback: bool,
-    reason: str = "",
-    table_name: str | None = None,
+    feedback_id: str,
+    answer: str,
 ) -> dict[str, Any]:
-    """Attach fallback evaluation to the latest matching chat row."""
+    ensure_feishu_answer_feedback_table()
+    table = sql.Identifier(FEISHU_ANSWER_FEEDBACK_TABLE)
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    INSERT INTO {table} (feedback_id, answer)
+                    VALUES (%s, %s)
+                    ON CONFLICT (feedback_id) DO UPDATE
+                    SET answer = EXCLUDED.answer,
+                        selected = NULL,
+                        create_time = CURRENT_TIMESTAMP
+                    RETURNING feedback_id, answer, selected, create_time
+                    """
+                ).format(table=table),
+                (feedback_id, answer),
+            )
+            row = cur.fetchone()
+    return dict(row or {})
 
-    table_name = table_name or settings.postgres_chat_table
-    table = sql.Identifier(table_name)
 
+def get_feishu_answer_feedback_state(feedback_id: str) -> dict[str, Any]:
+    ensure_feishu_answer_feedback_table()
+    table = sql.Identifier(FEISHU_ANSWER_FEEDBACK_TABLE)
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    SELECT feedback_id, answer, selected, create_time
+                    FROM {table}
+                    WHERE feedback_id = %s
+                    """
+                ).format(table=table),
+                (feedback_id,),
+            )
+            row = cur.fetchone()
+    return dict(row or {})
+
+
+def update_feishu_answer_feedback_selection(
+    *,
+    feedback_id: str,
+    selected: str,
+) -> dict[str, Any]:
+    ensure_feishu_answer_feedback_table()
+    table = sql.Identifier(FEISHU_ANSWER_FEEDBACK_TABLE)
     with postgres_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 sql.SQL(
                     """
                     UPDATE {table}
-                    SET fallback = %s,
-                        reason = %s
-                    WHERE ctid = (
-                        SELECT ctid
-                        FROM {table}
-                        WHERE user_id = %s
-                          AND session_id = %s
-                          AND conversation_id = %s
-                          AND question = %s
-                        ORDER BY ctid DESC
-                        LIMIT 1
-                    )
-                    RETURNING
-                        user_id,
-                        session_id,
-                        conversation_id,
-                        question,
-                        answer,
-                        fallback,
-                        reason
+                    SET selected = COALESCE(selected, %s)
+                    WHERE feedback_id = %s
+                    RETURNING feedback_id, answer, selected, create_time
                     """
                 ).format(table=table),
-                (fallback, reason, user_id, session_id, conversation_id, question),
+                (selected, feedback_id),
             )
             row = cur.fetchone()
-
     return dict(row or {})
+
+
+def delete_expired_feishu_answer_feedback_states(*, older_than_seconds: float) -> int:
+    ensure_feishu_answer_feedback_table()
+    table = sql.Identifier(FEISHU_ANSWER_FEEDBACK_TABLE)
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    DELETE FROM {table}
+                    WHERE create_time < CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
+                    """
+                ).format(table=table),
+                (older_than_seconds,),
+            )
+            return cur.rowcount or 0
 
 
 def check_postgres_health() -> dict[str, Any]:

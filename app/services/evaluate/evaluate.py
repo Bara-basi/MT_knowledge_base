@@ -1034,7 +1034,7 @@ def evaluate_answer_fallback(
     persist: bool = True,
     verbose: bool = False,
 ) -> dict[str, Any]:
-    """Evaluate a live QA answer and optionally persist fallback metadata."""
+    """Evaluate a live QA answer and return fallback metadata."""
 
     llm = LLMClient()
     item = {
@@ -1065,23 +1065,7 @@ def evaluate_answer_fallback(
         "judgment": judgment,
     }
     if persist:
-        from app.db.postgres import ensure_chat_messages_table, update_chat_fallback
-        from app.services.chat_records import normalize_record_ids
-
-        ids = normalize_record_ids(
-            user_id=user_id,
-            session_id=session_id,
-            conversation_id=conversation_id,
-        )
-        ensure_chat_messages_table()
-        result["stored_row"] = update_chat_fallback(
-            user_id=ids["user_id"],
-            session_id=ids["session_id"],
-            conversation_id=ids["conversation_id"],
-            question=question,
-            fallback=fallback,
-            reason=reason,
-        )
+        result["stored_row"] = None
 
     return result
 

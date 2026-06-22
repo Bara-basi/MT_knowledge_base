@@ -24,10 +24,16 @@ except Exception:  # pragma: no cover - Pillow is optional at runtime.
 
 from app.api.v1.query import ask_knowledge_base
 from app.core.config import settings
+from app.db.postgres import (
+    delete_expired_feishu_answer_feedback_states,
+    get_feishu_answer_feedback_state,
+    insert_feishu_answer_feedback_state,
+    update_feishu_answer_feedback_selection,
+)
 from app.schemas.query import QueryRequest
 from app.services.chat_records import create_chat_record, record_chat_answer
-from app.services.evaluate.evaluate import evaluate_answer_fallback
 from app.services.llm import LLMAPIError, LLMConfigError, LLMClient, LLMSettings
+from app.services.privacy import decrypt_chat_text, encrypt_chat_text
 
 
 router = APIRouter(prefix="/feishu", tags=["feishu"])
@@ -238,6 +244,7 @@ async def handle_feishu_events(
         _answer_feishu_message,
         question=question,
         sender_id=_extract_sender_id(event.get("sender") or {}),
+        sender_name=_extract_sender_name(event.get("sender") or {}),
         chat_id=message.get("chat_id"),
         message_id=message_id,
         event_id=event_id,
@@ -263,6 +270,7 @@ async def _answer_feishu_message(
     *,
     question: str,
     sender_id: str | None,
+    sender_name: str | None,
     chat_id: str | None,
     message_id: str | None,
     event_id: str | None,
@@ -297,6 +305,7 @@ async def _answer_feishu_message(
     try:
         await create_chat_record(
             user_id=sender_id,
+            user_name=sender_name,
             session_id=chat_id,
             conversation_id=chat_id,
             question=question,
@@ -385,6 +394,7 @@ async def _answer_feishu_message(
         try:
             await record_chat_answer(
                 user_id=sender_id,
+                user_name=sender_name,
                 session_id=chat_id,
                 conversation_id=chat_id,
                 question=question,
@@ -479,7 +489,7 @@ async def _answer_feishu_message(
         _discard_feishu_answer_cancel_state(cancel_id)
         return
 
-    answer_feedback_id = _register_feishu_answer_feedback_state(response.answer)
+    answer_feedback_id = await _register_feishu_answer_feedback_state(response.answer)
     if feedback_handle:
         sent = await _try_update_feishu_markdown_message(
             feedback_handle.message_id,
@@ -501,90 +511,7 @@ async def _answer_feishu_message(
         dedupe_key=dedupe_key,
         sent=sent,
     )
-    _schedule_feishu_answer_evaluation(
-        question=question,
-        answer=response.answer,
-        sender_id=sender_id,
-        chat_id=chat_id,
-        event_id=event_id,
-        message_id=message_id,
-        dedupe_key=dedupe_key,
-    )
     _discard_feishu_answer_cancel_state(cancel_id)
-
-
-def _schedule_feishu_answer_evaluation(
-    *,
-    question: str,
-    answer: str,
-    sender_id: str | None,
-    chat_id: str | None,
-    event_id: str | None,
-    message_id: str | None,
-    dedupe_key: str | None,
-) -> None:
-    task = asyncio.create_task(
-        _run_feishu_answer_evaluation(
-            question=question,
-            answer=answer,
-            sender_id=sender_id,
-            chat_id=chat_id,
-            event_id=event_id,
-            message_id=message_id,
-            dedupe_key=dedupe_key,
-        )
-    )
-    task.add_done_callback(_log_feishu_answer_evaluation_task_failure)
-
-
-def _log_feishu_answer_evaluation_task_failure(task: asyncio.Task[None]) -> None:
-    try:
-        task.result()
-    except asyncio.CancelledError:
-        return
-    except Exception as exc:  # noqa: BLE001 - keep background task failures visible.
-        logger.exception("Unexpected Feishu answer evaluation task failure: %s", exc)
-
-
-async def _run_feishu_answer_evaluation(
-    *,
-    question: str,
-    answer: str,
-    sender_id: str | None,
-    chat_id: str | None,
-    event_id: str | None,
-    message_id: str | None,
-    dedupe_key: str | None,
-) -> None:
-    try:
-        fallback_result = await asyncio.to_thread(
-            evaluate_answer_fallback,
-            question=question,
-            answer=answer,
-            user_id=sender_id,
-            session_id=chat_id,
-            conversation_id=chat_id,
-            reference_answer=None,
-            persist=True,
-            verbose=False,
-        )
-        _debug(
-            "fallback evaluation recorded",
-            event_id=event_id,
-            message_id=message_id,
-            dedupe_key=dedupe_key,
-            fallback=fallback_result.get("fallback"),
-            reason=_preview(fallback_result.get("reason", "")),
-        )
-    except Exception as exc:  # noqa: BLE001 - evaluation must not block user replies.
-        logger.exception("Failed to evaluate fallback for Feishu message: %s", exc)
-        _warn(
-            "fallback evaluation failed",
-            event_id=event_id,
-            message_id=message_id,
-            dedupe_key=dedupe_key,
-            error=str(exc),
-        )
 
 
 def _schedule_initial_feishu_feedback(
@@ -1765,8 +1692,8 @@ def _register_feishu_answer_cancel_state(
     return cancel_id
 
 
-def _register_feishu_answer_feedback_state(answer: str) -> str:
-    _cleanup_feishu_answer_feedback_states()
+async def _register_feishu_answer_feedback_state(answer: str) -> str:
+    await _cleanup_feishu_answer_feedback_states()
     feedback_id = uuid.uuid4().hex
     _feishu_answer_feedback_states[feedback_id] = _FeishuAnswerFeedbackState(
         feedback_id=feedback_id,
@@ -1774,18 +1701,38 @@ def _register_feishu_answer_feedback_state(answer: str) -> str:
         selected=None,
         created_at=time.monotonic(),
     )
+    try:
+        await asyncio.to_thread(
+            insert_feishu_answer_feedback_state,
+            feedback_id=feedback_id,
+            answer=encrypt_chat_text(answer),
+        )
+    except Exception as exc:  # noqa: BLE001 - in-memory state still supports same-worker clicks.
+        _warn("answer feedback state persist failed", feedback_id=feedback_id, error=str(exc))
     return feedback_id
 
 
-def _cleanup_feishu_answer_feedback_states() -> None:
+async def _cleanup_feishu_answer_feedback_states() -> None:
     now = time.monotonic()
+    ttl = _answer_feedback_window_seconds()
     expired_ids = [
         feedback_id
         for feedback_id, state in _feishu_answer_feedback_states.items()
-        if now - state.created_at > 7 * 24 * 3600
+        if now - state.created_at > ttl
     ]
     for feedback_id in expired_ids:
         _feishu_answer_feedback_states.pop(feedback_id, None)
+    try:
+        await asyncio.to_thread(
+            delete_expired_feishu_answer_feedback_states,
+            older_than_seconds=ttl,
+        )
+    except Exception as exc:  # noqa: BLE001 - cleanup must not block feedback.
+        _warn("answer feedback state cleanup failed", error=str(exc))
+
+
+def _answer_feedback_window_seconds() -> float:
+    return max(float(settings.feishu_feedback_window_seconds), 300.0)
 
 
 def _bind_feishu_answer_feedback(
@@ -1898,8 +1845,8 @@ async def _handle_feishu_answer_feedback_action(value: dict[str, Any]) -> dict[s
     if choice not in {"helpful", "issue"}:
         return {"ok": False, "ignored": True, "reason": "invalid_feedback_choice"}
 
-    _cleanup_feishu_answer_feedback_states()
-    feedback_state = _feishu_answer_feedback_states.get(feedback_id)
+    await _cleanup_feishu_answer_feedback_states()
+    feedback_state = await _get_feishu_answer_feedback_state(feedback_id)
     if not feedback_state:
         return {
             "ok": True,
@@ -1912,12 +1859,15 @@ async def _handle_feishu_answer_feedback_action(value: dict[str, Any]) -> dict[s
         }
 
     if feedback_state.selected is None:
-        feedback_state.selected = choice
-        toast_content = (
-            "已收到，你的反馈会帮助我们继续优化知识库。"
-            if choice == "helpful"
-            else "已为你打开反馈表，请补充一下问题细节。"
-        )
+        feedback_state = await _select_feishu_answer_feedback(feedback_state, choice)
+        if feedback_state.selected == choice:
+            toast_content = (
+                "已收到，你的反馈会帮助我们继续优化知识库。"
+                if choice == "helpful"
+                else "已为你打开反馈表，请补充一下问题细节。"
+            )
+        else:
+            toast_content = "这条回答已经记录过反馈了。"
     else:
         toast_content = "这条回答已经记录过反馈了。"
 
@@ -1941,6 +1891,71 @@ async def _handle_feishu_answer_feedback_action(value: dict[str, Any]) -> dict[s
         "data": json.loads(content),
     }
     return result
+
+
+async def _get_feishu_answer_feedback_state(
+    feedback_id: str,
+) -> _FeishuAnswerFeedbackState | None:
+    feedback_state = _feishu_answer_feedback_states.get(feedback_id)
+    if feedback_state:
+        return feedback_state
+
+    try:
+        row = await asyncio.to_thread(get_feishu_answer_feedback_state, feedback_id)
+    except Exception as exc:  # noqa: BLE001 - fall through to expired UX.
+        _warn("answer feedback state load failed", feedback_id=feedback_id, error=str(exc))
+        return None
+
+    if not row:
+        return None
+
+    created_at = row.get("create_time")
+    if isinstance(created_at, datetime):
+        now = datetime.now(created_at.tzinfo or timezone.utc)
+        if (now - created_at).total_seconds() > _answer_feedback_window_seconds():
+            return None
+
+    encrypted_answer = str(row.get("answer") or "")
+    try:
+        answer = decrypt_chat_text(encrypted_answer)
+    except Exception as exc:  # noqa: BLE001 - corrupted state should not break card callbacks.
+        _warn("answer feedback state decrypt failed", feedback_id=feedback_id, error=str(exc))
+        return None
+
+    selected = row.get("selected")
+    selected_text = selected if selected in {"helpful", "issue"} else None
+    feedback_state = _FeishuAnswerFeedbackState(
+        feedback_id=feedback_id,
+        answer=answer,
+        selected=selected_text,
+        created_at=time.monotonic(),
+    )
+    _feishu_answer_feedback_states[feedback_id] = feedback_state
+    return feedback_state
+
+
+async def _select_feishu_answer_feedback(
+    feedback_state: _FeishuAnswerFeedbackState,
+    choice: str,
+) -> _FeishuAnswerFeedbackState:
+    try:
+        row = await asyncio.to_thread(
+            update_feishu_answer_feedback_selection,
+            feedback_id=feedback_state.feedback_id,
+            selected=choice,
+        )
+    except Exception as exc:  # noqa: BLE001 - in-memory state still gives immediate feedback.
+        _warn(
+            "answer feedback state selection persist failed",
+            feedback_id=feedback_state.feedback_id,
+            error=str(exc),
+        )
+        feedback_state.selected = choice
+        return feedback_state
+
+    selected = row.get("selected") if row else None
+    feedback_state.selected = selected if selected in {"helpful", "issue"} else choice
+    return feedback_state
 
 
 async def _cancel_feishu_answer(cancel_id: str) -> bool:
@@ -2073,6 +2088,21 @@ def _extract_sender_id(sender: dict[str, Any]) -> str | None:
         value = sender_id.get(key)
         if value:
             return str(value)
+    return None
+
+
+def _extract_sender_name(sender: dict[str, Any]) -> str | None:
+    for key in ("user_name", "sender_name", "name", "display_name", "nickname"):
+        value = sender.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    sender_id = sender.get("sender_id")
+    if isinstance(sender_id, dict):
+        for key in ("user_name", "name", "display_name", "nickname"):
+            value = sender_id.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
     return None
 
 

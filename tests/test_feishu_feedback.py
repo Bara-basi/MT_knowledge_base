@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
 from app.api.v1 import feishu
 from app.schemas.query import QueryResponse
+from app.services.privacy import encrypt_chat_text
 
 
 def test_feishu_feedback_card_updates_until_final_answer(monkeypatch) -> None:
@@ -50,12 +52,11 @@ def test_feishu_feedback_card_updates_until_final_answer(monkeypatch) -> None:
     monkeypatch.setattr(feishu, "ask_knowledge_base", fake_ask_knowledge_base)
     monkeypatch.setattr(feishu, "create_chat_record", fake_create_chat_record)
     monkeypatch.setattr(feishu, "record_chat_answer", fake_record_chat_answer)
-    monkeypatch.setattr(feishu, "_schedule_feishu_answer_evaluation", lambda **_kwargs: None)
-
     asyncio.run(
         feishu._answer_feishu_message(
             question="question",
             sender_id="user-id",
+            sender_name="User Name",
             chat_id="chat-id",
             message_id="incoming-message-id",
             event_id="event-id",
@@ -70,7 +71,7 @@ def test_feishu_feedback_card_updates_until_final_answer(monkeypatch) -> None:
     assert updates[-1] == ("feedback-message-id", "final answer")
 
 
-def test_feishu_answer_schedules_evaluation_after_reply(monkeypatch) -> None:
+def test_feishu_answer_does_not_schedule_evaluation_after_reply(monkeypatch) -> None:
     events: list[str] = []
 
     async def fake_send_message(
@@ -97,12 +98,6 @@ def test_feishu_answer_schedules_evaluation_after_reply(monkeypatch) -> None:
     async def fake_record_chat_answer(**_kwargs) -> None:
         events.append("record-answer")
 
-    def fake_schedule_evaluation(**_kwargs) -> None:
-        events.append("schedule-evaluation")
-
-    def fail_if_evaluation_runs_inline(**_kwargs):
-        raise AssertionError("evaluation should be scheduled after the Feishu reply")
-
     async def fake_greeting(_question: str) -> str:
         return ""
 
@@ -114,13 +109,12 @@ def test_feishu_answer_schedules_evaluation_after_reply(monkeypatch) -> None:
     monkeypatch.setattr(feishu, "ask_knowledge_base", fake_ask_knowledge_base)
     monkeypatch.setattr(feishu, "create_chat_record", fake_create_chat_record)
     monkeypatch.setattr(feishu, "record_chat_answer", fake_record_chat_answer)
-    monkeypatch.setattr(feishu, "_schedule_feishu_answer_evaluation", fake_schedule_evaluation)
-    monkeypatch.setattr(feishu, "evaluate_answer_fallback", fail_if_evaluation_runs_inline)
 
     asyncio.run(
         feishu._answer_feishu_message(
             question="question",
             sender_id="user-id",
+            sender_name="User Name",
             chat_id="chat-id",
             message_id="incoming-message-id",
             event_id="event-id",
@@ -130,8 +124,9 @@ def test_feishu_answer_schedules_evaluation_after_reply(monkeypatch) -> None:
     )
 
     reply_event = "update:final answer" if "update:final answer" in events else "send:final answer"
-    assert events.index(reply_event) < events.index("schedule-evaluation")
-    assert events[-1] == "schedule-evaluation"
+    assert reply_event in events
+    assert "record-answer" in events
+    assert "schedule-evaluation" not in events
 
 
 def test_feishu_initial_feedback_keeps_status_text_after_greeting(monkeypatch) -> None:
@@ -271,12 +266,11 @@ def test_feishu_initial_feedback_does_not_block_query(monkeypatch) -> None:
     monkeypatch.setattr(feishu, "ask_knowledge_base", fake_ask_knowledge_base)
     monkeypatch.setattr(feishu, "create_chat_record", fake_create_chat_record)
     monkeypatch.setattr(feishu, "record_chat_answer", fake_record_chat_answer)
-    monkeypatch.setattr(feishu, "_schedule_feishu_answer_evaluation", lambda **_kwargs: None)
-
     asyncio.run(
         feishu._answer_feishu_message(
             question="question",
             sender_id="user-id",
+            sender_name="User Name",
             chat_id="chat-id",
             message_id="incoming-message-id",
             event_id="event-id",
@@ -343,12 +337,11 @@ def test_feishu_comfort_feedback_keeps_status_while_answer_is_slow(monkeypatch) 
     monkeypatch.setattr(feishu, "ask_knowledge_base", fake_ask_knowledge_base)
     monkeypatch.setattr(feishu, "create_chat_record", fake_create_chat_record)
     monkeypatch.setattr(feishu, "record_chat_answer", fake_record_chat_answer)
-    monkeypatch.setattr(feishu, "_schedule_feishu_answer_evaluation", lambda **_kwargs: None)
-
     asyncio.run(
         feishu._answer_feishu_message(
             question="question",
             sender_id="user-id",
+            sender_name="User Name",
             chat_id="chat-id",
             message_id="incoming-message-id",
             event_id="event-id",
@@ -407,16 +400,12 @@ def test_feishu_null_greeting_does_not_send_feedback_or_block_query(monkeypatch)
     monkeypatch.setattr(feishu, "ask_knowledge_base", fake_ask_knowledge_base)
     monkeypatch.setattr(feishu, "create_chat_record", fake_create_chat_record)
     monkeypatch.setattr(feishu, "record_chat_answer", fake_record_chat_answer)
-    monkeypatch.setattr(
-        feishu,
-        "_schedule_feishu_answer_evaluation",
-        lambda **_kwargs: events.append("schedule-evaluation"),
-    )
 
     asyncio.run(
         feishu._answer_feishu_message(
             question="你好",
             sender_id="user-id",
+            sender_name="User Name",
             chat_id="chat-id",
             message_id="incoming-message-id",
             event_id="event-id",
@@ -462,9 +451,6 @@ def test_feishu_transient_progress_answer_keeps_initial_feedback(monkeypatch) ->
         await asyncio.sleep(0.01)
         return "收到，我先帮你查一下。"
 
-    def fail_schedule_evaluation(**_kwargs) -> None:
-        raise AssertionError("transient progress text should not schedule evaluation")
-
     monkeypatch.setattr(feishu, "_load_feedback_texts", lambda: ["正在整理资料..."])
     monkeypatch.setattr(feishu, "_generate_immediate_feedback_greeting", fake_greeting)
     monkeypatch.setattr(feishu, "_n8n_progress_polling_configured", lambda: False)
@@ -473,12 +459,11 @@ def test_feishu_transient_progress_answer_keeps_initial_feedback(monkeypatch) ->
     monkeypatch.setattr(feishu, "ask_knowledge_base", fake_ask_knowledge_base)
     monkeypatch.setattr(feishu, "create_chat_record", fake_create_chat_record)
     monkeypatch.setattr(feishu, "record_chat_answer", fail_record_chat_answer)
-    monkeypatch.setattr(feishu, "_schedule_feishu_answer_evaluation", fail_schedule_evaluation)
-
     asyncio.run(
         feishu._answer_feishu_message(
             question="question",
             sender_id="user-id",
+            sender_name="User Name",
             chat_id="chat-id",
             message_id="incoming-message-id",
             event_id="event-id",
@@ -1280,6 +1265,59 @@ def test_feishu_answer_feedback_action_keeps_first_choice(monkeypatch) -> None:
     assert first_button_row["columns"][1]["elements"][0]["type"] == "danger"
 
 
+def test_feishu_answer_feedback_action_recovers_state_from_database(monkeypatch) -> None:
+    async def fake_get_token() -> str:
+        return "tenant-token"
+
+    def fake_get_state(feedback_id: str) -> dict:
+        assert feedback_id == "feedback-db"
+        return {
+            "feedback_id": feedback_id,
+            "answer": encrypt_chat_text("final answer"),
+            "selected": None,
+            "create_time": datetime.now(timezone.utc),
+        }
+
+    def fake_update_selection(*, feedback_id: str, selected: str) -> dict:
+        return {
+            "feedback_id": feedback_id,
+            "answer": encrypt_chat_text("final answer"),
+            "selected": selected,
+            "create_time": datetime.now(timezone.utc),
+        }
+
+    async def run_case() -> dict:
+        feishu._feishu_answer_feedback_states.pop("feedback-db", None)
+        return await feishu._handle_feishu_card_action(
+            {
+                "event": {
+                    "action": {
+                        "value": {
+                            "action": "answer_feedback",
+                            "feedback_id": "feedback-db",
+                            "choice": "helpful",
+                        }
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr(feishu, "_get_tenant_access_token", fake_get_token)
+    monkeypatch.setattr(feishu, "delete_expired_feishu_answer_feedback_states", lambda **_kwargs: 0)
+    monkeypatch.setattr(feishu, "get_feishu_answer_feedback_state", fake_get_state)
+    monkeypatch.setattr(feishu, "update_feishu_answer_feedback_selection", fake_update_selection)
+
+    try:
+        result = asyncio.run(run_case())
+    finally:
+        feishu._feishu_answer_feedback_states.pop("feedback-db", None)
+
+    assert result["selected"] == "helpful"
+    feedback_panel = result["card"]["data"]["body"]["elements"][-1]
+    button_row = feedback_panel["elements"][1]
+    assert button_row["columns"][0]["elements"][0]["type"] == "primary"
+
+
 def test_feishu_card_content_error_detection() -> None:
     exc = feishu.HTTPException(
         status_code=502,
@@ -1377,6 +1415,7 @@ def test_feishu_cancel_action_suppresses_final_answer(monkeypatch) -> None:
             feishu._answer_feishu_message(
                 question="question",
                 sender_id="user-id",
+                sender_name="User Name",
                 chat_id="chat-id",
                 message_id="incoming-message-id",
                 event_id="event-id",
@@ -1400,8 +1439,6 @@ def test_feishu_cancel_action_suppresses_final_answer(monkeypatch) -> None:
     monkeypatch.setattr(feishu, "ask_knowledge_base", fake_ask_knowledge_base)
     monkeypatch.setattr(feishu, "create_chat_record", fake_create_chat_record)
     monkeypatch.setattr(feishu, "record_chat_answer", fake_record_chat_answer)
-    monkeypatch.setattr(feishu, "_schedule_feishu_answer_evaluation", lambda **_kwargs: None)
-
     asyncio.run(run_case())
 
     assert any(canceled_text for _, _, canceled_text in updates)

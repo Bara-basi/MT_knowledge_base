@@ -63,6 +63,10 @@ class Settings:
     postgres_password: str = os.getenv("POSTGRES_PASSWORD", "")
     database_url: str = os.getenv("DATABASE_URL", "")
     postgres_chat_table: str = os.getenv("POSTGRES_CHAT_TABLE", "chat_messages")
+    chat_message_encryption_key: str = os.getenv(
+        "CHAT_MESSAGE_ENCRYPTION_KEY",
+        "change-me-before-production-chat-message-encryption-key",
+    )
 
     minio_endpoint: str = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
     minio_public_endpoint: str = os.getenv("MINIO_PUBLIC_ENDPOINT", minio_endpoint)
@@ -193,6 +197,9 @@ class Settings:
         "FEISHU_FEEDBACK_FORM_URL",
         "https://tmqhw1h9zt.feishu.cn/wiki/LbjCwUPA6iUbF5k2SFbcowT8nne",
     ).strip()
+    feishu_feedback_window_seconds: float = float(
+        os.getenv("FEISHU_FEEDBACK_WINDOW_SECONDS", "1800")
+    )
     public_base_url: str = os.getenv(
         "PUBLIC_BASE_URL",
         "https://shopper-washable-crock.ngrok-free.dev",
