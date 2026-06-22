@@ -1,17 +1,14 @@
-name: MTSCO_knowledge_base
-
 services:
   api:
-    build:
-      context: .
-    container_name: api
+    image: ${API_IMAGE:-mtsco_knowledge_base-api}
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "${API_HOST_PORT:-8000}:8000"
     environment:
       GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
       TZ: ${GENERIC_TIMEZONE}
-      MILVUS_URI: http://milvus-standalone:19530
+      MILVUS_URI: ${MILVUS_INTERNAL_URI:-http://milvus-standalone:19530}
+      MILVUS_COLLECTION_NAME: ${MILVUS_COLLECTION_NAME:-mtsco_knowledge_chunks}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB}
@@ -19,12 +16,12 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_CHAT_TABLE: ${POSTGRES_CHAT_TABLE}
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      MINIO_ENDPOINT: http://milvus-minio:9000
-      MINIO_PUBLIC_ENDPOINT: http://localhost:9000
+      MINIO_ENDPOINT: ${MINIO_INTERNAL_ENDPOINT:-http://milvus-minio:9000}
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-http://localhost:9000}
       MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY_ID}
       MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_ACCESS_KEY}
       MINIO_BUCKET: ${APP_MINIO_BUCKET}
-      MINIO_SECURE: "false"
+      MINIO_SECURE: ${MINIO_SECURE:-false}
       USE_LOCAL_EMBEDDING_MODEL: ${USE_LOCAL_EMBEDDING_MODEL:-true}
       USE_LOCAL_RERANK_MODEL: ${USE_LOCAL_RERANK_MODEL:-true}
       SKIP_RETRIEVAL_WARMUP: ${SKIP_RETRIEVAL_WARMUP:-true}
@@ -34,10 +31,10 @@ services:
       JIEBA_CACHE_DIR: /models/jieba
       SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
       SILICONFLOW_BASE_URL: ${SILICONFLOW_BASE_URL:-https://api.siliconflow.cn/v1}
-      N8N_QUERY_WEBHOOK_URL: ${N8N_QUERY_WEBHOOK_URL:-http://n8n:5678/webhook/fastapi-test}
+      N8N_QUERY_WEBHOOK_URL: ${N8N_QUERY_WEBHOOK_URL:-}
       N8N_QUERY_TIMEOUT: ${N8N_QUERY_TIMEOUT:-600}
       N8N_QUERY_CONNECT_TIMEOUT: ${N8N_QUERY_CONNECT_TIMEOUT:-10}
-      N8N_API_BASE_URL: ${N8N_API_BASE_URL:-http://n8n:5678}
+      N8N_API_BASE_URL: ${N8N_API_BASE_URL:-}
       N8N_API_KEY: ${N8N_API_KEY:-}
       N8N_PROGRESS_ENABLED: ${N8N_PROGRESS_ENABLED:-true}
       N8N_PROGRESS_POLL_INTERVAL: ${N8N_PROGRESS_POLL_INTERVAL:-0.5}
@@ -50,12 +47,15 @@ services:
       FEISHU_APP_ID: ${FEISHU_APP_ID:-}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
       FEISHU_VERIFICATION_TOKEN: ${FEISHU_VERIFICATION_TOKEN:-}
-      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://shopper-washable-crock.ngrok-free.dev}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8000}
+      API_ROUTE_PREFIX: ${API_ROUTE_PREFIX:-}
+      FEISHU_ROUTE_PREFIX: ${FEISHU_ROUTE_PREFIX:-}
+      DEV_PROXY_TARGET: ${DEV_PROXY_TARGET:-}
+      DEV_PROXY_TIMEOUT: ${DEV_PROXY_TIMEOUT:-600}
     volumes:
       - ./app:/app/app
       - ./data:/app/data
-      - E:/models:/models
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+      - ${MODEL_CACHE_DIR:-E:/models}:/models
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5).read()"]
       interval: 30s
@@ -65,58 +65,13 @@ services:
     networks:
       - ai-net
     depends_on:
-      milvus-minio:
-        condition: service_healthy
       milvus-standalone:
         condition: service_healthy
       postgres:
         condition: service_healthy
 
-  n8n:
-    image: docker.n8n.io/n8nio/n8n:latest
-    container_name: n8n
-    restart: unless-stopped
-    ports:
-      - "5678:5678"
-    environment:
-      N8N_HOST: ${N8N_HOST}
-      N8N_PORT: 5678
-      N8N_PROTOCOL: http
-      NODE_ENV: production
-      WEBHOOK_URL: ${N8N_WEBHOOK_URL}
-      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
-      TZ: ${GENERIC_TIMEZONE}
-      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
-      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
-      N8N_SECURE_COOKIE: "false"
-      N8N_PYTHON_ENABLED: "false"
-      EXECUTIONS_DATA_SAVE_ON_PROGRESS: ${EXECUTIONS_DATA_SAVE_ON_PROGRESS:-true}
-      API_BASE_URL: http://api:8000
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_CHAT_TABLE: ${POSTGRES_CHAT_TABLE}
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      MINIO_ENDPOINT: http://milvus-minio:9000
-      MINIO_PUBLIC_ENDPOINT: http://localhost:9000
-      MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY_ID}
-      MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_ACCESS_KEY}
-      MINIO_BUCKET: ${APP_MINIO_BUCKET}
-      MINIO_SECURE: "false"
-    volumes:
-      - n8n_data:/home/node/.n8n
-      - ./n8n-files:/files
-    networks:
-      - ai-net
-    depends_on:
-      api:
-        condition: service_healthy
-
   milvus-etcd:
     image: quay.io/coreos/etcd:v3.5.18
-    container_name: milvus-etcd
     restart: unless-stopped
     environment:
       ETCD_AUTO_COMPACTION_MODE: revision
@@ -138,39 +93,14 @@ services:
     networks:
       - ai-net
 
-  milvus-minio:
-    image: minio/minio:RELEASE.2024-05-28T17-19-04Z
-    container_name: milvus-minio
-    restart: unless-stopped
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY_ID}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_ACCESS_KEY}
-    command: minio server /minio_data --console-address ":9001"
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - milvus_minio:/minio_data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 30s
-      timeout: 20s
-      retries: 3
-    networks:
-      - ai-net
-
   minio-init:
     image: minio/mc:RELEASE.2024-05-24T09-08-49Z
-    container_name: minio-init
     profiles:
       - init
     restart: "no"
-    depends_on:
-      milvus-minio:
-        condition: service_healthy
     entrypoint: >
       /bin/sh -c "
-      mc alias set local http://milvus-minio:9000 ${MINIO_ACCESS_KEY_ID} ${MINIO_SECRET_ACCESS_KEY};
+      mc alias set local ${MINIO_INTERNAL_ENDPOINT:-http://milvus-minio:9000} ${MINIO_ACCESS_KEY_ID} ${MINIO_SECRET_ACCESS_KEY};
       mc mb --ignore-existing local/${APP_MINIO_BUCKET};
       "
     networks:
@@ -178,25 +108,22 @@ services:
 
   milvus-standalone:
     image: milvusdb/milvus:v2.6.15
-    container_name: milvus-standalone
     restart: unless-stopped
     command: ["milvus", "run", "standalone"]
     security_opt:
       - seccomp:unconfined
     environment:
       ETCD_ENDPOINTS: milvus-etcd:2379
-      MINIO_ADDRESS: milvus-minio:9000
+      MINIO_ADDRESS: ${MILVUS_MINIO_ADDRESS:-milvus-minio:9000}
       MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY_ID}
       MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_ACCESS_KEY}
     ports:
-      - "19530:19530"
-      - "9091:9091"
+      - "${MILVUS_HOST_PORT:-19530}:19530"
+      - "${MILVUS_HEALTH_HOST_PORT:-9091}:9091"
     volumes:
       - milvus_data:/var/lib/milvus
     depends_on:
       milvus-etcd:
-        condition: service_healthy
-      milvus-minio:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
@@ -209,11 +136,10 @@ services:
 
   neo4j:
     image: neo4j:5-community
-    container_name: neo4j
     restart: unless-stopped
     ports:
-      - "7474:7474"
-      - "7687:7687"
+      - "${NEO4J_HTTP_HOST_PORT:-7474}:7474"
+      - "${NEO4J_BOLT_HOST_PORT:-7687}:7687"
     environment:
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
     volumes:
@@ -226,10 +152,9 @@ services:
 
   postgres:
     image: postgres:16-alpine
-    container_name: postgres
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -251,9 +176,7 @@ networks:
     driver: bridge
 
 volumes:
-  n8n_data:
   milvus_etcd:
-  milvus_minio:
   milvus_data:
   neo4j_data:
   neo4j_logs:

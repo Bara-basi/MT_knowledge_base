@@ -193,6 +193,10 @@ class Settings:
         "PUBLIC_BASE_URL",
         "https://shopper-washable-crock.ngrok-free.dev",
     ).rstrip("/")
+    api_route_prefix: str = os.getenv("API_ROUTE_PREFIX", "").rstrip("/")
+    feishu_route_prefix: str = os.getenv("FEISHU_ROUTE_PREFIX", "").rstrip("/")
+    dev_proxy_target: str = os.getenv("DEV_PROXY_TARGET", "").rstrip("/")
+    dev_proxy_timeout: float = float(os.getenv("DEV_PROXY_TIMEOUT", "600"))
 
 
 settings = Settings()

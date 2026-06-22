@@ -21,6 +21,8 @@ env/
 .env
 .env.*
 !.env.example
+!.env.prod.example
+!.env.dev.example
 *.pem
 *.key
 *.crt
