@@ -182,8 +182,8 @@ class Settings:
     n8n_progress_lookback_seconds: float = float(
         os.getenv("N8N_PROGRESS_LOOKBACK_SECONDS", "5")
     )
-    n8n_query_workflow_id: str = os.getenv("N8N_QUERY_WORKFLOW_ID", "hukvjyqCh8K1Nk4U")
-    n8n_retrieval_workflow_id: str = os.getenv("N8N_RETRIEVAL_WORKFLOW_ID", "n6AyYe8rRw36dmOz")
+    n8n_query_workflow_id: str = os.getenv("N8N_QUERY_WORKFLOW_ID", "KZKRj0Y1QW2xTS0J")
+    n8n_retrieval_workflow_id: str = os.getenv("N8N_RETRIEVAL_WORKFLOW_ID", "0N11uTxPrWDr7G9O")
 
     feishu_app_id: str = _get_first_env("FEISHU_APP_ID", "LARK_APP_ID")
     feishu_app_secret: str = _get_first_env("FEISHU_APP_SECRET", "LARK_APP_SECRET")
