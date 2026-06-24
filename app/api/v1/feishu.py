@@ -237,8 +237,14 @@ async def handle_feishu_events(
     )
 
     if not question:
-        _debug("event ignored", reason="empty_or_non_text_message", message_id=message_id)
-        return {"ok": True, "ignored": True, "reason": "empty_or_non_text_message"}
+        _debug("event ignored", reason="unsupported_or_empty_message", message_id=message_id)
+        if message_id or message.get("chat_id"):
+            background_tasks.add_task(
+                _send_unsupported_feishu_message_notice,
+                chat_id=message.get("chat_id"),
+                message_id=message_id,
+            )
+        return {"ok": True, "ignored": True, "reason": "unsupported_or_empty_message"}
 
     background_tasks.add_task(
         _answer_feishu_message,
@@ -1517,6 +1523,28 @@ def _get_failed_feedback_text() -> str:
     return failed_text.strip() if isinstance(failed_text, str) and failed_text.strip() else fallback_text
 
 
+def _get_unsupported_message_text() -> str:
+    return "暂不支持这种消息内容，请发送文字、Markdown、列表或链接。"
+
+
+async def _send_unsupported_feishu_message_notice(
+    *,
+    chat_id: str | None,
+    message_id: str | None,
+) -> None:
+    unsupported_text = _get_unsupported_message_text()
+    if message_id:
+        sent = await _try_reply_feishu_markdown(message_id, unsupported_text)
+        if sent:
+            return
+    if chat_id:
+        await _try_send_feishu_markdown_message(
+            chat_id=chat_id,
+            reply_to_message_id=None,
+            markdown_text=unsupported_text,
+        )
+
+
 async def _try_send_feishu_markdown_message(
     *,
     chat_id: str | None,
@@ -2063,21 +2091,146 @@ def _verify_feishu_token(payload: dict[str, Any]) -> None:
 
 
 def _extract_message_text(message: dict[str, Any]) -> str:
-    if message.get("message_type") != "text":
-        return ""
+    message_type = message.get("message_type")
+    content = _parse_feishu_message_content(message.get("content"))
 
-    content = message.get("content")
-    if isinstance(content, str):
-        try:
-            content = json.loads(content)
-        except json.JSONDecodeError:
-            return content.strip()
+    if message_type == "text":
+        if isinstance(content, dict):
+            text = content.get("text")
+            return text.strip() if isinstance(text, str) else ""
+        return content.strip() if isinstance(content, str) else ""
 
-    if isinstance(content, dict):
-        text = content.get("text")
-        return text.strip() if isinstance(text, str) else ""
+    if message_type == "post":
+        return _extract_feishu_post_text(content)
 
     return ""
+
+
+def _parse_feishu_message_content(content: Any) -> Any:
+    if isinstance(content, str):
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            return content.strip()
+    return content
+
+
+def _extract_feishu_post_text(content: Any) -> str:
+    if not isinstance(content, (dict, list)):
+        return content.strip() if isinstance(content, str) else ""
+
+    if isinstance(content, dict):
+        for key in ("content", "elements", "children", "items"):
+            if key in content:
+                lines = _extract_feishu_post_lines(content[key])
+                if lines:
+                    return "\n".join(lines).strip()
+
+    return "\n".join(_extract_feishu_post_lines(content)).strip()
+
+
+def _extract_feishu_post_lines(value: Any) -> list[str]:
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else []
+
+    if isinstance(value, list):
+        lines: list[str] = []
+        for item in value:
+            if isinstance(item, list):
+                lines.extend(_split_feishu_post_line(_extract_feishu_inline_text(item)))
+            else:
+                lines.extend(_extract_feishu_post_lines(item))
+        return lines
+
+    if not isinstance(value, dict):
+        return []
+
+    tag = str(value.get("tag") or value.get("type") or "").lower()
+    if tag in {"li", "list_item"}:
+        text = _extract_feishu_inline_text(
+            value.get("content")
+            or value.get("elements")
+            or value.get("children")
+            or value.get("items")
+        )
+        return [f"- {text.strip()}"] if text.strip() else []
+    if tag in {"a", "link"}:
+        link_markdown = _extract_feishu_link_markdown(value)
+        return [link_markdown] if link_markdown else []
+
+    direct_text = _extract_feishu_direct_text(value)
+    if direct_text:
+        return _split_feishu_post_line(direct_text)
+
+    lines: list[str] = []
+    for key in ("content", "elements", "children", "items"):
+        if key in value:
+            lines.extend(_extract_feishu_post_lines(value[key]))
+    return lines
+
+
+def _extract_feishu_inline_text(value: Any) -> str:
+    if value is None:
+        return ""
+
+    if isinstance(value, str):
+        return value
+
+    if isinstance(value, list):
+        return "".join(_extract_feishu_inline_text(item) for item in value)
+
+    if not isinstance(value, dict):
+        return ""
+
+    tag = str(value.get("tag") or value.get("type") or "").lower()
+    if tag in {"li", "list_item"}:
+        item_text = _extract_feishu_inline_text(
+            value.get("content")
+            or value.get("elements")
+            or value.get("children")
+            or value.get("items")
+        ).strip()
+        return f"- {item_text}" if item_text else ""
+    if tag in {"a", "link"}:
+        return _extract_feishu_link_markdown(value)
+    if tag in {"at", "mention"}:
+        name = value.get("user_name") or value.get("name") or value.get("text")
+        return f"@{name.strip()}" if isinstance(name, str) and name.strip() else ""
+
+    direct_text = _extract_feishu_direct_text(value)
+    if direct_text:
+        return direct_text
+
+    parts: list[str] = []
+    for key in ("content", "elements", "children", "items"):
+        if key in value:
+            parts.append(_extract_feishu_inline_text(value[key]))
+    return "".join(parts)
+
+
+def _extract_feishu_direct_text(value: dict[str, Any]) -> str:
+    for key in ("text", "un_escape", "user_name", "name"):
+        text = value.get(key)
+        if isinstance(text, str) and text.strip():
+            return text
+    return ""
+
+
+def _extract_feishu_link_markdown(value: dict[str, Any]) -> str:
+    href = value.get("href") or value.get("url")
+    text = value.get("text") or value.get("name") or href
+    if not isinstance(href, str) or not href.strip():
+        return text.strip() if isinstance(text, str) else ""
+    label = text.strip() if isinstance(text, str) and text.strip() else href.strip()
+    return f"[{label}]({href.strip()})"
+
+
+def _split_feishu_post_line(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
 
 
 def _extract_sender_id(sender: dict[str, Any]) -> str | None:

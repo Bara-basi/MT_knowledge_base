@@ -12,6 +12,147 @@ from app.schemas.query import QueryResponse
 from app.services.privacy import encrypt_chat_text
 
 
+def test_extract_message_text_keeps_plain_text_messages() -> None:
+    message = {
+        "message_type": "text",
+        "content": json.dumps({"text": " 工厂出厂含税价是多少？ "}, ensure_ascii=False),
+    }
+
+    assert feishu._extract_message_text(message) == "工厂出厂含税价是多少？"
+
+
+def test_extract_message_text_supports_post_list_items() -> None:
+    message = {
+        "message_type": "post",
+        "content": json.dumps(
+            {
+                "title": "",
+                "content": [
+                    [
+                        {
+                            "tag": "li",
+                            "elements": [
+                                {"tag": "text", "text": "工厂出厂含税价：32 ￥/KG"}
+                            ],
+                        }
+                    ],
+                    [
+                        {
+                            "tag": "li",
+                            "elements": [
+                                {"tag": "text", "text": "美元/人民币汇率：6.2"}
+                            ],
+                        }
+                    ],
+                    [
+                        {
+                            "tag": "li",
+                            "elements": [
+                                {"tag": "text", "text": "报价利润：5%"}
+                            ],
+                        }
+                    ],
+                ],
+            },
+            ensure_ascii=False,
+        ),
+    }
+
+    assert feishu._extract_message_text(message) == (
+        "- 工厂出厂含税价：32 ￥/KG\n"
+        "- 美元/人民币汇率：6.2\n"
+        "- 报价利润：5%"
+    )
+
+
+def test_extract_message_text_converts_post_links_to_markdown_and_skips_images() -> None:
+    message = {
+        "message_type": "post",
+        "content": json.dumps(
+            {
+                "content": [
+                    [
+                        {"tag": "text", "text": "See "},
+                        {"tag": "a", "text": "spec", "href": "https://example.test/spec"},
+                    ],
+                    [
+                        {
+                            "tag": "img",
+                            "image_key": "img_v3_abc",
+                            "alt": {"content": "quote screenshot"},
+                        }
+                    ],
+                ],
+            }
+        ),
+    }
+
+    assert feishu._extract_message_text(message) == "See [spec](https://example.test/spec)"
+
+
+def test_extract_message_text_rejects_image_messages() -> None:
+    message = {
+        "message_type": "image",
+        "content": json.dumps({"image_key": "img_v3_xyz"}),
+    }
+
+    assert feishu._extract_message_text(message) == ""
+
+
+def test_extract_message_text_rejects_unsupported_messages() -> None:
+    message = {
+        "message_type": "file",
+        "content": json.dumps({"file_key": "file_v3_xyz"}),
+    }
+
+    assert feishu._extract_message_text(message) == ""
+
+
+def test_unsupported_message_queues_notice_instead_of_silent_ignore(monkeypatch) -> None:
+    queued_tasks: list[tuple[object, dict[str, object]]] = []
+
+    class FakeBackgroundTasks:
+        def add_task(self, func, **kwargs) -> None:
+            queued_tasks.append((func, kwargs))
+
+    class FakeRequest:
+        client = "test-client"
+
+        async def json(self) -> dict:
+            return {
+                "header": {
+                    "event_type": "im.message.receive_v1",
+                    "event_id": "event-unsupported",
+                },
+                "event": {
+                    "sender": {"sender_id": {"open_id": "user-open-id"}},
+                    "message": {
+                        "message_id": "message-unsupported",
+                        "chat_id": "chat-id",
+                        "chat_type": "p2p",
+                        "message_type": "image",
+                        "content": json.dumps({"image_key": "img_v3_xyz"}),
+                    },
+                },
+            }
+
+    monkeypatch.setattr(feishu, "_seen_message_keys", {})
+
+    result = asyncio.run(feishu.handle_feishu_events(FakeRequest(), FakeBackgroundTasks()))
+
+    assert result == {
+        "ok": True,
+        "ignored": True,
+        "reason": "unsupported_or_empty_message",
+    }
+    assert queued_tasks == [
+        (
+            feishu._send_unsupported_feishu_message_notice,
+            {"chat_id": "chat-id", "message_id": "message-unsupported"},
+        )
+    ]
+
+
 def test_feishu_feedback_card_updates_until_final_answer(monkeypatch) -> None:
     sent_messages: list[tuple[str | None, str | None, str]] = []
     updates: list[tuple[str, str]] = []
