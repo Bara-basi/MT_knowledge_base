@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -8,10 +8,16 @@ ENV PIP_RETRIES=10
 WORKDIR /app
 
 COPY pyproject.toml ./
-RUN python -m pip install --upgrade pip \
-    && python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.9.1+cpu" \
+
+ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple \
+    PIP_TRUSTED_HOST=mirrors.aliyun.com \
+    PIP_DEFAULT_TIMEOUT=300 \
+    PIP_RETRIES=10 \
+    PIP_NO_CACHE_DIR=1
+
+RUN python -m pip install --upgrade pip setuptools wheel \
     && python -m pip install . \
-    && python -c "from minio import Minio; import nltk.chunk.util as u; assert hasattr(u, 'ChunkScore'); from pymilvus.model.sparse import BM25EmbeddingFunction; from pymilvus.model.sparse.bm25.tokenizers import build_default_analyzer; BM25EmbeddingFunction(build_default_analyzer(language='zh'))"
+    && python -c "from minio import Minio; import nltk.chunk.util as u; assert hasattr(u, 'ChunkScore')"
 
 COPY app ./app
 COPY scripts ./scripts

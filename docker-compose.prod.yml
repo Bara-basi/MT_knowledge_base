@@ -31,6 +31,7 @@ services:
   n8n:
     image: docker.n8n.io/n8nio/n8n:latest
     container_name: n8n
+    pull_policy: never
     restart: unless-stopped
     ports:
       - "${N8N_HOST_PORT:-5678}:5678"
@@ -74,7 +75,7 @@ services:
     container_name: milvus-etcd
 
   milvus-minio:
-    image: minio/minio:RELEASE.2024-05-28T17-19-04Z
+    image: quay.io/minio/minio:RELEASE.2024-05-28T17-19-04Z
     container_name: milvus-minio
     restart: unless-stopped
     environment:
