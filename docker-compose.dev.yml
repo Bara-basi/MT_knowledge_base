@@ -2,6 +2,11 @@ name: ${COMPOSE_PROJECT_NAME:-mtsco-kb-dev}
 
 services:
   api:
+    build:
+      context: .
+      args:
+        INSTALL_TORCH: ${INSTALL_TORCH:-true}
+        TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     ports:
       - "${API_HOST_PORT:-18000}:8000"

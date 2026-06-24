@@ -96,7 +96,7 @@ services:
       - ai-net
 
   minio-init:
-    image: quay.io/minio/mc:RELEASE.2024-05-24T09-08-49Z
+    image: ${MINIO_MC_IMAGE:-minio/mc:RELEASE.2024-05-24T09-08-49Z}
     profiles:
       - init
     restart: "no"
@@ -109,7 +109,7 @@ services:
       - ai-net
 
   milvus-standalone:
-    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/milvusdb/milvus:v2.6.15-amd64
+    image: ${MILVUS_IMAGE:-milvusdb/milvus:v2.6.15}
     restart: unless-stopped
     command: ["milvus", "run", "standalone"]
     security_opt:
@@ -137,7 +137,7 @@ services:
       - ai-net
 
   neo4j:
-    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/neo4j:5.26.9-community
+    image: ${NEO4J_IMAGE:-neo4j:5-community}
     restart: unless-stopped
     ports:
       - "${NEO4J_HTTP_HOST_PORT:-7474}:7474"
@@ -153,7 +153,7 @@ services:
       - ai-net
 
   postgres:
-    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/postgres:16-alpine
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
     restart: unless-stopped
     ports:
       - "${POSTGRES_HOST_PORT:-5432}:5432"
