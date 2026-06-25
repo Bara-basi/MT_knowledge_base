@@ -15,13 +15,17 @@ from pathlib import Path
 from typing import Any
 
 from app.services.llm import LLMAPIError, LLMClient
+from app.services.parser.parser import parse_document
+from app.services.parser.word_parser import format_extracted_items
 
 
 DEFAULT_OUTPUT_FILE = Path("data") / "dataset" / "test.json"
 DEFAULT_PDF_SOURCE_DIR = Path("data") / "dataset" / "pdf_sources"
-SUPPORTED_SUFFIXES = {".txt", ".md", ".markdown", ".json", ".csv", ".docx", ".pdf"}
+SUPPORTED_SUFFIXES = {".docx", ".pdf", ".pptx", ".xlsx"}
 TEXT_SUFFIXES = {".txt", ".md", ".markdown", ".json", ".csv"}
 DOCX_PDF_CONVERTERS = {"auto", "word", "libreoffice"}
+GENERATION_MAX_ATTEMPTS = 3
+GENERATION_RETRY_BASE_SECONDS = 5.0
 
 
 def log(message: str, *, verbose: bool = True) -> None:
@@ -32,7 +36,7 @@ def log(message: str, *, verbose: bool = True) -> None:
 
 @dataclass(frozen=True)
 class DocumentSource:
-    """Text extracted from the least-processed available source document."""
+    """Text extracted from the same parsed artifact used by ingestion."""
 
     original_path: Path
     source_path: Path
@@ -103,7 +107,7 @@ def build_dataset(
         raise NotADirectoryError(f"Input path is not a directory: {input_path}")
 
     pdf_output_dir = Path(pdf_dir) if pdf_dir is not None else DEFAULT_PDF_SOURCE_DIR
-    log(f"pdf source/cache directory: {pdf_output_dir}", verbose=verbose)
+    log(f"legacy pdf source/cache directory: {pdf_output_dir}", verbose=verbose)
     log(f"output dataset file: {output_file}", verbose=verbose)
     documents = list(
         iter_document_files(
@@ -123,7 +127,14 @@ def build_dataset(
     llm = LLMClient()
     log(f"LLM model: {model or llm.settings.model}", verbose=verbose)
     generated_at = datetime.now(timezone.utc).isoformat()
-    all_items: list[dict[str, Any]] = []
+    output_path = Path(output_file)
+    all_items = [] if dry_run else load_existing_dataset(output_path, verbose=verbose)
+    documents = resume_documents(
+        documents,
+        existing_items=all_items,
+        document_root=input_path,
+        verbose=verbose,
+    )
 
     for doc_index, document_path in enumerate(documents, start=1):
         log(
@@ -148,7 +159,7 @@ def build_dataset(
         prompt_text = trim_document_text(source.text, max_document_chars)
         if len(prompt_text) < len(source.text):
             log(
-                f"[{doc_index}/{len(documents)}] trimmed PDF text from {len(source.text)} to {len(prompt_text)} chars",
+                f"[{doc_index}/{len(documents)}] trimmed document text from {len(source.text)} to {len(prompt_text)} chars",
                 verbose=verbose,
             )
         if dry_run:
@@ -194,20 +205,74 @@ def build_dataset(
             f"[{doc_index}/{len(documents)}] accepted {accepted_count} QA item(s); total={len(all_items)}",
             verbose=verbose,
         )
+        write_dataset_json(output_path, all_items, verbose=verbose)
 
-    output_path = Path(output_file)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     if dry_run:
         log("dry run complete; dataset file was not written", verbose=verbose)
         return all_items
 
-    log(f"writing dataset JSON: {output_path}", verbose=verbose)
-    output_path.write_text(
-        json.dumps(all_items, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
     log(f"done, wrote {len(all_items)} QA item(s)", verbose=verbose)
     return all_items
+
+
+def load_existing_dataset(path: Path, *, verbose: bool = True) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Existing dataset JSON is invalid and cannot be resumed: {path}") from exc
+    if not isinstance(data, list):
+        raise ValueError(f"Existing dataset JSON must be a list: {path}")
+    items = [item for item in data if isinstance(item, dict)]
+    log(f"loaded {len(items)} existing QA item(s) from {path}", verbose=verbose)
+    return items
+
+
+def resume_documents(
+    documents: list[Path],
+    *,
+    existing_items: list[dict[str, Any]],
+    document_root: Path,
+    verbose: bool = True,
+) -> list[Path]:
+    if not existing_items:
+        return documents
+
+    last_item = existing_items[-1]
+    last_document_path = str(last_item.get("document_path") or "").strip()
+    last_document_name = str(last_item.get("document_name") or "").strip()
+    if not last_document_path and not last_document_name:
+        return documents
+
+    for index, document_path in enumerate(documents):
+        relative_path = relative_to_root(document_path, document_root)
+        if relative_path == last_document_path or document_path.name == last_document_name:
+            remaining = documents[index + 1 :]
+            log(
+                f"resuming after last completed document: {last_document_name or last_document_path}; "
+                f"remaining documents={len(remaining)}",
+                verbose=verbose,
+            )
+            return remaining
+
+    log(
+        f"existing dataset last document was not found in current input: "
+        f"{last_document_name or last_document_path}; starting from the beginning",
+        verbose=verbose,
+    )
+    return documents
+
+
+def write_dataset_json(path: Path, items: list[dict[str, Any]], *, verbose: bool = True) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(
+        json.dumps(items, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    tmp_path.replace(path)
+    log(f"saved dataset progress: {path} ({len(items)} QA item(s))", verbose=verbose)
 
 
 def convert_docx_folder_to_pdf(
@@ -274,7 +339,7 @@ def iter_document_files(
         except ValueError:
             pass
         paths.append(path)
-    return dedupe_pdf_pairs(paths)
+    return paths
 
 
 def dedupe_pdf_pairs(paths: list[Path]) -> list[Path]:
@@ -301,16 +366,14 @@ def load_document_source(
     rebuild_pdf: bool = False,
     verbose: bool = True,
 ) -> DocumentSource:
-    source_path = ensure_pdf_source(
+    del document_root, pdf_output_dir, docx_pdf_converter
+    source_path = ensure_processing_txt_source(
         path,
-        document_root=document_root,
-        pdf_output_dir=pdf_output_dir,
-        docx_pdf_converter=docx_pdf_converter,
-        rebuild_pdf=rebuild_pdf,
+        rebuild=rebuild_pdf,
         verbose=verbose,
     )
-    source_kind = "original_pdf" if path.suffix.lower() == ".pdf" else "converted_pdf"
-    log(f"using PDF source ({source_kind}): {source_path}", verbose=verbose)
+    source_kind = f"parsed_{path.suffix.lower().lstrip('.')}_txt"
+    log(f"using parsed text source ({source_kind}): {source_path}", verbose=verbose)
 
     return DocumentSource(
         original_path=path,
@@ -318,6 +381,29 @@ def load_document_source(
         source_kind=source_kind,
         text=read_document_text(source_path, verbose=verbose),
     )
+
+
+def ensure_processing_txt_source(
+    path: Path,
+    *,
+    rebuild: bool = False,
+    verbose: bool = True,
+) -> Path:
+    txt_path = processing_txt_path(path)
+    if txt_path.exists() and not rebuild:
+        log(f"found existing parsed txt for {path.name}: {txt_path}", verbose=verbose)
+        return txt_path
+
+    log(f"parsing source document with ingestion parser: {path}", verbose=verbose)
+    parsed_items = parse_document(path)
+    txt_path.parent.mkdir(parents=True, exist_ok=True)
+    if not txt_path.exists():
+        txt_path.write_text(format_extracted_items(parsed_items), encoding="utf-8")
+    return txt_path
+
+
+def processing_txt_path(path: Path) -> Path:
+    return Path("data") / "processing" / path.stem / "txt" / f"{path.stem}.txt"
 
 
 def ensure_pdf_source(
@@ -560,9 +646,12 @@ def convert_text_to_pdf(source_path: Path, output_path: Path, *, verbose: bool =
 
 def read_document_text(path: Path, *, verbose: bool = True) -> str:
     suffix = path.suffix.lower()
+    if suffix == ".txt":
+        log(f"reading parsed txt: {path}", verbose=verbose)
+        return path.read_text(encoding="utf-8", errors="replace")
     if suffix == ".pdf":
         return read_pdf_text(path, verbose=verbose)
-    raise ValueError(f"Dataset generation only reads PDF sources, got: {path}")
+    raise ValueError(f"Dataset generation only reads parsed txt or PDF sources, got: {path}")
 
 
 def read_pdf_text(path: Path, *, verbose: bool = True) -> str:
@@ -633,12 +722,18 @@ def generate_document_items(
     started = time.perf_counter()
     try:
         log("sending LLM request with JSON response_format", verbose=verbose)
-        reply = llm.chat(
+        reply = call_generation_llm_with_retries(
+            llm,
             messages,
             model=model,
             temperature=0.4,
             max_tokens=6000,
-            extra_body={"response_format": {"type": "json_object"}},
+            extra_body=build_generation_extra_body(
+                llm,
+                model=model,
+                response_format=True,
+            ),
+            verbose=verbose,
         )
     except LLMAPIError as exc:
         if not looks_like_response_format_error(exc):
@@ -648,11 +743,18 @@ def generate_document_items(
             f"LLM JSON-mode request failed, retrying without response_format: {exc}",
             verbose=verbose,
         )
-        reply = llm.chat(
+        reply = call_generation_llm_with_retries(
+            llm,
             messages,
             model=model,
             temperature=0.4,
             max_tokens=6000,
+            extra_body=build_generation_extra_body(
+                llm,
+                model=model,
+                response_format=False,
+            ),
+            verbose=verbose,
         )
     log(
         f"LLM response received in {time.perf_counter() - started:.1f}s, "
@@ -666,14 +768,70 @@ def generate_document_items(
     return [item for item in items if isinstance(item, dict)]
 
 
+def call_generation_llm_with_retries(
+    llm: LLMClient,
+    messages: list[dict[str, Any]],
+    *,
+    model: str | None,
+    temperature: float,
+    max_tokens: int,
+    extra_body: dict[str, Any],
+    verbose: bool = True,
+) -> str:
+    for attempt in range(1, GENERATION_MAX_ATTEMPTS + 1):
+        try:
+            return llm.chat(
+                messages,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                extra_body=extra_body,
+            )
+        except LLMAPIError as exc:
+            if attempt >= GENERATION_MAX_ATTEMPTS or not is_llm_timeout_error(exc):
+                raise
+            sleep_seconds = GENERATION_RETRY_BASE_SECONDS * attempt
+            log(
+                f"LLM request timed out; retrying attempt {attempt + 1}/{GENERATION_MAX_ATTEMPTS} "
+                f"after {sleep_seconds:.0f}s: {exc}",
+                verbose=verbose,
+            )
+            time.sleep(sleep_seconds)
+    raise RuntimeError("unreachable")
+
+
+def build_generation_extra_body(
+    llm: LLMClient,
+    *,
+    model: str | None,
+    response_format: bool,
+) -> dict[str, Any]:
+    selected_model = model or llm.settings.model
+    extra: dict[str, Any] = {}
+    if response_format:
+        extra["response_format"] = {"type": "json_object"}
+    if is_kimi_thinking_model(selected_model, base_url=llm.settings.base_url):
+        extra["thinking"] = {"type": "disabled"}
+    return extra
+
+
+def is_kimi_thinking_model(model: str, *, base_url: str) -> bool:
+    normalized_model = model.strip().lower()
+    normalized_base_url = base_url.strip().lower()
+    return normalized_model.startswith("kimi-") or "moonshot" in normalized_base_url
+
+
+def is_llm_timeout_error(exc: LLMAPIError) -> bool:
+    message = str(exc).lower()
+    return "timed out" in message or "timeout" in message
+
+
 def looks_like_response_format_error(exc: LLMAPIError) -> bool:
     message = str(exc).lower()
     return (
         "response_format" in message
         or "json_object" in message
         or "json mode" in message
-        or "returned 400" in message
-        or "returned 422" in message
     )
 
 
@@ -775,7 +933,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         default=None,
-        help="Override LLM model name. Defaults to LLM_MODEL/SILICONFLOW_MODEL.",
+        help="Override LLM model name. Defaults to KIMI_MODEL/LLM_MODEL or kimi-k2.6.",
     )
     parser.add_argument(
         "--pdf-dir",
@@ -797,7 +955,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rebuild-pdf",
         action="store_true",
-        help="Regenerate cached converted PDFs instead of reusing existing files.",
+        help="Rebuild parsed txt sources instead of reusing existing data/processing txt files.",
     )
     parser.add_argument(
         "--convert-only",

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
-import random
 import re
 import statistics
+import sys
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,9 +21,16 @@ from app.services.llm import LLMAPIError, LLMClient
 DEFAULT_DATASET_FILE = Path("data") / "dataset" / "test.json"
 DEFAULT_OUTPUT_FILE = Path("data") / "dataset" / "evaluation.json"
 DEFAULT_TABLE_FILE = Path("data") / "dataset" / "evaluation_table.png"
+DEFAULT_BAD_CASES_CSV_FILE = Path("data") / "dataset" / "evaluation_bad_cases.csv"
 DEFAULT_QUERY_URL = "http://localhost:8000/api/v1/query"
 DEFAULT_RETRIEVAL_PATH = "/retrieval/flow"
 DEFAULT_RETRIEVAL_LIMIT = 15
+
+SCORE_THRESHOLDS = {
+    "readability": 3.0,
+    "correctness": 4.0,
+    "completeness": 4.0,
+}
 
 
 @dataclass(frozen=True)
@@ -56,8 +65,21 @@ JUDGE_SYSTEM_PROMPT = """你是企业内部知识库回答质量评测员。你�
 评分维度：
 1. readability 可读性：站在普通员工视角，预测用户愿意完整读完回答的概率。回答应清楚、简洁、有结构。图片等内容目前可能仍是占位符，不应因占位符本身扣分，但如果回答把占位符当成最终内容则应扣分。
 2. correctness 正确性：回答是否与参考答案和文档依据一致，由于回答的模型可能能比出题模型看到更多的信息，仅可以通过参考答案和实际回答重叠部分判断是否正确，以及是否有幻觉。如果实际回答涵盖更多内容，不能直接判定为幻觉。关于隐私信息：目前暂不考虑此合规性问题，知识库中出现的账密等均为公司内部公开信息，不存在隐私泄露问题。
-3. completeness 完整性：回答是否覆盖参考答案的核心内容；回答多于参考答案但不矛盾，可以视为完整。
+3. completeness 完整性：回答是否覆盖参考答案的核心内容；回答多于参考答案但不矛盾，可以视为完整。回答少于参考答案但提问未要求回答完整，也视为正确。只有当答案与参考答案明显冲突时，才应该扣分。
 
+核心通过指标
+1. 以实际提问为准，只要回答符合用户提问就可以通过，即使和参考答案原文有差异
+2. 参考答案也可能出错，以是否解决实际问题为准
+
+泛化指标
+1. 实际回答如果给出额外信息，不算错，因为回答模型可以看到更多内容
+2. 实际回答没有给出完整的参考答案，但符合用户提问，不算错
+3. 实际回答包含知识库中不存在的内容，如果明确说明不是知识库内容或回答的内容是常见知识（如数理化知识、常见网站地址、开放性问题的解答）等，不算错
+
+环境说明：
+- 参考答案是出题模型给出的答案，由AI生成，并非权威
+- 出题模型可以看到完整文档，因此可以判断某些不存在，但实际回答模型得到的是知识库的知识片段，即使找到了全部内容，也无法判定是否完整，比如提问：“XXX图片组中的四号图片说了什么？”，参考答案：“根本没有四号图片”，如果实际回答类似：“未找到四号图片”，属于正常情况。
+输出要求：
 你的输出必须是 JSON，不要输出 Markdown 代码块。"""
 
 
@@ -91,6 +113,7 @@ def evaluate_dataset(
     output_file: str | Path = DEFAULT_OUTPUT_FILE,
     *,
     table_output_file: str | Path = DEFAULT_TABLE_FILE,
+    bad_cases_csv_file: str | Path = DEFAULT_BAD_CASES_CSV_FILE,
     query_url: str = DEFAULT_QUERY_URL,
     retrieval_url: str | None = None,
     retrieval_limit: int = DEFAULT_RETRIEVAL_LIMIT,
@@ -100,13 +123,14 @@ def evaluate_dataset(
     sleep_seconds: float = 0.0,
     user_id: str = "evaluation",
     verbose: bool = True,
+    live_dashboard: bool = True,
 ) -> dict[str, Any]:
     dataset_path = Path(dataset_file)
     log(f"正在加载测试数据集：{dataset_path}", verbose=verbose)
     dataset = load_dataset(dataset_path)
     if limit is not None:
         original_count = len(dataset)
-        dataset = random_sample_dataset(dataset, limit, seed=seed)
+        dataset = limit_dataset(dataset, limit)
         log(
             f"已随机抽样 {len(dataset)} 条，共 {original_count} 条"
             + (f"，随机种子={seed}" if seed is not None else ""),
@@ -122,6 +146,11 @@ def evaluate_dataset(
     llm = LLMClient()
     log(f"裁判模型：{model or llm.settings.model}", verbose=verbose)
     results: list[dict[str, Any]] = []
+    skipped_query_failures = 0
+    bad_case_writer = BadCaseCsvWriter(Path(bad_cases_csv_file))
+    dashboard = LiveEvaluationDashboard(total=len(dataset), enabled=live_dashboard)
+    if dashboard.enabled:
+        log(f"已启动实时评估看板：{dashboard.backend}", verbose=verbose)
 
     progress = build_progress_bar(total=len(dataset), verbose=verbose)
     for index, item in enumerate(dataset, start=1):
@@ -140,7 +169,7 @@ def evaluate_dataset(
         raw_query_response: Any = None
         query_error = ""
         try:
-            query_result = call_query_api(
+            query_result = call_query_api_with_retries(
                 query_url,
                 question,
                 user_id=user_id,
@@ -162,6 +191,9 @@ def evaluate_dataset(
                 f"[{index}/{len(dataset)}] 问答接口失败，耗时 {latency_ms}ms：{query_error}",
                 verbose=verbose,
             )
+            progress.update(1)
+            skipped_query_failures += 1
+            continue
         else:
             log(
                 f"[{index}/{len(dataset)}] 问答接口返回成功，耗时 {latency_ms}ms，答案长度 {len(actual_answer)} 字符",
@@ -225,6 +257,10 @@ def evaluate_dataset(
             "judgment": judgment,
         }
         results.append(result)
+        if is_bad_quality_result(result):
+            bad_case_writer.append(result)
+            log(f"[{index}/{len(dataset)}] 已记录质量不佳案例：{bad_case_writer.path}", verbose=verbose)
+        dashboard.update(results)
         log(format_item_result(index, len(dataset), result), verbose=verbose)
         update_progress_bar(progress, result)
 
@@ -239,11 +275,13 @@ def evaluate_dataset(
         "metadata": {
             "dataset_file": str(dataset_path),
             "table_output_file": str(table_path),
+            "bad_cases_csv_file": str(Path(bad_cases_csv_file)),
             "query_url": query_url,
             "retrieval_url": retrieval_url,
             "evaluated_at": datetime.now(timezone.utc).isoformat(),
             "judge_model": model or llm.settings.model,
             "total": len(results),
+            "skipped_query_failures": skipped_query_failures,
         },
         "summary": summarize_results(results),
         "results": results,
@@ -257,12 +295,368 @@ def evaluate_dataset(
         encoding="utf-8",
     )
     try:
-        render_evaluation_table(report, table_path)
+        save_evaluation_dashboard_image(results, total=len(dataset), output_file=table_path)
         log(f"已生成 matplotlib 评测图表：{table_path}", verbose=verbose)
     except Exception as exc:  # noqa: BLE001 - table rendering should not hide JSON output.
         log(f"生成 matplotlib 评测图表失败：{exc}", verbose=verbose)
     log("评测完成", verbose=verbose)
+    dashboard.close()
     return report
+
+
+BAD_CASE_CSV_FIELDS = [
+    "evaluated_at",
+    "item_id",
+    "document_name",
+    "document_path",
+    "question_types",
+    "question",
+    "reference_answer",
+    "actual_answer",
+    "query_error",
+    "recall_score",
+    "recall_reason",
+    "readability",
+    "correctness",
+    "completeness",
+    "error_categories",
+    "reason",
+    "missing_points",
+    "hallucinations",
+    "suggested_answer",
+    "latency_ms",
+]
+
+
+class BadCaseCsvWriter:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("w", encoding="utf-8-sig", newline="") as file:
+            csv.DictWriter(file, fieldnames=BAD_CASE_CSV_FIELDS).writeheader()
+
+    def append(self, result: dict[str, Any]) -> None:
+        with self.path.open("a", encoding="utf-8-sig", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=BAD_CASE_CSV_FIELDS)
+            writer.writerow(bad_case_csv_row(result))
+
+
+class LiveEvaluationDashboard:
+    def __init__(self, *, total: int, enabled: bool = True) -> None:
+        self.total = total
+        self.enabled = False
+        self.backend = ""
+        self.plt: Any = None
+        self.fig: Any = None
+        if not enabled:
+            return
+        try:
+            import matplotlib
+
+            if not select_interactive_matplotlib_backend(matplotlib):
+                return
+            import matplotlib.pyplot as plt
+
+            configure_matplotlib_chinese_font(matplotlib)
+            plt.ion()
+            self.fig = plt.figure(figsize=(9.5, 4.8), dpi=120)
+            self.fig.patch.set_facecolor("#f7f8fb")
+            self.plt = plt
+            self.backend = matplotlib.get_backend()
+            self.enabled = True
+            plt.show(block=False)
+            self.update([])
+        except Exception:
+            self.enabled = False
+
+    def update(self, results: list[dict[str, Any]]) -> None:
+        if not self.enabled:
+            return
+        draw_evaluation_dashboard(self.fig, results, total=self.total)
+        self.fig.canvas.draw_idle()
+        self.fig.canvas.flush_events()
+        return
+        metric_labels = {
+            "readability": "可读性",
+            "correctness": "正确性",
+            "completeness": "完整性",
+        }
+        metric_colors = {
+            "readability": "#2563eb",
+            "correctness": "#16a34a",
+            "completeness": "#f59e0b",
+        }
+        for axis, metric in zip(self.axes[:3], metric_labels, strict=True):
+            axis.clear()
+            passed, failed = metric_pass_fail_counts(results, metric)
+            total_count = passed + failed
+            values = [passed, failed] if total_count else [0, 1]
+            axis.pie(
+                values,
+                startangle=90,
+                counterclock=False,
+                colors=[metric_colors[metric], "#e5e7eb"],
+                wedgeprops={"width": 0.34, "edgecolor": "white", "linewidth": 2},
+            )
+            percent = passed / total_count * 100 if total_count else 0.0
+            axis.text(0, 0.06, f"{percent:.1f}%", ha="center", va="center", fontsize=18, fontweight="bold", color="#111827")
+            axis.text(0, -0.18, f"{metric_labels[metric]}达标率", ha="center", va="center", fontsize=11, color="#374151")
+            axis.set_aspect("equal")
+
+        bar_axis = self.axes[3]
+        bar_axis.clear()
+        category_counts = failed_question_type_counts(results)
+        labels = list(category_counts.keys()) or ["暂无问题"]
+        values = list(category_counts.values()) or [0]
+        colors = ["#dc2626", "#ea580c", "#7c3aed", "#0891b2", "#4f46e5", "#be123c"]
+        bar_axis.bar(labels, values, color=[colors[index % len(colors)] for index in range(len(labels))])
+        bar_axis.set_title("不通过案例的问题类型分布", fontsize=14, fontweight="bold", color="#111827", pad=12)
+        bar_axis.set_ylabel("数量", fontsize=10, color="#374151")
+        bar_axis.grid(axis="y", color="#e5e7eb", linewidth=0.8)
+        bar_axis.spines["top"].set_visible(False)
+        bar_axis.spines["right"].set_visible(False)
+        bar_axis.tick_params(axis="x", labelrotation=18, labelsize=9)
+        for index, value in enumerate(values):
+            bar_axis.text(index, value + 0.05, str(value), ha="center", va="bottom", fontsize=9)
+
+        evaluated_count = len(results)
+        pass_count = sum(1 for result in results if result.get("judgment", {}).get("pass"))
+        self.fig.suptitle(
+            f"知识库问答评估实时看板  {evaluated_count}/{self.total}  通过 {pass_count}",
+            fontsize=18,
+            fontweight="bold",
+            color="#111827",
+        )
+    def close(self) -> None:
+        if not self.enabled:
+            return
+        try:
+            self.plt.ioff()
+            self.plt.close(self.fig)
+            return
+        except Exception:
+            pass
+
+
+def configure_matplotlib_chinese_font(matplotlib: Any) -> None:
+    matplotlib.rcParams["font.sans-serif"] = [
+        "Microsoft YaHei",
+        "SimHei",
+        "Noto Sans CJK SC",
+        "Source Han Sans SC",
+        "Arial Unicode MS",
+        "DejaVu Sans",
+    ]
+    matplotlib.rcParams["axes.unicode_minus"] = False
+
+
+def select_interactive_matplotlib_backend(matplotlib: Any) -> bool:
+    current_backend = matplotlib.get_backend().lower()
+    if "agg" not in current_backend:
+        return True
+
+    for backend in ("TkAgg", "QtAgg", "Qt5Agg", "WXAgg"):
+        try:
+            matplotlib.use(backend, force=True)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def save_evaluation_dashboard_image(
+    results: list[dict[str, Any]],
+    *,
+    total: int,
+    output_file: str | Path,
+) -> None:
+    import matplotlib
+
+    if "matplotlib.pyplot" not in sys.modules:
+        matplotlib.use("Agg")
+    configure_matplotlib_chinese_font(matplotlib)
+    import matplotlib.pyplot as plt
+
+    output_path = Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig = plt.figure(figsize=(9.5, 4.8), dpi=180)
+    try:
+        draw_evaluation_dashboard(fig, results, total=total)
+        fig.savefig(output_path, bbox_inches="tight", facecolor=fig.get_facecolor())
+    finally:
+        plt.close(fig)
+
+
+def draw_evaluation_dashboard(fig: Any, results: list[dict[str, Any]], *, total: int) -> None:
+    fig.clear()
+    fig.patch.set_facecolor("#f7f8fb")
+    pie_panel, bar_axis = fig.subplots(
+        1,
+        2,
+        gridspec_kw={"width_ratios": [1.05, 1.35], "wspace": 0.26},
+    )
+
+    pie_panel.set_title("三项质量达标率", fontsize=13, fontweight="bold", color="#111827", pad=10)
+    pie_panel.set_facecolor("#ffffff")
+    pie_panel.set_xticks([])
+    pie_panel.set_yticks([])
+    for spine in pie_panel.spines.values():
+        spine.set_visible(False)
+
+    metric_specs = [
+        ("readability", "可读性", "#2563eb", (0.03, 0.22, 0.30, 0.56)),
+        ("correctness", "正确性", "#16a34a", (0.35, 0.22, 0.30, 0.56)),
+        ("completeness", "完整性", "#f59e0b", (0.67, 0.22, 0.30, 0.56)),
+    ]
+    for metric, label, color, bounds in metric_specs:
+        axis = pie_panel.inset_axes(bounds)
+        passed, failed = metric_pass_fail_counts(results, metric)
+        total_count = passed + failed
+        values = [passed, failed] if total_count else [0, 1]
+        axis.pie(
+            values,
+            startangle=90,
+            counterclock=False,
+            colors=[color, "#e5e7eb"],
+            wedgeprops={"width": 0.34, "edgecolor": "white", "linewidth": 1.5},
+        )
+        percent = passed / total_count * 100 if total_count else 0.0
+        axis.text(0, 0.05, f"{percent:.0f}%", ha="center", va="center", fontsize=13, fontweight="bold", color="#111827")
+        axis.text(0, -1.24, label, ha="center", va="center", fontsize=9.5, color="#374151")
+        axis.set_aspect("equal")
+
+    category_counts = failed_question_type_counts(results)
+    labels = list(category_counts.keys()) or ["暂无问题"]
+    values = list(category_counts.values()) or [0]
+    colors = ["#dc2626", "#ea580c", "#7c3aed", "#0891b2", "#4f46e5", "#be123c"]
+    bar_axis.set_facecolor("#ffffff")
+    bar_axis.bar(labels, values, color=[colors[index % len(colors)] for index in range(len(labels))], width=0.62)
+    bar_axis.set_title("不通过案例的问题类型分布", fontsize=13, fontweight="bold", color="#111827", pad=10)
+    bar_axis.set_ylabel("数量", fontsize=9.5, color="#374151")
+    bar_axis.grid(axis="y", color="#e5e7eb", linewidth=0.8)
+    bar_axis.spines["top"].set_visible(False)
+    bar_axis.spines["right"].set_visible(False)
+    bar_axis.spines["left"].set_color("#d1d5db")
+    bar_axis.spines["bottom"].set_color("#d1d5db")
+    bar_axis.tick_params(axis="x", labelrotation=18, labelsize=8.5)
+    max_value = max(values) if values else 0
+    bar_axis.set_ylim(0, max(1.0, max_value * 1.25))
+    for index, value in enumerate(values):
+        bar_axis.text(index, value + max(0.05, max_value * 0.03), str(value), ha="center", va="bottom", fontsize=8.5, color="#111827")
+
+    evaluated_count = len(results)
+    pass_count = sum(1 for result in results if result.get("judgment", {}).get("pass"))
+    fig.suptitle(
+        f"知识库问答评估  {evaluated_count}/{total}  通过 {pass_count}",
+        fontsize=15,
+        fontweight="bold",
+        color="#111827",
+        y=0.98,
+    )
+    fig.subplots_adjust(left=0.055, right=0.985, top=0.84, bottom=0.16, wspace=0.26)
+
+
+def is_bad_quality_result(result: dict[str, Any]) -> bool:
+    return not bool(result.get("judgment", {}).get("pass"))
+
+
+def failed_reason_categories(result: dict[str, Any]) -> list[str]:
+    judgment = result.get("judgment", {})
+    if judgment.get("pass"):
+        return []
+    categories = ["模型判定不通过"]
+    if result.get("query_error"):
+        categories.append("问答接口失败")
+    if int(result.get("recall", {}).get("score", 0) or 0) <= 0:
+        categories.append("召回未命中")
+    if ensure_str_list(judgment.get("hallucinations")):
+        categories.append("疑似幻觉")
+    if ensure_str_list(judgment.get("missing_points")):
+        categories.append("关键点遗漏")
+    return list(dict.fromkeys(categories))
+
+
+def error_categories(result: dict[str, Any]) -> list[str]:
+    categories: list[str] = []
+    judgment = result.get("judgment", {})
+    scores = judgment.get("scores", {})
+    if result.get("query_error"):
+        categories.append("问答接口失败")
+    if int(result.get("recall", {}).get("score", 0) or 0) <= 0:
+        categories.append("召回未命中")
+    if float(scores.get("readability", 0.0) or 0.0) < SCORE_THRESHOLDS["readability"]:
+        categories.append("可读性不足")
+    if float(scores.get("correctness", 0.0) or 0.0) < SCORE_THRESHOLDS["correctness"]:
+        categories.append("正确性不足")
+    if float(scores.get("completeness", 0.0) or 0.0) < SCORE_THRESHOLDS["completeness"]:
+        categories.append("完整性不足")
+    if ensure_str_list(judgment.get("hallucinations")):
+        categories.append("疑似幻觉")
+    if ensure_str_list(judgment.get("missing_points")):
+        categories.append("关键点遗漏")
+    return list(dict.fromkeys(categories))
+
+
+def bad_category_counts(results: list[dict[str, Any]]) -> Counter[str]:
+    return failed_question_type_counts(results)
+
+
+def failed_question_type_counts(results: list[dict[str, Any]]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for result in results:
+        if not is_bad_quality_result(result):
+            continue
+        question_types = result.get("question_types") or []
+        if isinstance(question_types, str):
+            question_types = [question_types]
+        normalized_types = [
+            str(value).strip()
+            for value in question_types
+            if str(value).strip()
+        ]
+        counts.update(normalized_types or ["未分类"])
+    return counts
+
+
+def metric_pass_fail_counts(results: list[dict[str, Any]], metric: str) -> tuple[int, int]:
+    threshold = SCORE_THRESHOLDS[metric]
+    passed = 0
+    failed = 0
+    for result in results:
+        score = float(result.get("judgment", {}).get("scores", {}).get(metric, 0.0) or 0.0)
+        if score >= threshold:
+            passed += 1
+        else:
+            failed += 1
+    return passed, failed
+
+
+def bad_case_csv_row(result: dict[str, Any]) -> dict[str, Any]:
+    judgment = result.get("judgment", {})
+    scores = judgment.get("scores", {})
+    recall = result.get("recall", {})
+    return {
+        "evaluated_at": datetime.now(timezone.utc).isoformat(),
+        "item_id": result.get("item_id", ""),
+        "document_name": result.get("document_name", ""),
+        "document_path": result.get("document_path", ""),
+        "question_types": "; ".join(str(value) for value in result.get("question_types", [])),
+        "question": result.get("question", ""),
+        "reference_answer": result.get("reference_answer", ""),
+        "actual_answer": result.get("actual_answer", ""),
+        "query_error": result.get("query_error", ""),
+        "recall_score": recall.get("score", ""),
+        "recall_reason": recall.get("reason", ""),
+        "readability": scores.get("readability", ""),
+        "correctness": scores.get("correctness", ""),
+        "completeness": scores.get("completeness", ""),
+        "error_categories": "; ".join(failed_reason_categories(result)),
+        "reason": judgment.get("reason", ""),
+        "missing_points": "; ".join(ensure_str_list(judgment.get("missing_points"))),
+        "hallucinations": "; ".join(ensure_str_list(judgment.get("hallucinations"))),
+        "suggested_answer": judgment.get("suggested_answer", ""),
+        "latency_ms": result.get("latency_ms", ""),
+    }
 
 
 def build_progress_bar(*, total: int, verbose: bool) -> Any:
@@ -322,7 +716,9 @@ def render_evaluation_table(report: dict[str, Any], output_file: str | Path) -> 
     try:
         import matplotlib
 
-        matplotlib.use("Agg")
+        if "matplotlib.pyplot" not in sys.modules:
+            matplotlib.use("Agg")
+        configure_matplotlib_chinese_font(matplotlib)
         import matplotlib.pyplot as plt
     except ImportError as exc:
         raise RuntimeError("未安装 matplotlib，请先安装项目依赖。") from exc
@@ -487,18 +883,15 @@ def load_dataset(path: Path) -> list[dict[str, Any]]:
     return [item for item in data if isinstance(item, dict)]
 
 
-def random_sample_dataset(
+def limit_dataset(
     dataset: list[dict[str, Any]],
     limit: int,
-    *,
-    seed: int | None = None,
 ) -> list[dict[str, Any]]:
     if limit <= 0:
         return []
     if limit >= len(dataset):
         return list(dataset)
-    rng = random.Random(seed)
-    return rng.sample(dataset, limit)
+    return list(dataset[:limit])
 
 
 def call_query_api(
@@ -532,6 +925,39 @@ def call_query_api(
     if not answer:
         raise ValueError(f"Query API response did not contain an answer: {data}")
     return QueryCallResult(answer=answer, raw_response=data)
+
+
+def call_query_api_with_retries(
+    query_url: str,
+    question: str,
+    *,
+    user_id: str,
+    metadata: dict[str, Any],
+    verbose: bool = True,
+    retries: int = 3,
+) -> QueryCallResult:
+    last_error: Exception | None = None
+    max_attempts = retries + 1
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return call_query_api(
+                query_url,
+                question,
+                user_id=user_id,
+                metadata=metadata,
+                verbose=verbose,
+            )
+        except Exception as exc:  # noqa: BLE001 - evaluation should skip unstable query calls.
+            last_error = exc
+            if attempt >= max_attempts:
+                break
+            sleep_seconds = min(2.0 * attempt, 5.0)
+            log(
+                f"query API failed, retrying {attempt + 1}/{max_attempts} after {sleep_seconds:.0f}s: {exc}",
+                verbose=verbose,
+            )
+            time.sleep(sleep_seconds)
+    raise RuntimeError(f"query API failed after {max_attempts} attempts: {last_error}")
 
 
 def extract_answer(data: Any) -> str:
@@ -781,7 +1207,11 @@ def judge_answer_logged(
             model=model,
             temperature=0.0,
             max_tokens=2500,
-            extra_body={"response_format": {"type": "json_object"}},
+            extra_body=build_judge_extra_body(
+                llm,
+                model=model,
+                response_format=True,
+            ),
         )
     except LLMAPIError as exc:
         if not looks_like_response_format_error(exc):
@@ -796,6 +1226,11 @@ def judge_answer_logged(
             model=model,
             temperature=0.0,
             max_tokens=2500,
+            extra_body=build_judge_extra_body(
+                llm,
+                model=model,
+                response_format=False,
+            ),
         )
     data = parse_json_object(reply)
     return normalize_judgment(data)
@@ -827,9 +1262,28 @@ def looks_like_response_format_error(exc: LLMAPIError) -> bool:
         "response_format" in message
         or "json_object" in message
         or "json mode" in message
-        or "returned 400" in message
-        or "returned 422" in message
     )
+
+
+def build_judge_extra_body(
+    llm: LLMClient,
+    *,
+    model: str | None,
+    response_format: bool,
+) -> dict[str, Any]:
+    selected_model = model or llm.settings.model
+    extra: dict[str, Any] = {}
+    if response_format:
+        extra["response_format"] = {"type": "json_object"}
+    if is_kimi_thinking_model(selected_model, base_url=llm.settings.base_url):
+        extra["thinking"] = {"type": "disabled"}
+    return extra
+
+
+def is_kimi_thinking_model(model: str, *, base_url: str) -> bool:
+    normalized_model = model.strip().lower()
+    normalized_base_url = base_url.strip().lower()
+    return normalized_model.startswith("kimi-") or "moonshot" in normalized_base_url
 
 
 def judge_answer(
@@ -876,7 +1330,11 @@ def judge_answer(
             model=model,
             temperature=0.0,
             max_tokens=2500,
-            extra_body={"response_format": {"type": "json_object"}},
+            extra_body=build_judge_extra_body(
+                llm,
+                model=model,
+                response_format=True,
+            ),
         )
     except LLMAPIError:
         reply = llm.chat(
@@ -884,6 +1342,11 @@ def judge_answer(
             model=model,
             temperature=0.0,
             max_tokens=2500,
+            extra_body=build_judge_extra_body(
+                llm,
+                model=model,
+                response_format=False,
+            ),
         )
     data = parse_json_object(reply)
     return normalize_judgment(data)
@@ -1088,6 +1551,11 @@ def parse_args() -> argparse.Namespace:
         help=f"Evaluation chart PNG file. Default: {DEFAULT_TABLE_FILE}",
     )
     parser.add_argument(
+        "--bad-cases-csv",
+        default=str(DEFAULT_BAD_CASES_CSV_FILE),
+        help=f"CSV file for bad-quality cases. Default: {DEFAULT_BAD_CASES_CSV_FILE}",
+    )
+    parser.add_argument(
         "--query-url",
         default=DEFAULT_QUERY_URL,
         help=f"FastAPI query endpoint. Default: {DEFAULT_QUERY_URL}",
@@ -1106,14 +1574,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         default=None,
-        help="Override judge LLM model name. Defaults to LLM_MODEL/SILICONFLOW_MODEL.",
+        help="Override judge LLM model name. Defaults to KIMI_MODEL/LLM_MODEL or kimi-k2.6.",
     )
-    parser.add_argument("--limit", type=int, default=None, help="Randomly sample and evaluate N items.")
+    parser.add_argument("--limit", type=int, default=None, help="Evaluate the first N items in dataset order.")
     parser.add_argument(
         "--seed",
         type=int,
         default=None,
-        help="Random seed used when --limit samples the dataset.",
+        help="Deprecated compatibility option; --limit now keeps dataset order.",
     )
     parser.add_argument(
         "--sleep",
@@ -1131,6 +1599,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable progress logs.",
     )
+    parser.add_argument(
+        "--no-live-dashboard",
+        action="store_true",
+        help="Disable the live matplotlib dashboard.",
+    )
     return parser.parse_args()
 
 
@@ -1140,6 +1613,7 @@ def main() -> None:
         args.dataset,
         args.output,
         table_output_file=args.table_output,
+        bad_cases_csv_file=args.bad_cases_csv,
         query_url=args.query_url,
         retrieval_url=args.retrieval_url,
         retrieval_limit=args.retrieval_limit,
@@ -1149,6 +1623,7 @@ def main() -> None:
         sleep_seconds=args.sleep,
         user_id=args.user_id,
         verbose=not args.quiet,
+        live_dashboard=not args.no_live_dashboard,
     )
     summary = report["summary"]
     print(

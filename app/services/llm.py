@@ -7,8 +7,8 @@ from typing import Any, Iterable
 import httpx
 
 
-DEFAULT_SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
-DEFAULT_SILICONFLOW_MODEL = "Pro/moonshotai/Kimi-K2.6"
+DEFAULT_KIMI_BASE_URL = "https://api.moonshot.cn/v1"
+DEFAULT_KIMI_MODEL = "kimi-k2.6"
 
 
 class LLMConfigError(RuntimeError):
@@ -22,8 +22,8 @@ class LLMAPIError(RuntimeError):
 @dataclass(frozen=True)
 class LLMSettings:
     api_key: str
-    base_url: str = DEFAULT_SILICONFLOW_BASE_URL
-    model: str = DEFAULT_SILICONFLOW_MODEL
+    base_url: str = DEFAULT_KIMI_BASE_URL
+    model: str = DEFAULT_KIMI_MODEL
     timeout: float = 60.0
     connect_timeout: float = 10.0
     read_timeout: float = 180.0
@@ -33,26 +33,31 @@ class LLMSettings:
     @classmethod
     def from_env(cls) -> "LLMSettings":
         api_key = _get_first_env(
-            "SILICONFLOW_API_KEY",
+            "KIMI_API_KEY",
             "LLM_API_KEY",
             "OPENAI_API_KEY",
+            "SILICONFLOW_API_KEY",
         )
         if not api_key:
             raise LLMConfigError(
-                "Missing LLM API key. Please set SILICONFLOW_API_KEY, LLM_API_KEY, or OPENAI_API_KEY."
+                "Missing LLM API key. Please set KIMI_API_KEY, LLM_API_KEY, or OPENAI_API_KEY."
             )
 
         base_url = _get_first_env(
-            "SILICONFLOW_BASE_URL",
+            "KIMI_BASE_URL",
+            "KIMI_API_URL",
             "LLM_BASE_URL",
             "OPENAI_BASE_URL",
-            default=DEFAULT_SILICONFLOW_BASE_URL,
+            "SILICONFLOW_BASE_URL",
+            "SILICONFLOW_API_URL",
+            default=DEFAULT_KIMI_BASE_URL,
         )
         model = _get_first_env(
-            "SILICONFLOW_MODEL",
+            "KIMI_MODEL",
             "LLM_MODEL",
             "OPENAI_MODEL",
-            default=DEFAULT_SILICONFLOW_MODEL,
+            "SILICONFLOW_MODEL",
+            default=DEFAULT_KIMI_MODEL,
         )
         timeout = float(os.getenv("LLM_TIMEOUT", "180"))
         connect_timeout = float(os.getenv("LLM_CONNECT_TIMEOUT", "10"))
@@ -81,7 +86,7 @@ def _get_first_env(*names: str, default: str | None = None) -> str | None:
 
 
 class LLMClient:
-    """Small OpenAI-compatible chat client for SiliconFlow and similar providers."""
+    """Small OpenAI-compatible chat client for KIMI and similar providers."""
 
     def __init__(self, settings: LLMSettings | None = None) -> None:
         self.settings = settings or LLMSettings.from_env()
@@ -95,11 +100,18 @@ class LLMClient:
         max_tokens: int | None = None,
         extra_body: dict[str, Any] | None = None,
     ) -> str:
+        selected_model = model or self.settings.model
         payload: dict[str, Any] = {
-            "model": model or self.settings.model,
+            "model": selected_model,
             "messages": list(messages),
-            "temperature": temperature,
         }
+        normalized_temperature = _normalize_temperature(
+            selected_model,
+            base_url=self.settings.base_url,
+            temperature=temperature,
+        )
+        if normalized_temperature is not None:
+            payload["temperature"] = normalized_temperature
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         if extra_body:
@@ -144,6 +156,20 @@ class LLMClient:
             raise LLMAPIError(f"Failed to call LLM API: {exc}") from exc
 
         return response.json()
+
+
+def _normalize_temperature(model: str, *, base_url: str, temperature: float) -> float | None:
+    if _is_kimi_fixed_temperature_model(model, base_url=base_url):
+        return None
+    return temperature
+
+
+def _is_kimi_fixed_temperature_model(model: str, *, base_url: str) -> bool:
+    normalized_model = model.strip().lower()
+    normalized_base_url = base_url.strip().lower()
+    return normalized_model == "kimi-k2.6" or (
+        "moonshot" in normalized_base_url and normalized_model.startswith("kimi-k2")
+    )
 
 
 def get_llm_client() -> LLMClient:

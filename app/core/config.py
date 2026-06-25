@@ -135,13 +135,10 @@ class Settings:
 
     siliconflow_api_key: str = _get_first_env(
         "SILICONFLOW_API_KEY",
-        "LLM_API_KEY",
-        "OPENAI_API_KEY",
     )
     siliconflow_base_url: str = _get_first_env(
         "SILICONFLOW_BASE_URL",
-        "LLM_BASE_URL",
-        "OPENAI_BASE_URL",
+        "SILICONFLOW_API_URL",
         default="https://api.siliconflow.cn/v1",
     ).rstrip("/")
     siliconflow_timeout: float = float(os.getenv("SILICONFLOW_TIMEOUT", "180"))
@@ -151,6 +148,28 @@ class Settings:
     )
     siliconflow_write_timeout: float = float(os.getenv("SILICONFLOW_WRITE_TIMEOUT", "60"))
     siliconflow_pool_timeout: float = float(os.getenv("SILICONFLOW_POOL_TIMEOUT", "10"))
+    llm_api_key: str = _get_first_env(
+        "KIMI_API_KEY",
+        "LLM_API_KEY",
+        "OPENAI_API_KEY",
+        "SILICONFLOW_API_KEY",
+    )
+    llm_base_url: str = _get_first_env(
+        "KIMI_BASE_URL",
+        "KIMI_API_URL",
+        "LLM_BASE_URL",
+        "OPENAI_BASE_URL",
+        "SILICONFLOW_BASE_URL",
+        "SILICONFLOW_API_URL",
+        default="https://api.moonshot.cn/v1",
+    ).rstrip("/")
+    llm_model: str = _get_first_env(
+        "KIMI_MODEL",
+        "LLM_MODEL",
+        "OPENAI_MODEL",
+        "SILICONFLOW_MODEL",
+        default="kimi-k2.6",
+    )
     immediate_feedback_model: str = os.getenv(
         "IMMEDIATE_FEEDBACK_MODEL",
         "deepseek-ai/DeepSeek-V4-Flash",

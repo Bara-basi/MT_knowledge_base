@@ -791,6 +791,101 @@ def test_feishu_card_preserves_markdown_for_json2_renderer() -> None:
     ]
 
 
+def test_feishu_card_renders_latex_formula_as_readable_text() -> None:
+    markdown = (
+        r"\[\text{FOB USD/kg}=\frac{3.590+0.057+0.108}{0.99}=3.79\ \text{USD/kg}\]"
+    )
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    assert (
+        card["body"]["elements"][0]["content"]
+        == "FOB USD/kg = (3.590 + 0.057 + 0.108) / (0.99) = 3.79 USD/kg"
+    )
+
+
+def test_feishu_card_renders_explicit_latex_block_without_latex_commands() -> None:
+    markdown = r"\[x=1\]"
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    assert card["body"]["elements"][0]["content"] == "x = 1"
+
+
+def test_feishu_card_renders_bare_bracket_latex_formula() -> None:
+    markdown = (
+        r"Result: [\text{FOB USD/kg}=\frac{3.590+0.057+0.108}{0.99}=3.79\ \text{USD/kg}]"
+    )
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    assert (
+        card["body"]["elements"][0]["content"]
+        == "Result: FOB USD/kg = (3.590 + 0.057 + 0.108) / (0.99) = 3.79 USD/kg"
+    )
+
+
+def test_feishu_card_renders_bare_bracket_latex_formula_with_times() -> None:
+    markdown = r"[\frac{26.5}{7.10\times 0.87\times 0.92} = 4.663\ \text{USD/kg}]"
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    assert (
+        card["body"]["elements"][0]["content"]
+        == "(26.5) / (7.10 x 0.87 x 0.92) = 4.663 USD/kg"
+    )
+
+
+def test_feishu_card_renders_standalone_multiline_bracket_formula() -> None:
+    markdown = (
+        "[\n"
+        r"\text{加利润后 USD/kg}=\frac{23.45}{7.10\times 0.92}\approx 3.589\ \text{USD/kg}"
+        "\n]"
+    )
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    assert (
+        card["body"]["elements"][0]["content"]
+        == "加利润后 USD/kg = (23.45) / (7.10 x 0.92) ~= 3.589 USD/kg"
+    )
+
+
+def test_feishu_card_renders_latex_text_formatting_commands() -> None:
+    markdown = r"[\text{FOB USD/kg}=\frac{3.589+0.0535+0.1080}{0.99}\approx \mathbf{3.79}\ \text{USD/kg}]"
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    assert (
+        card["body"]["elements"][0]["content"]
+        == "FOB USD/kg = (3.589 + 0.0535 + 0.1080) / (0.99) ~= 3.79 USD/kg"
+    )
+
+
+def test_feishu_card_keeps_non_formula_multiline_bracket_text() -> None:
+    markdown = "[\nplain text\n]"
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    assert card["body"]["elements"][0]["content"] == markdown
+
+
+def test_feishu_card_keeps_latex_inside_code_blocks() -> None:
+    markdown = "```\n" + r"\[\frac{1}{2}\]" + "\n```"
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    assert card["body"]["elements"][0]["content"] == markdown
+
+
 def test_feishu_card_rewrites_reference_links_and_appends_source_panel() -> None:
     expected_url = feishu._format_markdown_link_url(
         "data/raw/结构化word文档/造船行业.docx"

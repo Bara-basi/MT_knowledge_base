@@ -47,6 +47,16 @@ _pseudo_tag_pattern = re.compile(r"<(img|link)>(.*?)</\1>", re.IGNORECASE | re.D
 _reference_tag_pattern = re.compile(r"<reference\b[^>]*>(.*?)</reference>", re.IGNORECASE | re.DOTALL)
 _markdown_link_pattern = re.compile(r"(?<!!)\[([^\]\n]+)\]\(([^)\n]+)\)")
 _markdown_link_title_pattern = re.compile(r"^(?P<url>.+?)\s+\"(?P<title>[^\"]*)\"\s*$")
+_latex_block_pattern = re.compile(r"\\\[(?P<expr>.+?)\\\]", re.DOTALL)
+_latex_paren_pattern = re.compile(r"\\\((?P<expr>.+?)\\\)", re.DOTALL)
+_latex_dollar_pattern = re.compile(r"(?<!\\)\$(?P<expr>[^$\n]+?)(?<!\\)\$")
+_latex_standalone_bracket_block_pattern = re.compile(
+    r"(?m)^[ \t]*\[[ \t]*\r?\n(?P<expr>.*?)[ \t]*\r?\n[ \t]*\][ \t]*$",
+    re.DOTALL,
+)
+_latex_bare_bracket_pattern = re.compile(
+    r"(?<![!\[])\[(?!\[)(?P<expr>[^\]\n]*(?:\\[A-Za-z]+|\\\s|[_^{}])[^\]\n]*)\](?!\()"
+)
 _reference_link_label_pattern = re.compile(r"^\s*(片段\s*\d+)\s*[,，:：]\s*(.+?)\s*$")
 _short_reference_link_pattern = r"\[\[\d+\]\]\([^)]+\)"
 _adjacent_any_reference_separator_pattern = re.compile(
@@ -2558,6 +2568,7 @@ async def _build_feishu_card_content(
     answer_feedback_selected: str | None = None,
 ) -> str:
     markdown_text, reference_sources = _rewrite_reference_links(markdown_text)
+    markdown_text = _render_latex_for_feishu(markdown_text)
     elements = await _build_feishu_card_elements(markdown_text, token)
     if reference_sources:
         elements.append(_build_reference_sources_panel(reference_sources))
@@ -2896,6 +2907,119 @@ def _build_markdown_element(markdown: str) -> dict[str, str]:
         "text_align": "left",
         "text_size": "normal_v2",
     }
+
+
+def _render_latex_for_feishu(markdown: str) -> str:
+    parts: list[str] = []
+    buffer: list[str] = []
+    in_code_block = False
+
+    def flush_buffer() -> None:
+        if not buffer:
+            return
+        parts.append(_render_latex_in_plain_markdown("".join(buffer)))
+        buffer.clear()
+
+    for line in markdown.splitlines(keepends=True):
+        if line.strip().startswith("```"):
+            was_in_code_block = in_code_block
+            if not was_in_code_block:
+                flush_buffer()
+            parts.append(line)
+            in_code_block = not was_in_code_block
+            continue
+
+        if in_code_block:
+            parts.append(line)
+        else:
+            buffer.append(line)
+
+    flush_buffer()
+    return "".join(parts)
+
+
+def _render_latex_in_plain_markdown(text: str) -> str:
+    rendered = _latex_block_pattern.sub(_replace_latex_block_match, text)
+    rendered = _latex_standalone_bracket_block_pattern.sub(_replace_latex_match, rendered)
+    for pattern in (_latex_paren_pattern, _latex_dollar_pattern, _latex_bare_bracket_pattern):
+        rendered = pattern.sub(_replace_latex_match, rendered)
+    return rendered
+
+
+def _replace_latex_block_match(match: re.Match[str]) -> str:
+    return _latex_to_readable_text(match.group("expr").strip())
+
+
+def _replace_latex_match(match: re.Match[str]) -> str:
+    expr = match.group("expr").strip()
+    if not _looks_like_latex_math(expr):
+        return match.group(0)
+    return _latex_to_readable_text(expr)
+
+
+def _looks_like_latex_math(expr: str) -> bool:
+    return bool(
+        re.search(
+            r"\\(?:frac|text|times|div|cdot|leq?|geq?|neq|approx|left|right|sum|sqrt)\b|[_^{}]",
+            expr,
+        )
+    )
+
+
+def _latex_to_readable_text(expr: str) -> str:
+    text = expr.strip()
+    previous = None
+    while text != previous:
+        previous = text
+        text = re.sub(
+            r"\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}",
+            lambda match: f"({match.group(1).strip()}) / ({match.group(2).strip()})",
+            text,
+        )
+
+    text = re.sub(r"\\(?:text|mathbf|mathrm|operatorname)\s*\{([^{}]*)\}", r"\1", text)
+    text = text.replace(r"\left", "").replace(r"\right", "")
+    replacements = {
+        r"\ ": " ",
+        r"\,": " ",
+        r"\;": " ",
+        r"\:": " ",
+        r"\times": " x ",
+        r"\cdot": " * ",
+        r"\div": " / ",
+        r"\leq": " <= ",
+        r"\le": " <= ",
+        r"\geq": " >= ",
+        r"\ge": " >= ",
+        r"\neq": " != ",
+        r"\approx": " ~= ",
+        r"\%": "%",
+        r"\$": "$",
+        r"\&": "&",
+        r"\_": "_",
+    }
+    for latex, plain in replacements.items():
+        text = text.replace(latex, plain)
+
+    text = re.sub(r"\^\{([^{}]+)\}", r"^\1", text)
+    text = re.sub(r"_\{([^{}]+)\}", r"_\1", text)
+    text = text.replace("{", "").replace("}", "")
+    text = re.sub(r"\\([A-Za-z]+)", r"\1", text)
+    protected_operators = {
+        "<=": "__LATEX_LE__",
+        ">=": "__LATEX_GE__",
+        "!=": "__LATEX_NE__",
+        "~=": "__LATEX_APPROX__",
+    }
+    for operator, placeholder in protected_operators.items():
+        text = text.replace(operator, placeholder)
+    text = re.sub(r"\s*([=+\-*<>])\s*", r" \1 ", text)
+    for operator, placeholder in protected_operators.items():
+        text = text.replace(placeholder, f" {operator} ")
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\(\s+", "(", text)
+    text = re.sub(r"\s+\)", ")", text)
+    return text.strip()
 
 
 def _rewrite_reference_links(markdown: str) -> tuple[str, list[_ReferenceSource]]:
