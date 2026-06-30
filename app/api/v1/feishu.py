@@ -2960,22 +2960,83 @@ def _replace_latex_match(match: re.Match[str]) -> str:
 def _looks_like_latex_math(expr: str) -> bool:
     return bool(
         re.search(
-            r"\\(?:frac|text|times|div|cdot|leq?|geq?|neq|approx|left|right|sum|sqrt)\b|[_^{}]",
+            r"\\(?:frac|text|times|div|cdot|leq?|geq?|neq|approx|left|right|sum|sqrt)(?![A-Za-z])|[_^{}]",
             expr,
         )
     )
 
 
+def _replace_latex_fractions(text: str) -> str:
+    parts: list[str] = []
+    index = 0
+
+    while index < len(text):
+        if not text.startswith(r"\frac", index):
+            parts.append(text[index])
+            index += 1
+            continue
+
+        command_end = index + len(r"\frac")
+        if command_end < len(text) and text[command_end].isascii() and text[command_end].isalpha():
+            parts.append(text[index])
+            index += 1
+            continue
+
+        numerator_start = _skip_latex_whitespace(text, command_end)
+        numerator, after_numerator = _read_latex_group(text, numerator_start)
+        if numerator is None:
+            parts.append(" / ")
+            index = command_end
+            continue
+
+        denominator_start = _skip_latex_whitespace(text, after_numerator)
+        denominator, after_denominator = _read_latex_group(text, denominator_start)
+        if denominator is None:
+            parts.append(f"({_latex_to_readable_text(numerator)}) / ")
+            index = after_numerator
+            continue
+
+        parts.append(
+            f"({_latex_to_readable_text(numerator)}) / ({_latex_to_readable_text(denominator)})"
+        )
+        index = after_denominator
+
+    return "".join(parts)
+
+
+def _skip_latex_whitespace(text: str, index: int) -> int:
+    while index < len(text) and text[index].isspace():
+        index += 1
+    return index
+
+
+def _read_latex_group(text: str, index: int) -> tuple[str | None, int]:
+    if index >= len(text) or text[index] != "{":
+        return None, index
+
+    depth = 1
+    cursor = index + 1
+    start = cursor
+
+    while cursor < len(text):
+        char = text[cursor]
+        if char == "\\":
+            cursor += 2
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:cursor], cursor + 1
+        cursor += 1
+
+    return None, index
+
+
 def _latex_to_readable_text(expr: str) -> str:
     text = expr.strip()
-    previous = None
-    while text != previous:
-        previous = text
-        text = re.sub(
-            r"\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}",
-            lambda match: f"({match.group(1).strip()}) / ({match.group(2).strip()})",
-            text,
-        )
+    text = _replace_latex_fractions(text)
 
     text = re.sub(r"\\(?:text|mathbf|mathrm|operatorname)\s*\{([^{}]*)\}", r"\1", text)
     text = text.replace(r"\left", "").replace(r"\right", "")

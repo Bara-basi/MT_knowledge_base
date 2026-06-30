@@ -868,6 +868,30 @@ def test_feishu_card_renders_latex_text_formatting_commands() -> None:
     )
 
 
+def test_feishu_card_renders_fraction_with_nested_text_groups() -> None:
+    markdown = (
+        r"[\text{FOB USD/KG}=\frac{\text{出厂价}+\text{运营成本}}"
+        r"{\text{汇率}\times(1-\text{利润率})}]"
+    )
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    assert (
+        card["body"]["elements"][0]["content"]
+        == "FOB USD/KG = (出厂价 + 运营成本) / (汇率 x (1 - 利润率))"
+    )
+
+
+def test_feishu_card_does_not_expose_unmatched_frac_command() -> None:
+    markdown = r"[\frac出厂价+\frac国内运杂费/1000汇率]"
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    assert "frac" not in card["body"]["elements"][0]["content"]
+
+
 def test_feishu_card_keeps_non_formula_multiline_bracket_text() -> None:
     markdown = "[\nplain text\n]"
 
