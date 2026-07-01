@@ -19,6 +19,7 @@ from app.services.embedding import (
     load_bm25_embedding_function,
 )
 from app.services.parser.parser import parse_document
+from app.services.parser.paths import processing_document_dir
 from app.services.vector_store import VectorStoreService
 
 
@@ -250,7 +251,7 @@ def prepare_document(
     parse: bool = True,
 ) -> PreparedDocument:
     document_name = file_path.stem
-    processing_dir = Path("data") / "processing" / document_name
+    processing_dir = processing_document_dir(file_path)
 
     txt_file = processing_dir / "txt" / f"{document_name}.txt"
     chunk_file = processing_dir / "chunk" / f"{document_name}.chunks.json"

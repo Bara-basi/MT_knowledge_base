@@ -20,9 +20,11 @@ from docx.text.run import Run
 try:
     from app.services.parser.img_parser import enrich_image_descriptions
     from app.services.parser.link_parser import enrich_links
+    from app.services.parser.paths import processing_subdir
 except ModuleNotFoundError:
     from img_parser import enrich_image_descriptions
     from link_parser import enrich_links
+    from paths import processing_subdir
 
 
 IMAGE_EXTENSIONS = {
@@ -73,7 +75,7 @@ def parse_word_document(
 
     _log(f"start parsing: {path}")
     document = Document(path)
-    image_dir = Path("data") / "processing" / path.stem / "img"
+    image_dir = processing_subdir(path, "img")
     image_dir.mkdir(parents=True, exist_ok=True)
     _remove_stale_bin_images(image_dir)
 
@@ -900,7 +902,7 @@ def _format_item_text_for_txt(text: str) -> str:
 
 def write_items_to_txt(items: list[dict[str, str]], source_file: str | Path) -> Path:
     source_path = Path(source_file)
-    txt_dir = Path("data") / "processing" / source_path.stem / "txt"
+    txt_dir = processing_subdir(source_path, "txt")
     txt_dir.mkdir(parents=True, exist_ok=True)
 
     output_path = txt_dir / f"{source_path.stem}.txt"

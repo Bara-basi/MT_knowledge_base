@@ -16,6 +16,7 @@ from typing import Any
 
 from app.services.llm import LLMAPIError, LLMClient
 from app.services.parser.parser import parse_document
+from app.services.parser.paths import processing_subdir
 from app.services.parser.word_parser import format_extracted_items
 
 
@@ -403,7 +404,7 @@ def ensure_processing_txt_source(
 
 
 def processing_txt_path(path: Path) -> Path:
-    return Path("data") / "processing" / path.stem / "txt" / f"{path.stem}.txt"
+    return processing_subdir(path, "txt") / f"{path.stem}.txt"
 
 
 def ensure_pdf_source(

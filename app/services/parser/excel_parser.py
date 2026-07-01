@@ -15,9 +15,11 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 try:
     from app.services.parser.img_parser import enrich_image_descriptions
+    from app.services.parser.paths import processing_subdir
     from app.services.parser.word_parser import format_extracted_items
 except ModuleNotFoundError:
     from img_parser import enrich_image_descriptions
+    from paths import processing_subdir
     from word_parser import format_extracted_items
 
 
@@ -62,7 +64,7 @@ def parse_excel_document(
 
     _log(f"start parsing: {path}")
     workbook = load_workbook(path, data_only=True)
-    image_dir = Path("data") / "processing" / path.stem / "img"
+    image_dir = processing_subdir(path, "img")
     image_dir.mkdir(parents=True, exist_ok=True)
     _remove_stale_bin_images(image_dir)
 
@@ -335,7 +337,7 @@ def _row_table_items(
 
 def write_items_to_txt(items: list[dict[str, Any]], source_file: str | Path) -> Path:
     source_path = Path(source_file)
-    txt_dir = Path("data") / "processing" / source_path.stem / "txt"
+    txt_dir = processing_subdir(source_path, "txt")
     txt_dir.mkdir(parents=True, exist_ok=True)
 
     output_path = txt_dir / f"{source_path.stem}.txt"

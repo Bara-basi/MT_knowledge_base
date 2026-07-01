@@ -15,9 +15,11 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only in misconfigure
 
 try:
     from app.services.data_clean import clean_items
+    from app.services.parser.paths import processing_subdir
     from app.services.parser.word_parser import format_extracted_items
 except ModuleNotFoundError:
     from data_clean import clean_items
+    from paths import processing_subdir
     from word_parser import format_extracted_items
 
 
@@ -641,7 +643,7 @@ def _looks_like_center_metadata(text: str) -> bool:
 
 def write_items_to_txt(items: list[dict[str, Any]], source_file: str | Path) -> Path:
     source_path = Path(source_file)
-    txt_dir = Path("data") / "processing" / source_path.stem / "txt"
+    txt_dir = processing_subdir(source_path, "txt")
     txt_dir.mkdir(parents=True, exist_ok=True)
 
     output_path = txt_dir / f"{source_path.stem}.txt"

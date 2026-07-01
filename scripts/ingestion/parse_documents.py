@@ -11,6 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.services.parser.parser import parse_document
+from app.services.parser.paths import processing_subdir
 
 
 SUPPORTED_EXTENSIONS = {".docx", ".pptx", ".xlsx", ".pdf"}
@@ -129,7 +130,7 @@ def is_supported_document(path: Path) -> bool:
 
 
 def _processing_txt_file(file_path: Path) -> Path:
-    return Path("data") / "processing" / file_path.stem / "txt" / f"{file_path.stem}.txt"
+    return processing_subdir(file_path, "txt") / f"{file_path.stem}.txt"
 
 
 if __name__ == "__main__":

@@ -6,11 +6,13 @@ try:
     from app.services.parser.excel_parser import parse_excel_document
     from app.services.parser.pdf_parser import parse_pdf_document
     from app.services.parser.powerpoint_parser import parse_powerpoint_document
+    from app.services.parser.standard_pdf_parser import parse_standard_pdf_document
     from app.services.parser.word_parser import parse_word_document
 except ModuleNotFoundError:
     from excel_parser import parse_excel_document
     from pdf_parser import parse_pdf_document
     from powerpoint_parser import parse_powerpoint_document
+    from standard_pdf_parser import parse_standard_pdf_document
     from word_parser import parse_word_document
 
 
@@ -30,6 +32,8 @@ def parse_document(
     if suffix == ".pptx":
         return parse_powerpoint_document(path, image_analysis_workers=image_analysis_workers)
     if suffix == ".pdf":
+        if path.name.upper().startswith("ASME"):
+            return parse_standard_pdf_document(path, image_analysis_workers=image_analysis_workers)
         return parse_pdf_document(path, image_analysis_workers=image_analysis_workers)
 
     raise ValueError(f"Unsupported document type: {suffix or 'unknown'}")
