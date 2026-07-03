@@ -20,7 +20,7 @@ from app.services.embedding import (
 )
 from app.services.parser.parser import parse_document
 from app.services.parser.paths import processing_document_dir
-from app.services.vector_store import VectorStoreService
+from app.services.vector_store import VectorStoreService, load_embedding_records
 
 
 SUPPORTED_EXTENSIONS = {".docx", ".pptx", ".xlsx", ".pdf"}
@@ -35,6 +35,7 @@ class IngestionResult:
     embedding_file: Path
     chunk_count: int
     upsert_count: int
+    upsert_skipped: bool = False
 
 
 @dataclass
@@ -78,6 +79,15 @@ def main() -> None:
         help="Continue ingesting other documents when one document fails.",
     )
     parser.add_argument(
+        "--continue",
+        dest="continue_existing",
+        action="store_true",
+        help=(
+            "Resume from existing artifacts. Existing txt, chunk, and embedding files "
+            "are reused; missing later stages are generated and upsert can still run."
+        ),
+    )
+    parser.add_argument(
         "--image-workers",
         type=int,
         default=3,
@@ -112,6 +122,7 @@ def main() -> None:
     print(f"Documents: {len(document_files)}")
     print(f"Upsert: {'disabled' if args.no_upsert else 'enabled'}")
     print(f"BM25 mode: {args.bm25_mode}")
+    print(f"Continue: {'enabled' if args.continue_existing else 'disabled'}")
 
     prepared_documents: list[PreparedDocument] = []
     failures: list[tuple[Path, Exception]] = []
@@ -119,9 +130,10 @@ def main() -> None:
     for index, file_path in enumerate(document_files, start=1):
         print(f"\n[{index}/{len(document_files)}] Parsing {file_path}")
         try:
-            prepared = prepare_document(
+            prepared_batch = prepare_documents(
                 file_path,
                 image_analysis_workers=args.image_workers,
+                rebuild=not args.continue_existing,
             )
         except Exception as exc:
             failures.append((file_path, exc))
@@ -130,10 +142,12 @@ def main() -> None:
                 raise
             continue
 
-        prepared_documents.append(prepared)
-        print(f"Text output: {prepared.txt_file}")
-        print(f"Chunk output: {prepared.chunk_file}")
-        print(f"Chunks: {len(prepared.chunks)}")
+        prepared_documents.extend(prepared_batch)
+        print(f"Prepared outputs: {len(prepared_batch)}")
+        print(f"Chunks: {sum(len(prepared.chunks) for prepared in prepared_batch)}")
+        if prepared_batch:
+            print(f"First text output: {prepared_batch[0].txt_file}")
+            print(f"First chunk output: {prepared_batch[0].chunk_file}")
 
     results: list[IngestionResult] = []
     if prepared_documents:
@@ -156,6 +170,8 @@ def main() -> None:
                     flush=not args.no_flush,
                     bm25_model=bm25_model,
                     bm25_model_file=bm25_model_file,
+                    rebuild=not args.continue_existing,
+                    skip_existing_upsert=args.continue_existing,
                 )
             except Exception as exc:
                 failures.append((prepared.file_path, exc))
@@ -166,13 +182,17 @@ def main() -> None:
 
             results.append(result)
             print(f"Embedding output: {result.embedding_file}")
-            print(f"Upserted: {result.upsert_count}")
+            if result.upsert_skipped:
+                print("Upsert skipped: existing file_id found in Milvus")
+            else:
+                print(f"Upserted: {result.upsert_count}")
 
     print("\nSummary")
     print(f"Succeeded documents: {len(results)}")
     print(f"Failed documents: {len(failures)}")
     print(f"Total chunks: {sum(result.chunk_count for result in results)}")
     print(f"Total upserted: {sum(result.upsert_count for result in results)}")
+    print(f"Skipped upserts: {sum(1 for result in results if result.upsert_skipped)}")
 
     if failures:
         print("\nFailures")
@@ -203,6 +223,10 @@ def is_supported_document(path: Path) -> bool:
     return path.suffix.lower() in SUPPORTED_EXTENSIONS and not path.name.startswith("~$")
 
 
+def is_standard_pdf_document(path: Path) -> bool:
+    return path.suffix.lower() == ".pdf" and path.name.upper().startswith("ASME")
+
+
 def _configure_utf8_stdio() -> None:
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -219,10 +243,13 @@ def ingest_document(
     image_analysis_workers: int,
     bm25_model=None,
     bm25_model_file: Path | None = None,
+    rebuild: bool = True,
+    skip_existing_upsert: bool = False,
 ) -> IngestionResult:
     prepared = prepare_document(
         file_path,
         image_analysis_workers=image_analysis_workers,
+        rebuild=rebuild,
     )
     bm25_model_file = bm25_model_file or default_bm25_model_file()
     if prepared.chunks and bm25_model is None:
@@ -240,7 +267,33 @@ def ingest_document(
         flush=flush,
         bm25_model=bm25_model,
         bm25_model_file=bm25_model_file,
+        rebuild=rebuild,
+        skip_existing_upsert=skip_existing_upsert,
     )
+
+
+def prepare_documents(
+    file_path: Path,
+    *,
+    image_analysis_workers: int,
+    rebuild: bool = True,
+    parse: bool = True,
+) -> list[PreparedDocument]:
+    if is_standard_pdf_document(file_path):
+        return prepare_standard_pdf_sections(
+            file_path,
+            image_analysis_workers=image_analysis_workers,
+            rebuild=rebuild,
+            parse=parse,
+        )
+    return [
+        prepare_document(
+            file_path,
+            image_analysis_workers=image_analysis_workers,
+            rebuild=rebuild,
+            parse=parse,
+        )
+    ]
 
 
 def prepare_document(
@@ -286,6 +339,72 @@ def prepare_document(
     )
 
 
+def prepare_standard_pdf_sections(
+    file_path: Path,
+    *,
+    image_analysis_workers: int,
+    rebuild: bool = True,
+    parse: bool = True,
+) -> list[PreparedDocument]:
+    processing_dir = processing_document_dir(file_path)
+
+    if parse and rebuild:
+        parse_document(
+            file_path,
+            image_analysis_workers=image_analysis_workers,
+        )
+
+    section_txt_files = find_standard_section_txt_files(processing_dir)
+    if parse and not rebuild and not section_txt_files:
+        parse_document(
+            file_path,
+            image_analysis_workers=image_analysis_workers,
+        )
+        section_txt_files = find_standard_section_txt_files(processing_dir)
+    if not section_txt_files:
+        raise FileNotFoundError(f"No standard section txt files found under: {processing_dir}")
+
+    prepared_documents: list[PreparedDocument] = []
+    for txt_file in section_txt_files:
+        section_dir = txt_file.parent.parent
+        section_pdf = section_pdf_for_txt(txt_file)
+        source_file = section_pdf if section_pdf.exists() else txt_file
+        chunk_file = section_dir / "chunk" / f"{txt_file.stem}.chunks.json"
+        embedding_file = section_dir / "embedding" / f"{txt_file.stem}.embeddings.json"
+
+        if not rebuild and chunk_file.exists():
+            chunks = load_chunks(chunk_file)
+        else:
+            parsed_items = load_items_from_txt(txt_file)
+            chunks = split_items(parsed_items, source_file=source_file)
+            save_chunks(chunks, chunk_file)
+
+        prepared_documents.append(
+            PreparedDocument(
+                file_path=source_file,
+                txt_file=txt_file,
+                chunk_file=chunk_file,
+                embedding_file=embedding_file,
+                chunks=chunks,
+            )
+        )
+
+    return prepared_documents
+
+
+def find_standard_section_txt_files(processing_dir: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in processing_dir.glob("*/txt/*.txt")
+        if path.is_file()
+    )
+
+
+def section_pdf_for_txt(txt_file: Path) -> Path:
+    section_dir = txt_file.parent.parent
+    return section_dir / "pdf" / f"{txt_file.stem}.pdf"
+
+
 def resolve_bm25_model(
     prepared_documents: list[PreparedDocument],
     *,
@@ -327,6 +446,7 @@ def embed_prepared_document(
     bm25_model,
     bm25_model_file: Path | None,
     rebuild: bool = True,
+    skip_existing_upsert: bool = False,
 ) -> IngestionResult:
     if rebuild or not prepared.embedding_file.exists():
         embedding_service.embed_chunk_file(
@@ -337,13 +457,20 @@ def embed_prepared_document(
         )
 
     upsert_count = 0
+    upsert_skipped = False
     if vector_store_service is not None:
-        upsert_result = vector_store_service.upsert_embedding_file(
+        if skip_existing_upsert and embedding_file_exists_in_vector_store(
             prepared.embedding_file,
-            flush=flush,
-            delete_file_ids=[] if prepared.chunks else [document_file_id(prepared.file_path)],
-        )
-        upsert_count = int(upsert_result["upsert_count"])
+            vector_store_service,
+        ):
+            upsert_skipped = True
+        else:
+            upsert_result = vector_store_service.upsert_embedding_file(
+                prepared.embedding_file,
+                flush=flush,
+                delete_file_ids=[] if prepared.chunks else [document_file_id(prepared.file_path)],
+            )
+            upsert_count = int(upsert_result["upsert_count"])
 
     return IngestionResult(
         file_path=prepared.file_path,
@@ -352,7 +479,30 @@ def embed_prepared_document(
         embedding_file=prepared.embedding_file,
         chunk_count=len(prepared.chunks),
         upsert_count=upsert_count,
+        upsert_skipped=upsert_skipped,
     )
+
+
+def embedding_file_exists_in_vector_store(
+    embedding_file: Path,
+    vector_store_service: VectorStoreService,
+) -> bool:
+    file_ids = embedding_file_file_ids(embedding_file)
+    return bool(file_ids) and all(vector_store_service.has_file_id(file_id) for file_id in file_ids)
+
+
+def embedding_file_file_ids(embedding_file: Path) -> list[str]:
+    records = load_embedding_records(embedding_file)
+    file_ids: list[str] = []
+    seen: set[str] = set()
+    for record in records:
+        metadata = dict(record.get("metadata") or {})
+        file_id = str(record.get("file_id") or metadata.get("file_id") or "").strip()
+        if not file_id or file_id in seen:
+            continue
+        seen.add(file_id)
+        file_ids.append(file_id)
+    return file_ids
 
 
 def document_file_id(file_path: Path) -> str:

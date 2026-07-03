@@ -55,6 +55,8 @@ EMBEDDED_IMAGE_PATH_PATTERN = re.compile(
     r"\s*图片\s*[:：]\s*data[\\/]+processing[\\/].+?\.(?:png|jpe?g|gif|bmp|webp|tiff?)",
     re.IGNORECASE,
 )
+INTENTIONALLY_LEFT_BLANK_PATTERN = re.compile(r"^\s*INTENTIONALLY\s+LEFT\s+BLANK\s*$", re.IGNORECASE)
+PAGE_NUMBER_STANDALONE_PATTERN = re.compile(r"^\d{1,4}$")
 
 
 def clean_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -82,6 +84,12 @@ def clean_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
 
         if item_type not in {"image", "link", "link_ref"} and _is_image_path_text(text):
+            continue
+
+        if item_type not in {"image", "link", "link_ref"} and _is_intentionally_left_blank_text(text):
+            continue
+
+        if item_type not in {"image", "link", "link_ref"} and _is_standalone_page_number_text(text):
             continue
 
         if item_type not in {"image", "link", "link_ref"} and _is_empty_text(text):
@@ -190,6 +198,17 @@ def _is_source_sync_link(item: dict[str, Any]) -> bool:
 
 def _is_image_path_text(text: str) -> bool:
     return bool(IMAGE_PATH_TEXT_PATTERN.match(text))
+
+
+def _is_intentionally_left_blank_text(text: str) -> bool:
+    return bool(INTENTIONALLY_LEFT_BLANK_PATTERN.match(text))
+
+
+def _is_standalone_page_number_text(text: str) -> bool:
+    stripped = text.strip()
+    if not PAGE_NUMBER_STANDALONE_PATTERN.match(stripped):
+        return False
+    return 0 < int(stripped) <= 2000
 
 
 def _is_empty_text(text: str) -> bool:

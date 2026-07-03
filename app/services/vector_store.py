@@ -109,6 +109,22 @@ class VectorStoreService:
             "result": result,
         }
 
+    def has_file_id(self, file_id: str) -> bool:
+        cleaned_file_id = str(file_id or "").strip()
+        if not cleaned_file_id:
+            return False
+        if not self.client.has_collection(self.config.name):
+            return False
+
+        self.client.load_collection(self.config.name)
+        rows = self.client.query(
+            collection_name=self.config.name,
+            filter=f'file_id == "{_escape_milvus_string(cleaned_file_id)}"',
+            output_fields=["file_id"],
+            limit=1,
+        )
+        return bool(rows)
+
     def get_by_ids(self, ids: list[str]) -> list[dict[str, Any]]:
         if not ids:
             return []

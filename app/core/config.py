@@ -67,6 +67,11 @@ class Settings:
         "CHAT_MESSAGE_ENCRYPTION_KEY",
         "change-me-before-production-chat-message-encryption-key",
     )
+    neo4j_uri: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    neo4j_user: str = os.getenv("NEO4J_USER", "neo4j")
+    neo4j_password: str = os.getenv("NEO4J_PASSWORD", "")
+    neo4j_database: str = os.getenv("NEO4J_DATABASE", "neo4j")
+    neo4j_graph_name: str = os.getenv("NEO4J_GRAPH_NAME", "MTSCO知识图谱")
 
     minio_endpoint: str = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
     minio_public_endpoint: str = os.getenv("MINIO_PUBLIC_ENDPOINT", minio_endpoint)

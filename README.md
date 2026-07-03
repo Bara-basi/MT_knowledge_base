@@ -360,3 +360,11 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f milvus-s
 4. `.env` 不能提交到 GitHub/GitLab，生产密钥必须留在服务器。
 5. 执行 `docker compose down -v` 会删除 Docker volumes，可能清空 PostgreSQL、Milvus、MinIO、n8n 数据。
 6. 重建 embedding 会调用外部 API，需要关注费用、限速和耗时。
+
+# 常见维护问题
+- docker api 重启
+```bash 
+cd E:\MTSCO_knowledge_base
+docker rm -f api
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-deps --force-recreate --no-build api
+```

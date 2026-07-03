@@ -6,6 +6,7 @@ import shutil
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 try:
@@ -17,7 +18,7 @@ try:
     from app.services.data_clean import clean_items
     from app.services.parser.paths import processing_document_dir, processing_subdir
     from app.services.parser.pdf_parser import (
-        _assign_heading_styles as _assign_pdf_heading_styles,
+        PdfLine,
         _build_items as _build_pdf_items,
         _clean_pdf_lines,
         _extract_lines as _extract_pdf_lines,
@@ -27,7 +28,7 @@ except ModuleNotFoundError:
     from data_clean import clean_items
     from paths import processing_document_dir, processing_subdir
     from pdf_parser import (
-        _assign_heading_styles as _assign_pdf_heading_styles,
+        PdfLine,
         _build_items as _build_pdf_items,
         _clean_pdf_lines,
         _extract_lines as _extract_pdf_lines,
@@ -152,6 +153,21 @@ IMPLICIT_TABLE_MAX_FONT_SIZE = 8.7
 IMPLICIT_TABLE_MAX_ROW_GAP = 6.0
 MASK_EXTRA_NOTE_GAP = 90.0
 ASSET_RENDER_ZOOM = 2.0
+STANDARD_TEXT_HEADING_FONT_TOLERANCE = 0.3
+STANDARD_TEXT_CONTINUATION_GAP_MULTIPLIER = 1.8
+STANDARD_TEXT_MIN_TITLE_FONT_SIZE = 10.0
+STANDARD_TEXT_FIRST_TITLE_SIZE_DELTA = 5.0
+STANDARD_TEXT_LEFT_TOLERANCE = 8.0
+STANDARD_TEXT_CENTER_MAX_CHARS = 180
+STANDARD_TEXT_NUMBERED_MAX_CHARS = 180
+STANDARD_NUMBERED_HEADING_PATTERN = re.compile(r"^(\d{1,3}(?:\.\d{1,3})*)\.?\s+(.+)")
+STANDARD_NUMBER_ONLY_HEADING_PATTERN = re.compile(r"^(\d{1,3}(?:\.\d{1,3})*)\.$")
+STANDARD_REFERENCED_DOCUMENTS_HEADING_PATTERN = re.compile(
+    r"^\d{1,3}\.?\s+Referenced\s+Documents\s*$",
+    re.IGNORECASE,
+)
+STANDARD_SMALL_RESIDUAL_FONT_DELTA = 0.7
+STANDARD_SMALL_RESIDUAL_MAX_CHARS = 180
 
 
 def parse_standard_pdf_document(
@@ -188,14 +204,13 @@ def parse_standard_pdf_document(
     assets = load_standard_assets_manifest(assets_manifest_path)
     sections = write_masked_text_pdfs(path, sections, assets)
     manifest_path = write_split_manifest(path, title_pages, sections, title_page_max_chars=title_page_max_chars)
-    items = extract_standard_text_from_sections(sections)
-    txt_path = write_items_to_txt(items, path)
+    items, txt_paths = extract_and_write_standard_section_texts(sections)
 
     _log(f"wrote sections: {len(sections)}")
     _log(f"wrote manifest: {manifest_path}")
     _log(f"wrote assets manifest: {assets_manifest_path}")
     _log("wrote masked text PDFs")
-    _log(f"wrote parsed txt: {txt_path}")
+    _log(f"wrote parsed txt files: {len(txt_paths)}")
     _log(f"finished splitting: {path.name} ({time.perf_counter() - started_at:.2f}s)")
     return items
 
@@ -405,22 +420,349 @@ def write_masked_text_pdfs(
 
 
 def extract_standard_text_from_sections(sections: list[StandardPdfSection]) -> list[dict[str, Any]]:
-    lines: list[Any] = []
-    next_order = 0
+    items: list[dict[str, Any]] = []
     for section in sections:
-        text_source = Path(section.text_pdf_path or section.output_path)
-        if not text_source.exists():
-            continue
-        section_lines = _extract_pdf_lines(text_source)
-        for line in section_lines:
-            line.page_number = section.start_page + line.page_number - 1
-            line.order = next_order
-            next_order += 1
-        lines.extend(section_lines)
+        items.extend(extract_standard_text_from_section(section))
+    return items
 
-    lines = _clean_pdf_lines(lines)
-    _assign_pdf_heading_styles(lines)
-    return clean_items(_build_pdf_items(lines))
+
+def extract_and_write_standard_section_texts(sections: list[StandardPdfSection]) -> tuple[list[dict[str, Any]], list[Path]]:
+    all_items: list[dict[str, Any]] = []
+    txt_paths: list[Path] = []
+    for section in sections:
+        items, referenced_items = extract_standard_text_payload_from_section(section)
+        all_items.extend(items)
+        txt_paths.append(write_section_items_to_txt(items, section))
+        if referenced_items:
+            write_section_referenced_documents_to_json(referenced_items, section)
+    return all_items, txt_paths
+
+
+def extract_standard_text_from_section(section: StandardPdfSection) -> list[dict[str, Any]]:
+    items, _referenced_items = extract_standard_text_payload_from_section(section)
+    return items
+
+
+def extract_standard_text_payload_from_section(
+    section: StandardPdfSection,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    lines: list[Any] = []
+    referenced_lines: list[Any] = []
+    text_source = Path(section.text_pdf_path or section.output_path)
+    if not text_source.exists():
+        return [], []
+
+    section_lines, section_referenced_lines = _standard_section_text_lines(_extract_pdf_lines(text_source))
+    for next_order, line in enumerate(section_lines):
+        line.page_number = section.start_page + line.page_number - 1
+        line.order = next_order
+        lines.append(line)
+
+    for next_order, line in enumerate(section_referenced_lines):
+        line.page_number = section.start_page + line.page_number - 1
+        line.order = next_order
+        referenced_lines.append(line)
+
+    return clean_items(_build_pdf_items(lines)), clean_items(_build_pdf_items(referenced_lines))
+
+
+def _standard_section_text_lines(lines: list[PdfLine]) -> tuple[list[PdfLine], list[PdfLine]]:
+    """Assign ASME/ASTM standard-specific heading styles and merge wrapped headings."""
+    if not lines:
+        return [], []
+
+    ordered = _standard_ordered_lines(lines)
+    first_page = min(line.page_number for line in ordered)
+    title_line, consumed_ids = _standard_first_page_title_line(ordered, first_page=first_page)
+    ordered = _standard_filter_small_residual_lines(_standard_ordered_lines(_clean_pdf_lines(ordered)))
+    center_heading_sizes = _standard_center_heading_sizes(ordered, first_page=first_page)
+
+    output: list[PdfLine] = []
+    if title_line is not None:
+        output.append(title_line)
+
+    index = 0
+    while index < len(ordered):
+        line = ordered[index]
+        if id(line) in consumed_ids:
+            index += 1
+            continue
+
+        kind = _standard_heading_kind(line, first_page=first_page, center_heading_sizes=center_heading_sizes)
+        if kind is None:
+            output.append(replace(line, style=BODY_STYLE))
+            index += 1
+            continue
+
+        group = [line]
+        index += 1
+        while index < len(ordered):
+            next_line = ordered[index]
+            if id(next_line) in consumed_ids:
+                index += 1
+                continue
+            if not _is_standard_heading_continuation(group[-1], next_line, kind):
+                break
+            group.append(next_line)
+            index += 1
+
+        output.append(_merge_standard_text_lines(group, style=_standard_heading_style(kind)))
+
+    return _split_referenced_documents_section(output)
+
+
+def _standard_ordered_lines(lines: list[PdfLine]) -> list[PdfLine]:
+    return sorted(lines, key=_standard_line_order_key)
+
+
+def _standard_filter_small_residual_lines(lines: list[PdfLine]) -> list[PdfLine]:
+    body_font_size = _standard_body_font_size(lines)
+    if body_font_size <= 0:
+        return lines
+    threshold = body_font_size - STANDARD_SMALL_RESIDUAL_FONT_DELTA
+    return [line for line in lines if not _looks_like_small_asset_residual(line, threshold)]
+
+
+def _standard_body_font_size(lines: list[PdfLine]) -> float:
+    sizes = [
+        float(line.font_size or 0.0)
+        for line in lines
+        if line.font_size > 0
+        and not line.bold
+        and 15 <= _text_length(line.text) <= 240
+        and line.alignment != "center"
+        and not _is_standard_code_line(line.text)
+    ]
+    return float(median(sizes)) if sizes else 0.0
+
+
+def _looks_like_small_asset_residual(line: PdfLine, threshold: float) -> bool:
+    if line.bold or line.font_size > threshold:
+        return False
+    text = _clean_line_text(line.text)
+    if not text or _text_length(text) > STANDARD_SMALL_RESIDUAL_MAX_CHARS:
+        return False
+    upper = text.upper()
+    if TABLE_CAPTION_PATTERN.match(upper) or FIGURE_CAPTION_PATTERN.match(upper):
+        return True
+    if CONTINUED_PATTERN.match(text) or CAPTION_CODE_ONLY_PATTERN.match(upper):
+        return True
+    if re.match(r"^(?:NOTE|NOTES|FOOTNOTE|SOURCE)\b", text, re.IGNORECASE):
+        return True
+    if re.match(r"^[A-Z](?:\s|[.,;:])", text) and len(text) <= 120:
+        return True
+    if re.match(r"^\(?[a-z]\)?\s+", text) and len(text) <= 120:
+        return True
+    return False
+
+
+def _standard_line_order_key(line: PdfLine) -> tuple[int, int, float, float, int]:
+    page_width = max(1.0, float(line.page_width or 0.0))
+    full_width = (line.x0 <= page_width * 0.22 and line.x1 >= page_width * 0.78) or (
+        line.alignment == "center" and (line.x1 - line.x0) >= page_width * 0.45
+    ) or (
+        line.alignment == "center" and line.bold and line.font_size >= STANDARD_TEXT_MIN_TITLE_FONT_SIZE
+    )
+    if full_width:
+        column = 0
+    elif line.x0 >= page_width * 0.48:
+        column = 2
+    else:
+        column = 1
+    return (line.page_number, column, line.y0, line.x0, line.order)
+
+
+def _standard_first_page_title_line(lines: list[PdfLine], *, first_page: int) -> tuple[PdfLine | None, set[int]]:
+    first_page_lines = [
+        line
+        for line in lines
+        if line.page_number == first_page
+        and line.bold
+        and line.font_size >= STANDARD_TEXT_MIN_TITLE_FONT_SIZE
+        and _is_body_title_area_line(line)
+        and _text_length(line.text) <= STANDARD_TEXT_CENTER_MAX_CHARS
+    ]
+    if not first_page_lines:
+        return None, set()
+
+    max_size = max(line.font_size for line in first_page_lines)
+    title_parts = [
+        line
+        for line in first_page_lines
+        if line.font_size >= max_size - STANDARD_TEXT_HEADING_FONT_TOLERANCE
+        or (
+            _is_standard_code_line(line.text)
+            and line.font_size >= max(STANDARD_TEXT_MIN_TITLE_FONT_SIZE, max_size - STANDARD_TEXT_FIRST_TITLE_SIZE_DELTA)
+        )
+    ]
+    if not title_parts:
+        return None, set()
+
+    title_parts = sorted(title_parts, key=lambda item: (item.y0, item.x0, item.order))
+    return _merge_standard_text_lines(title_parts, style=HEADING_STYLE), {id(line) for line in title_parts}
+
+
+def _standard_center_heading_sizes(lines: list[PdfLine], *, first_page: int) -> dict[int, float]:
+    output: dict[int, float] = {}
+    for line in lines:
+        if line.page_number == first_page:
+            continue
+        if not _is_standard_center_heading_candidate(line):
+            continue
+        output[line.page_number] = max(output.get(line.page_number, 0.0), float(line.font_size or 0.0))
+    return output
+
+
+def _standard_heading_kind(
+    line: PdfLine,
+    *,
+    first_page: int,
+    center_heading_sizes: dict[int, float],
+) -> tuple[str, int] | None:
+    if line.page_number != first_page and _is_standard_center_heading_candidate(line):
+        page_center_size = center_heading_sizes.get(line.page_number, 0.0)
+        if page_center_size and line.font_size >= page_center_size - STANDARD_TEXT_HEADING_FONT_TOLERANCE:
+            return ("center", 2)
+
+    number_level = _standard_numbered_heading_level(line)
+    if number_level is not None:
+        return ("numbered", number_level)
+    return None
+
+
+def _is_standard_center_heading_candidate(line: PdfLine) -> bool:
+    return (
+        line.alignment == "center"
+        and line.bold
+        and line.font_size >= STANDARD_TEXT_MIN_TITLE_FONT_SIZE
+        and not _is_standard_code_line(line.text)
+        and _text_length(line.text) <= STANDARD_TEXT_CENTER_MAX_CHARS
+    )
+
+
+def _standard_numbered_heading_level(line: PdfLine) -> int | None:
+    text = line.text.strip()
+    if _looks_like_parenthesized_number_marker(text):
+        return None
+    match = STANDARD_NUMBERED_HEADING_PATTERN.match(text)
+    if match is None:
+        match = STANDARD_NUMBER_ONLY_HEADING_PATTERN.match(text)
+    if not match:
+        return None
+    if not line.bold or line.alignment == "right":
+        return None
+    if _text_length(text) > STANDARD_TEXT_NUMBERED_MAX_CHARS:
+        return None
+    if "." in match.group(1):
+        return None
+    if STANDARD_NUMBER_ONLY_HEADING_PATTERN.match(text):
+        return 3
+    return 3
+
+
+def _looks_like_parenthesized_number_marker(text: str) -> bool:
+    return bool(re.match(r"^[\(（]\s*\d{1,3}\s*[\)）](?:\s|$)", text.strip()))
+
+
+def _is_standard_heading_continuation(previous: PdfLine, current: PdfLine, kind: tuple[str, int]) -> bool:
+    if current.page_number != previous.page_number:
+        return False
+    if kind[0] == "numbered" and STANDARD_NUMBER_ONLY_HEADING_PATTERN.match(previous.text.strip()):
+        if STANDARD_NUMBERED_HEADING_PATTERN.match(current.text.strip()):
+            return False
+        if _text_length(current.text) > 80:
+            return False
+        if abs(current.font_size - previous.font_size) > STANDARD_TEXT_HEADING_FONT_TOLERANCE:
+            return False
+        if current.y0 - previous.y1 > max(8.0, previous.font_size * STANDARD_TEXT_CONTINUATION_GAP_MULTIPLIER):
+            return False
+        if abs(current.x0 - previous.x0) <= STANDARD_TEXT_LEFT_TOLERANCE:
+            return True
+        same_row = abs(current.y0 - previous.y0) <= STANDARD_TEXT_HEADING_FONT_TOLERANCE
+        return same_row and 0 <= current.x0 - previous.x1 <= 120.0
+    if current.bold != previous.bold:
+        return False
+    if abs(current.font_size - previous.font_size) > STANDARD_TEXT_HEADING_FONT_TOLERANCE:
+        return False
+    if current.y0 - previous.y1 > max(8.0, previous.font_size * STANDARD_TEXT_CONTINUATION_GAP_MULTIPLIER):
+        return False
+    if kind[0] == "numbered":
+        if STANDARD_NUMBERED_HEADING_PATTERN.match(current.text.strip()):
+            return False
+        return abs(current.x0 - previous.x0) <= STANDARD_TEXT_LEFT_TOLERANCE
+    return current.alignment == "center"
+
+
+def _standard_heading_style(kind: tuple[str, int]) -> str:
+    level = max(1, min(kind[1], 6))
+    return HEADING_STYLE if level == 1 else f"{HEADING_STYLE} {level}"
+
+
+def _split_referenced_documents_section(lines: list[PdfLine]) -> tuple[list[PdfLine], list[PdfLine]]:
+    output: list[PdfLine] = []
+    referenced_documents: list[PdfLine] = []
+    skip_level: int | None = None
+
+    for line in lines:
+        level = _standard_line_heading_level(line)
+        if skip_level is not None:
+            if level is not None and level <= skip_level:
+                skip_level = None
+            else:
+                referenced_documents.append(line)
+                continue
+
+        if _is_referenced_documents_heading(line):
+            skip_level = level or _standard_numbered_heading_level(line) or 3
+            referenced_documents.append(line)
+            continue
+
+        output.append(line)
+    return output, referenced_documents
+
+
+def _is_referenced_documents_heading(line: PdfLine) -> bool:
+    if _standard_line_heading_level(line) is None:
+        return False
+    return bool(STANDARD_REFERENCED_DOCUMENTS_HEADING_PATTERN.match(_clean_line_text(line.text)))
+
+
+def _standard_line_heading_level(line: PdfLine) -> int | None:
+    style = str(line.style or "")
+    if style == HEADING_STYLE:
+        return 1
+    if not style.startswith(f"{HEADING_STYLE} "):
+        return None
+    match = re.search(r"\d+", style)
+    return int(match.group(0)) if match else None
+
+
+def _merge_standard_text_lines(lines: list[PdfLine], *, style: str) -> PdfLine:
+    if len(lines) == 1:
+        return replace(lines[0], text=_clean_line_text(lines[0].text), style=style)
+    ordered = sorted(lines, key=lambda item: (item.y0, item.x0, item.order))
+    return PdfLine(
+        text=_clean_line_text(" ".join(line.text for line in ordered)),
+        page_number=ordered[0].page_number,
+        page_width=ordered[0].page_width,
+        page_height=ordered[0].page_height,
+        x0=min(line.x0 for line in ordered),
+        y0=min(line.y0 for line in ordered),
+        x1=max(line.x1 for line in ordered),
+        y1=max(line.y1 for line in ordered),
+        font_size=max(line.font_size for line in ordered),
+        bold=any(line.bold for line in ordered),
+        order=min(line.order for line in ordered),
+        alignment=ordered[0].alignment,
+        style=style,
+        urls=[],
+    )
+
+
+def _is_body_title_area_line(line: PdfLine) -> bool:
+    if line.page_height <= 0:
+        return True
+    return TITLE_PAGE_CODE_MIN_Y_RATIO * line.page_height <= line.y0 <= TITLE_PAGE_CODE_MAX_Y_RATIO * line.page_height
 
 
 def _assets_by_section_page(assets: list[StandardAsset]) -> dict[int, dict[int, list[Any]]]:
@@ -1240,7 +1582,7 @@ def _section_ranges(
 
     ranges: list[tuple[StandardTitlePage | None, int, int]] = []
     for index, title_page in enumerate(title_pages):
-        start_index = content_start_index if index == 0 else title_page.page_index
+        start_index = max(title_page.page_index, content_start_index)
         next_start = title_pages[index + 1].page_index if index + 1 < len(title_pages) else content_end_index + 1
         end_index = min(next_start - 1, content_end_index)
         if start_index <= end_index:
@@ -1421,6 +1763,39 @@ def write_items_to_txt(items: list[dict[str, Any]], source_file: str | Path) -> 
 
     output_path = txt_dir / f"{source_path.stem}.txt"
     output_path.write_text(format_extracted_items(items), encoding="utf-8")
+    return output_path
+
+
+def write_section_items_to_txt(items: list[dict[str, Any]], section: StandardPdfSection) -> Path:
+    section_path = Path(section.output_path)
+    section_dir = Path(section.section_dir) if section.section_dir else section_path.parent.parent
+    txt_dir = section_dir / "txt"
+    txt_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path = txt_dir / f"{section_path.stem}.txt"
+    output_path.write_text(format_extracted_items(items), encoding="utf-8")
+    return output_path
+
+
+def write_section_referenced_documents_to_json(items: list[dict[str, Any]], section: StandardPdfSection) -> Path:
+    section_path = Path(section.output_path)
+    section_dir = Path(section.section_dir) if section.section_dir else section_path.parent.parent
+    json_dir = section_dir / "json"
+    json_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path = json_dir / "referenced_documents.json"
+    text = "\n".join(str(item.get("text") or "").strip() for item in items if str(item.get("text") or "").strip())
+    payload = {
+        "section_index": section.index,
+        "title": section.title,
+        "standard_code": section.standard_code,
+        "start_page": section.start_page,
+        "end_page": section.end_page,
+        "source_pdf": section.output_path,
+        "text_pdf": section.text_pdf_path,
+        "text": text,
+    }
+    output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return output_path
 
 
