@@ -16,7 +16,7 @@ MAX_FILE_ATTEMPTS = 3
 APP_TOKEN = "B8Ceb24adaJ2XIsPWxucpgNonhh"
 TABLE_ID = "tblDAQhe2iVHFKUu"
 
-DOWNLOAD_DIR = r"./data/raw"
+DOWNLOAD_DIR = r"./tmp/lark-downloads/table-corpus"
 # 获取 tenant_access_token
 # =========================
 

@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from app.db.minio import DEFAULT_RAW_DOCUMENT_BUCKET, build_minio_uri
+
 
 STANDARD_VERSION = "ASME2023"
 CREATE_BY_CODE = "code"
@@ -372,14 +374,17 @@ def build_manifest(processing_root: Path, output_dir: Path) -> None:
     for doc in docs:
         volume_doc = volume_doc_ids.get(doc.volume_dir)
         if not volume_doc:
-            raw_pdf = Path("data/raw/产品标准") / f"{doc.volume_dir.name}.pdf"
+            raw_pdf = build_minio_uri(
+                DEFAULT_RAW_DOCUMENT_BUCKET,
+                f"产品标准/{doc.volume_dir.name}.pdf",
+            )
             volume_node = make_node(
                 "Document",
                 doc.volume_dir.name,
                 doc.volume_dir.name,
                 create_at,
                 CREATE_BY_CODE,
-                file_path=str(raw_pdf if raw_pdf.exists() else doc.volume_dir),
+                file_path=raw_pdf,
                 document_level="volume",
             )
             nodes[volume_node["id"]] = volume_node
@@ -451,9 +456,12 @@ def build_manifest(processing_root: Path, output_dir: Path) -> None:
                 )
                 edges[edge["id"]] = edge
 
-    product_source_path = Path("data/raw/产品知识框架讲解.docx")
+    product_source_path = build_minio_uri(
+        DEFAULT_RAW_DOCUMENT_BUCKET,
+        "产品知识框架讲解.docx",
+    )
     product_extract = {
-        "source_file": str(product_source_path),
+        "source_file": product_source_path,
         "create_at": create_at,
         "create_by": CREATE_BY_MANUAL,
         "note": "Extracted from the single image embedded in 产品知识框架讲解.docx.",
@@ -533,7 +541,7 @@ This directory contains the candidate node and edge list for the standard-refere
 
 - `nodes.jsonl`: candidate nodes.
 - `edges.jsonl`: candidate edges.
-- `product_standard_extract.json`: manual extraction from `data/raw/产品知识框架讲解.docx`.
+- `product_standard_extract.json`: manual extraction from `minio://knowledge-raw-docs/产品知识框架讲解.docx`.
 - `summary.json`: machine-readable counts and paths.
 - `summary.json` also declares `subgraph_name`; `scripts/kg/import_graph_manifest.py` reads it as the default `sub_graph_name` property during Neo4j import.
 

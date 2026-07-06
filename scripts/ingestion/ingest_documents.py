@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Iterable
+from pathlib import Path, PurePosixPath
+from urllib.parse import urlparse
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -12,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.services.chunking.splitter import build_file_id, save_chunks, split_items
 from app.services.chunking.splitter import load_items_from_txt
+from app.db.minio import list_raw_document_objects, parse_raw_document_reference
 from app.services.embedding import (
     EmbeddingService,
     default_bm25_model_file,
@@ -29,7 +31,7 @@ BM25_MODES = {"auto", "existing", "train-input"}
 
 @dataclass
 class IngestionResult:
-    file_path: Path
+    file_path: str | Path
     txt_file: Path
     chunk_file: Path
     embedding_file: Path
@@ -40,7 +42,7 @@ class IngestionResult:
 
 @dataclass
 class PreparedDocument:
-    file_path: Path
+    file_path: str | Path
     txt_file: Path
     chunk_file: Path
     embedding_file: Path
@@ -55,7 +57,9 @@ def main() -> None:
     )
     parser.add_argument(
         "input_path",
-        help="Document file or folder to ingest, for example data/raw/process_guide.",
+        nargs="?",
+        default="",
+        help="MinIO document object or prefix to ingest. Default: bucket root.",
     )
     parser.add_argument(
         "--recursive",
@@ -110,7 +114,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    input_path = Path(args.input_path)
+    input_path = args.input_path
     document_files = find_document_files(input_path, recursive=args.recursive)
     if not document_files:
         raise SystemExit(f"No supported documents found under: {input_path}")
@@ -125,7 +129,7 @@ def main() -> None:
     print(f"Continue: {'enabled' if args.continue_existing else 'disabled'}")
 
     prepared_documents: list[PreparedDocument] = []
-    failures: list[tuple[Path, Exception]] = []
+    failures: list[tuple[str | Path, Exception]] = []
 
     for index, file_path in enumerate(document_files, start=1):
         print(f"\n[{index}/{len(document_files)}] Parsing {file_path}")
@@ -201,30 +205,35 @@ def main() -> None:
         raise SystemExit(1)
 
 
-def find_document_files(input_path: Path, *, recursive: bool) -> list[Path]:
-    if input_path.is_file():
-        return [input_path] if is_supported_document(input_path) else []
-
-    if not input_path.exists():
-        raise FileNotFoundError(f"Input path does not exist: {input_path}")
-    if not input_path.is_dir():
-        raise ValueError(f"Input path must be a file or folder: {input_path}")
-
-    iterator: Iterable[Path]
-    iterator = input_path.rglob("*") if recursive else input_path.iterdir()
+def find_document_files(input_path: str | Path, *, recursive: bool) -> list[str]:
+    objects = list_raw_document_objects(str(input_path or ""), recursive=recursive)
+    skipped_prefixes = split_version_source_prefixes(
+        reference.object_name for reference in objects
+    )
     return sorted(
-        path
-        for path in iterator
-        if path.is_file() and is_supported_document(path)
+        reference.uri
+        for reference in objects
+        if is_supported_document_name(reference.object_name)
+        and not is_shadowed_by_split_version(reference.object_name, skipped_prefixes)
     )
 
 
-def is_supported_document(path: Path) -> bool:
+def is_supported_document(path: str | Path) -> bool:
+    return is_supported_document_name(_source_name(path))
+
+
+def is_supported_document_name(name: str) -> bool:
+    path = PurePosixPath(name)
     return path.suffix.lower() in SUPPORTED_EXTENSIONS and not path.name.startswith("~$")
 
 
-def is_standard_pdf_document(path: Path) -> bool:
-    return path.suffix.lower() == ".pdf" and path.name.upper().startswith("ASME")
+def is_standard_pdf_document(path: str | Path) -> bool:
+    normalized = str(path).replace("\\", "/")
+    return (
+        _source_suffix(path) == ".pdf"
+        and "标准文档" in normalized
+        and "(切分版)" not in normalized
+    )
 
 
 def _configure_utf8_stdio() -> None:
@@ -235,7 +244,7 @@ def _configure_utf8_stdio() -> None:
 
 
 def ingest_document(
-    file_path: Path,
+    file_path: str | Path,
     *,
     embedding_service: EmbeddingService,
     vector_store_service: VectorStoreService | None,
@@ -273,7 +282,7 @@ def ingest_document(
 
 
 def prepare_documents(
-    file_path: Path,
+    file_path: str | Path,
     *,
     image_analysis_workers: int,
     rebuild: bool = True,
@@ -297,13 +306,13 @@ def prepare_documents(
 
 
 def prepare_document(
-    file_path: Path,
+    file_path: str | Path,
     *,
     image_analysis_workers: int,
     rebuild: bool = True,
     parse: bool = True,
 ) -> PreparedDocument:
-    document_name = file_path.stem
+    document_name = _source_stem(file_path)
     processing_dir = processing_document_dir(file_path)
 
     txt_file = processing_dir / "txt" / f"{document_name}.txt"
@@ -340,7 +349,7 @@ def prepare_document(
 
 
 def prepare_standard_pdf_sections(
-    file_path: Path,
+    file_path: str | Path,
     *,
     image_analysis_workers: int,
     rebuild: bool = True,
@@ -368,7 +377,9 @@ def prepare_standard_pdf_sections(
     for txt_file in section_txt_files:
         section_dir = txt_file.parent.parent
         section_pdf = section_pdf_for_txt(txt_file)
-        source_file = section_pdf if section_pdf.exists() else txt_file
+        source_file = standard_section_source_for_txt(txt_file) or (
+            section_pdf if section_pdf.exists() else txt_file
+        )
         chunk_file = section_dir / "chunk" / f"{txt_file.stem}.chunks.json"
         embedding_file = section_dir / "embedding" / f"{txt_file.stem}.embeddings.json"
 
@@ -403,6 +414,50 @@ def find_standard_section_txt_files(processing_dir: Path) -> list[Path]:
 def section_pdf_for_txt(txt_file: Path) -> Path:
     section_dir = txt_file.parent.parent
     return section_dir / "pdf" / f"{txt_file.stem}.pdf"
+
+
+def standard_section_source_for_txt(txt_file: Path) -> str | None:
+    manifest_path = _standard_manifest_path_for_txt(txt_file)
+    if not manifest_path.exists():
+        return None
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for section in payload.get("sections", []):
+        if not isinstance(section, dict):
+            continue
+        output_path = Path(str(section.get("output_path") or ""))
+        if output_path.stem == txt_file.stem:
+            source_uri = str(section.get("source_uri") or "").strip()
+            return source_uri or None
+    return None
+
+
+def _standard_manifest_path_for_txt(txt_file: Path) -> Path:
+    section_dir = txt_file.parent.parent
+    return section_dir.parent / "manifest.json"
+
+
+def split_version_source_prefixes(object_names) -> set[str]:
+    prefixes: set[str] = set()
+    for object_name in object_names:
+        parts = PurePosixPath(str(object_name).replace("\\", "/")).parts
+        for index, part in enumerate(parts[:-1]):
+            if part.endswith("(切分版)"):
+                original = part[: -len("(切分版)")]
+                prefixes.add("/".join((*parts[:index], original)))
+    return {prefix for prefix in prefixes if prefix}
+
+
+def is_shadowed_by_split_version(object_name: str, skipped_prefixes: set[str]) -> bool:
+    normalized = str(object_name).replace("\\", "/").strip("/")
+    if "(切分版)" in normalized:
+        return False
+    for prefix in skipped_prefixes:
+        if normalized.startswith(f"{prefix}/"):
+            return True
+        original_file = f"{prefix}{PurePosixPath(normalized).suffix}"
+        if normalized == original_file:
+            return True
+    return False
 
 
 def resolve_bm25_model(
@@ -505,10 +560,32 @@ def embedding_file_file_ids(embedding_file: Path) -> list[str]:
     return file_ids
 
 
-def document_file_id(file_path: Path) -> str:
-    suffix = file_path.suffix.lower()
+def document_file_id(file_path: str | Path) -> str:
+    suffix = _source_suffix(file_path)
     file_type = "doc" if suffix == ".docx" else suffix.lstrip(".") or "unknown"
-    return build_file_id(file_type, file_path.stem or "unknown")
+    return build_file_id(file_type, _source_stem(file_path) or "unknown")
+
+
+def _source_parts(path: str | Path) -> PurePosixPath:
+    value = str(path)
+    normalized = value.replace("\\", "/")
+    parsed = urlparse(normalized)
+    if parsed.scheme in {"minio", "s3"} or "data/raw/" in normalized.lower():
+        reference = parse_raw_document_reference(value)
+        return PurePosixPath(reference.object_name)
+    return PurePosixPath(Path(value).as_posix())
+
+
+def _source_name(path: str | Path) -> str:
+    return _source_parts(path).name
+
+
+def _source_stem(path: str | Path) -> str:
+    return _source_parts(path).stem
+
+
+def _source_suffix(path: str | Path) -> str:
+    return _source_parts(path).suffix.lower()
 
 
 if __name__ == "__main__":

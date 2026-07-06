@@ -20,7 +20,7 @@ from scripts.ingestion.ingest_documents import (
     PreparedDocument,
     embed_prepared_document,
     find_document_files,
-    prepare_document,
+    prepare_documents,
 )
 from app.services.embedding import EmbeddingService
 from app.services.vector_store import VectorStoreService
@@ -40,7 +40,7 @@ def _parse_bool(value: str | bool) -> bool:
 
 @dataclass
 class ReindexSummary:
-    input_path: Path
+    input_path: str
     collection_name: str
     dropped: bool
     document_count: int
@@ -69,8 +69,8 @@ def main() -> None:
     parser.add_argument(
         "input_path",
         nargs="?",
-        default="data/raw",
-        help="Document file or folder to reindex. Default: data/raw.",
+        default="",
+        help="MinIO document object or prefix to reindex. Default: bucket root.",
     )
     parser.add_argument(
         "--recursive",
@@ -120,7 +120,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    input_path = Path(args.input_path)
+    input_path = args.input_path
     document_files = find_document_files(input_path, recursive=args.recursive)
     if not document_files:
         raise SystemExit(f"No supported documents found under: {input_path}")
@@ -149,13 +149,13 @@ def main() -> None:
     vector_store_service = VectorStoreService(client=client, config=config)
 
     prepared_documents: list[PreparedDocument] = []
-    failures: list[tuple[Path, Exception]] = []
+    failures: list[tuple[str | Path, Exception]] = []
 
     for index, file_path in enumerate(document_files, start=1):
         step_name = "Chunking from existing txt" if args.no_parser else "Parsing"
         print(f"\n[{index}/{len(document_files)}] {step_name} {file_path}", flush=True)
         try:
-            prepared = prepare_document(
+            prepared_batch = prepare_documents(
                 file_path,
                 image_analysis_workers=args.image_workers,
                 rebuild=args.rebuild,
@@ -168,10 +168,12 @@ def main() -> None:
                 raise
             continue
 
-        prepared_documents.append(prepared)
-        print(f"Text output: {prepared.txt_file}")
-        print(f"Chunk output: {prepared.chunk_file}")
-        print(f"Chunks: {len(prepared.chunks)}")
+        prepared_documents.extend(prepared_batch)
+        print(f"Prepared outputs: {len(prepared_batch)}")
+        if prepared_batch:
+            print(f"First text output: {prepared_batch[0].txt_file}")
+            print(f"First chunk output: {prepared_batch[0].chunk_file}")
+        print(f"Chunks: {sum(len(prepared.chunks) for prepared in prepared_batch)}")
 
     results: list[IngestionResult] = []
     if prepared_documents:

@@ -1,21 +1,24 @@
 from __future__ import annotations
 
 import mimetypes
-from pathlib import Path, PurePosixPath
-from urllib.parse import unquote
+from pathlib import PurePosixPath
+from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
+from minio.error import S3Error
 
 from app.db.minio import (
     RAW_DOCUMENT_CATEGORIES,
+    RawDocumentObject,
     ensure_bucket,
     ensure_raw_document_prefixes,
+    get_minio_client,
+    parse_raw_document_reference,
     upload_raw_document_stream,
 )
 
 router = APIRouter(prefix="/documents", tags=["documents"])
-_raw_document_root = Path("data") / "raw"
 
 
 @router.get("/minio/categories")
@@ -27,76 +30,52 @@ def list_minio_categories() -> dict[str, object]:
 
 
 @router.get("/download")
-def download_raw_document(path: str) -> FileResponse:
+def download_raw_document(path: str) -> StreamingResponse:
     try:
-        document_path = resolve_raw_document_path(path)
+        reference = resolve_raw_document_object(path)
+        client = get_minio_client()
+        stat = client.stat_object(reference.bucket, reference.object_name)
+        response = client.get_object(reference.bucket, reference.object_name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except S3Error as exc:
+        if exc.code in {"NoSuchKey", "NoSuchBucket", "NoSuchObject"}:
+            raise HTTPException(status_code=404, detail=f"Document not found: {path}") from exc
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    media_type = mimetypes.guess_type(document_path.name)[0] or "application/octet-stream"
-    return FileResponse(
-        document_path,
+    filename = PurePosixPath(reference.object_name).name or "document"
+    media_type = (
+        getattr(stat, "content_type", None)
+        or mimetypes.guess_type(filename)[0]
+        or "application/octet-stream"
+    )
+    headers = {
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+    }
+    return StreamingResponse(
+        _stream_minio_response(response),
         media_type=media_type,
-        filename=document_path.name,
+        headers=headers,
     )
 
 
-def resolve_raw_document_path(raw_path: str, raw_root: Path | None = None) -> Path:
-    root = (raw_root or _raw_document_root).resolve()
-    normalized_path = _normalize_requested_document_path(raw_path)
-    if not normalized_path:
-        raise ValueError("Missing document path")
-
-    for candidate in _iter_candidate_document_paths(normalized_path, root):
-        if candidate.exists() and candidate.is_file() and _is_relative_to(candidate, root):
-            return candidate
-
-    filename = PurePosixPath(normalized_path).name
-    if not filename:
-        raise FileNotFoundError(f"Document not found: {raw_path}")
-
-    exact_matches = [path for path in root.rglob(filename) if path.is_file()]
-    if exact_matches:
-        return exact_matches[0]
-
-    lower_filename = filename.lower()
-    for path in root.rglob("*"):
-        if path.is_file() and path.name.lower() == lower_filename:
-            return path
-
-    raise FileNotFoundError(f"Document not found: {raw_path}")
-
-
-def _normalize_requested_document_path(raw_path: str) -> str:
-    return unquote(raw_path).strip().strip("\"'").replace("\\", "/")
-
-
-def _iter_candidate_document_paths(normalized_path: str, root: Path) -> list[Path]:
-    candidates: list[Path] = []
-    lower_path = normalized_path.lower()
-    data_raw_marker = "data/raw/"
-
-    if data_raw_marker in lower_path:
-        marker_index = lower_path.index(data_raw_marker)
-        relative_to_raw = normalized_path[marker_index + len(data_raw_marker) :]
-        candidates.append((root / relative_to_raw).resolve())
-        candidates.append(Path(normalized_path[marker_index:]).resolve())
-
-    direct_path = Path(normalized_path)
-    candidates.append(direct_path.resolve())
-    candidates.append((root / normalized_path).resolve())
-
-    return candidates
-
-
-def _is_relative_to(path: Path, root: Path) -> bool:
+def resolve_raw_document_object(raw_path: str, bucket: str | None = None) -> RawDocumentObject:
     try:
-        path.resolve().relative_to(root)
+        return parse_raw_document_reference(raw_path, bucket=bucket)
     except ValueError:
-        return False
-    return True
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _stream_minio_response(response):
+    try:
+        yield from response.stream(amt=1024 * 1024)
+    finally:
+        response.close()
+        response.release_conn()
 
 
 @router.post("/minio/init")

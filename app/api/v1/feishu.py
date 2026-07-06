@@ -24,6 +24,7 @@ except Exception:  # pragma: no cover - Pillow is optional at runtime.
 
 from app.api.v1.query import ask_knowledge_base
 from app.core.config import settings
+from app.db.minio import parse_raw_document_reference
 from app.db.postgres import (
     delete_expired_feishu_answer_feedback_states,
     get_feishu_answer_feedback_state,
@@ -3234,13 +3235,23 @@ def _normalize_reference_url(url: str) -> str:
 def _format_markdown_link_url(url: str) -> str:
     if _is_lark_document_url(url):
         return url
-    return _resolve_lark_document_url(url) or _build_document_download_url(url)
+    lark_url = _resolve_lark_document_url(url)
+    if lark_url:
+        return lark_url
+    if _is_document_download_url(url):
+        return url
+    return _build_document_download_url(url)
 
 
 def _is_lark_document_url(url: str) -> bool:
     parsed = urlparse(url.strip())
     host = parsed.netloc.lower()
     return host.endswith("feishu.cn") or host.endswith("larksuite.com")
+
+
+def _is_document_download_url(url: str) -> bool:
+    parsed = urlparse(url.strip())
+    return parsed.path.rstrip("/").endswith("/api/v1/documents/download")
 
 
 def _resolve_lark_document_url(raw_path: str) -> str | None:
@@ -3314,9 +3325,22 @@ def _load_local_to_lark_mapping() -> dict[str, str]:
 
 def _build_document_download_url(raw_path: str) -> str:
     base_url = settings.public_base_url or "http://localhost:8000"
-    normalized_path = _normalize_reference_url(raw_path)
+    normalized_path = _normalize_minio_reference_for_download(raw_path)
     query = urlencode({"path": normalized_path}, quote_via=quote)
     return f"{base_url.rstrip('/')}/api/v1/documents/download?{query}"
+
+
+def _normalize_minio_reference_for_download(raw_path: str) -> str:
+    normalized_path = _normalize_reference_url(raw_path)
+    parsed = urlparse(normalized_path)
+    if parsed.query:
+        query_path = (parse_qs(parsed.query).get("path") or [""])[0]
+        if query_path:
+            normalized_path = query_path
+    try:
+        return parse_raw_document_reference(normalized_path).uri
+    except ValueError:
+        return normalized_path
 
 
 def _build_reference_sources_panel(sources: list[_ReferenceSource]) -> dict[str, Any]:

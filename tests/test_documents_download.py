@@ -1,31 +1,22 @@
 from __future__ import annotations
 
-from app.api.v1.documents import resolve_raw_document_path
+from app.api.v1.documents import resolve_raw_document_object
 
 
-def test_resolve_raw_document_path_uses_direct_data_raw_path(tmp_path) -> None:
-    raw_root = tmp_path / "data" / "raw"
-    document = raw_root / "category" / "demo.docx"
-    document.parent.mkdir(parents=True)
-    document.write_text("demo", encoding="utf-8")
-
-    resolved = resolve_raw_document_path(
-        "data\\raw\\category\\demo.docx",
-        raw_root=raw_root,
+def test_resolve_raw_document_object_converts_legacy_data_raw_path() -> None:
+    resolved = resolve_raw_document_object(
+        r"data\raw\category\demo.docx",
+        bucket="test-bucket",
     )
 
-    assert resolved == document.resolve()
+    assert resolved.bucket == "test-bucket"
+    assert resolved.object_name == "category/demo.docx"
 
 
-def test_resolve_raw_document_path_falls_back_to_filename_search(tmp_path) -> None:
-    raw_root = tmp_path / "data" / "raw"
-    document = raw_root / "new-folder" / "销售工具包 - 订单谈判.docx"
-    document.parent.mkdir(parents=True)
-    document.write_text("demo", encoding="utf-8")
-
-    resolved = resolve_raw_document_path(
-        "data/raw/old-folder/销售工具包%20-%20订单谈判.docx",
-        raw_root=raw_root,
+def test_resolve_raw_document_object_accepts_minio_uri() -> None:
+    resolved = resolve_raw_document_object(
+        "minio://knowledge-raw-docs/category/demo%20file.docx",
     )
 
-    assert resolved == document.resolve()
+    assert resolved.bucket == "knowledge-raw-docs"
+    assert resolved.object_name == "category/demo file.docx"

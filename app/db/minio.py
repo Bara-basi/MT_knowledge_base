@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import mimetypes
+import hashlib
 from dataclasses import dataclass
-from pathlib import Path
-from urllib.parse import quote, urlparse
+from pathlib import Path, PurePosixPath
+from urllib.parse import quote, unquote, urlparse
 
 from minio import Minio
+from minio.error import S3Error
 
 from app.core.config import settings
 
@@ -20,6 +22,8 @@ RAW_DOCUMENT_CATEGORIES: dict[str, str] = {
 
 RAW_DOCUMENT_PREFIXES = frozenset(RAW_DOCUMENT_CATEGORIES.values())
 DEFAULT_RAW_DOCUMENT_BUCKET = "knowledge-raw-docs"
+RAW_DOCUMENT_CACHE_ROOT = Path("data") / "processing" / ".minio_cache"
+LOCAL_RAW_ROOT = Path("data") / "raw"
 
 
 @dataclass(frozen=True)
@@ -31,6 +35,20 @@ class MinioUploadResult:
     content_type: str
     size: int
     url: str
+
+
+@dataclass(frozen=True)
+class RawDocumentObject:
+    bucket: str
+    object_name: str
+
+    @property
+    def uri(self) -> str:
+        return build_minio_uri(self.bucket, self.object_name)
+
+    @property
+    def url(self) -> str:
+        return build_object_url(self.bucket, self.object_name)
 
 
 def get_minio_client() -> Minio:
@@ -83,13 +101,17 @@ def upload_raw_document_file(
     category: str | None = None,
     bucket: str | None = None,
     object_name: str | None = None,
+    raw_root: str | Path | None = None,
 ) -> MinioUploadResult:
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"Upload source is not a file: {path}")
 
-    prefix = resolve_raw_document_prefix(category) if category else infer_prefix_from_file(path)
-    target_object_name = object_name or f"{prefix}/{path.name}"
+    target_object_name = object_name or raw_document_object_name_for_file(
+        path,
+        category=category,
+        raw_root=raw_root,
+    )
     content_type = guess_content_type(path.name)
     target_bucket = ensure_bucket(bucket)
     response = get_minio_client().fput_object(
@@ -161,6 +183,173 @@ def guess_content_type(name: str) -> str:
 def build_object_url(bucket: str, object_name: str) -> str:
     base_url = settings.minio_public_endpoint.rstrip("/")
     return f"{base_url}/{quote(bucket)}/{quote(object_name, safe='/')}"
+
+
+def build_minio_uri(bucket: str, object_name: str) -> str:
+    return f"minio://{bucket}/{quote(object_name, safe='/')}"
+
+
+def raw_document_object_name_for_file(
+    file_path: str | Path,
+    *,
+    category: str | None = None,
+    raw_root: str | Path | None = None,
+) -> str:
+    path = Path(file_path)
+    if category:
+        return _normalize_object_name(f"{resolve_raw_document_prefix(category)}/{path.name}")
+
+    root = Path(raw_root) if raw_root is not None else LOCAL_RAW_ROOT
+    try:
+        relative = path.resolve().relative_to((Path.cwd() / root).resolve())
+    except ValueError:
+        try:
+            relative = path.resolve().relative_to(root.resolve())
+        except ValueError:
+            return _normalize_object_name(path.name)
+
+    return _normalize_object_name(relative.as_posix())
+
+
+def parse_raw_document_reference(
+    raw_path: str | Path,
+    *,
+    bucket: str | None = None,
+) -> RawDocumentObject:
+    text = unquote(str(raw_path)).strip().strip("\"'").replace("\\", "/")
+    if not text:
+        raise ValueError("Missing raw document path")
+
+    target_bucket = bucket or settings.minio_bucket or DEFAULT_RAW_DOCUMENT_BUCKET
+    parsed = urlparse(text)
+
+    if parsed.scheme in {"minio", "s3"}:
+        if not parsed.netloc:
+            raise ValueError(f"Missing bucket in MinIO document reference: {raw_path}")
+        return RawDocumentObject(parsed.netloc, _normalize_object_name(parsed.path.lstrip("/")))
+
+    if parsed.scheme in {"http", "https"}:
+        public_ref = _parse_public_object_url(text)
+        if public_ref is not None:
+            return public_ref
+
+    return RawDocumentObject(target_bucket, _normalize_object_name(_strip_local_raw_prefix(text, target_bucket)))
+
+
+def raw_document_object_exists(raw_path: str | Path, *, bucket: str | None = None) -> bool:
+    reference = parse_raw_document_reference(raw_path, bucket=bucket)
+    try:
+        get_minio_client().stat_object(reference.bucket, reference.object_name)
+    except S3Error as exc:
+        if exc.code in {"NoSuchKey", "NoSuchBucket", "NoSuchObject"}:
+            return False
+        raise
+    return True
+
+
+def download_raw_document_to_file(
+    raw_path: str | Path,
+    *,
+    bucket: str | None = None,
+    cache_root: str | Path | None = None,
+) -> Path:
+    reference = parse_raw_document_reference(raw_path, bucket=bucket)
+    cache_path = cached_raw_document_path(reference, cache_root=cache_root)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    get_minio_client().fget_object(reference.bucket, reference.object_name, str(cache_path))
+    return cache_path
+
+
+def cached_raw_document_path(
+    reference: RawDocumentObject,
+    *,
+    cache_root: str | Path | None = None,
+) -> Path:
+    root = Path(cache_root) if cache_root is not None else RAW_DOCUMENT_CACHE_ROOT
+    digest = hashlib.sha1(reference.object_name.encode("utf-8")).hexdigest()[:16]
+    filename = PurePosixPath(reference.object_name).name or digest
+    return root / reference.bucket / digest / filename
+
+
+def list_raw_document_objects(
+    prefix: str | Path = "",
+    *,
+    bucket: str | None = None,
+    recursive: bool = True,
+) -> list[RawDocumentObject]:
+    if str(prefix or "").strip():
+        reference = parse_raw_document_reference(str(prefix), bucket=bucket)
+    else:
+        reference = RawDocumentObject(bucket or settings.minio_bucket or DEFAULT_RAW_DOCUMENT_BUCKET, "")
+    object_prefix = reference.object_name.strip("/")
+    if object_prefix and not object_prefix.endswith("/"):
+        try:
+            get_minio_client().stat_object(reference.bucket, object_prefix)
+        except S3Error as exc:
+            if exc.code not in {"NoSuchKey", "NoSuchObject"}:
+                raise
+        else:
+            return [RawDocumentObject(reference.bucket, object_prefix)]
+        object_prefix = f"{object_prefix}/"
+
+    objects = get_minio_client().list_objects(
+        reference.bucket,
+        prefix=object_prefix,
+        recursive=recursive,
+    )
+    return [
+        RawDocumentObject(reference.bucket, item.object_name)
+        for item in objects
+        if item.object_name and not item.object_name.endswith("/.keep")
+    ]
+
+
+def _parse_public_object_url(url: str) -> RawDocumentObject | None:
+    parsed = urlparse(url)
+    path_parts = [part for part in unquote(parsed.path).split("/") if part]
+    if not path_parts:
+        return None
+
+    configured_public = urlparse(settings.minio_public_endpoint)
+    configured_endpoint = urlparse(settings.minio_endpoint)
+    known_hosts = {
+        parsed_endpoint.netloc.lower()
+        for parsed_endpoint in (configured_public, configured_endpoint)
+        if parsed_endpoint.netloc
+    }
+    default_bucket = settings.minio_bucket or DEFAULT_RAW_DOCUMENT_BUCKET
+
+    if parsed.netloc.lower() in known_hosts and path_parts[0] == default_bucket:
+        return RawDocumentObject(default_bucket, _normalize_object_name("/".join(path_parts[1:])))
+    return None
+
+
+def _strip_local_raw_prefix(path: str, bucket: str) -> str:
+    normalized = path.strip().strip("/")
+    lower_path = normalized.lower()
+    for marker in ("data/raw/", "data\\raw\\"):
+        marker_index = lower_path.find(marker.replace("\\", "/"))
+        if marker_index >= 0:
+            return normalized[marker_index + len(marker.replace("\\", "/")) :]
+    bucket_prefix = f"{bucket}/"
+    if lower_path.startswith(bucket_prefix.lower()):
+        return normalized[len(bucket_prefix) :]
+    return normalized
+
+
+def _normalize_object_name(object_name: str) -> str:
+    parts = []
+    for part in unquote(object_name).replace("\\", "/").split("/"):
+        part = part.strip()
+        if not part or part == ".":
+            continue
+        if part == "..":
+            raise ValueError(f"Invalid MinIO object path: {object_name}")
+        parts.append(part)
+    normalized = "/".join(parts)
+    if not normalized:
+        raise ValueError("Missing MinIO object name")
+    return normalized
 
 
 def _normalize_endpoint(endpoint: str) -> tuple[str, bool]:

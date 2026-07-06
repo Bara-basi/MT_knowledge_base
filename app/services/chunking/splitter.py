@@ -4,16 +4,19 @@ import json
 import re
 import hashlib
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlparse
 
 try:
+    from app.db.minio import parse_raw_document_reference
     from app.models.chunk import Chunk
     from app.services.data_clean import clean_items
 except ModuleNotFoundError:
     import sys
 
     sys.path.append(str(Path(__file__).resolve().parents[3]))
+    from app.db.minio import parse_raw_document_reference
     from app.models.chunk import Chunk
     from app.services.data_clean import clean_items
 
@@ -110,7 +113,7 @@ def load_items_from_txt(txt_file: str | Path) -> list[dict[str, str]]:
     return items
 
 
-def split_items(items: list[dict[str, str]], *, source_file: Path | None = None) -> list[Chunk]:
+def split_items(items: list[dict[str, str]], *, source_file: str | Path | None = None) -> list[Chunk]:
     items = clean_items(items)
     chunks: list[Chunk] = []
     state = ChunkState()
@@ -680,17 +683,24 @@ def _sentence_end_split_point(text: str, max_chars: int) -> int | None:
     return split_at
 
 
-def _build_document_metadata(source_file: Path | None) -> dict[str, Any]:
+def _build_document_metadata(source_file: str | Path | None) -> dict[str, Any]:
     if source_file is None:
         file_path = ""
         file_name = ""
         file_type = "unknown"
         name_for_hash = "unknown"
+    elif _looks_like_minio_document_source(str(source_file)):
+        reference = parse_raw_document_reference(str(source_file))
+        object_path = PurePosixPath(reference.object_name)
+        file_path = reference.uri
+        file_name = object_path.name
+        file_type = _infer_file_type_from_suffix(object_path.suffix)
+        name_for_hash = object_path.stem or "unknown"
     else:
         path = Path(source_file)
         file_path = str(path)
         file_name = path.name
-        file_type = _infer_file_type(path)
+        file_type = _infer_file_type_from_suffix(path.suffix)
         name_for_hash = path.stem or "unknown"
 
     return {
@@ -706,11 +716,17 @@ def build_file_id(file_type: str, file_stem: str) -> str:
     return f"{file_type}_{digest}"
 
 
-def _infer_file_type(path: Path) -> str:
-    suffix = path.suffix.lower()
+def _infer_file_type_from_suffix(suffix: str) -> str:
+    suffix = suffix.lower()
     if suffix == ".docx":
         return "doc"
     return suffix.lstrip(".") or "unknown"
+
+
+def _looks_like_minio_document_source(value: str) -> bool:
+    normalized = value.strip().replace("\\", "/")
+    parsed = urlparse(normalized)
+    return parsed.scheme in {"minio", "s3"} or "data/raw/" in normalized.lower()
 
 
 def _build_chunk_metadata(

@@ -32,14 +32,16 @@ from app.db.minio import (  # noqa: E402
 )
 
 
-SUPPORTED_EXTENSIONS = {".docx", ".pptx", ".xlsx"}
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Upload raw document files to MinIO.",
     )
     parser.add_argument("input_path", help="File or folder to upload.")
+    parser.add_argument(
+        "--raw-root",
+        default=str(PROJECT_ROOT / "data" / "raw"),
+        help="Local raw document root used to preserve object paths.",
+    )
     parser.add_argument(
         "--bucket",
         default=None,
@@ -50,7 +52,7 @@ def main() -> None:
         default=None,
         help=(
             "Target category prefix or Chinese category name. "
-            "Defaults are inferred from file extension."
+            "When omitted, object names preserve paths relative to --raw-root."
         ),
     )
     parser.add_argument(
@@ -86,6 +88,7 @@ def main() -> None:
         return
 
     input_path = Path(args.input_path)
+    raw_root = Path(args.raw_root)
     files = find_upload_files(input_path, recursive=args.recursive)
     if not files:
         raise SystemExit(f"No supported files found under: {input_path}")
@@ -102,7 +105,8 @@ def main() -> None:
     print(f"Input: {input_path}")
     print(f"Files: {len(files)}")
     print(f"Bucket: {args.bucket or '(from env)'}")
-    print(f"Category: {args.category or '(infer by extension)'}")
+    print(f"Raw root: {raw_root}")
+    print(f"Category: {args.category or '(preserve relative path)'}")
 
     for index, file_path in enumerate(files, start=1):
         print(f"\n[{index}/{len(files)}] {file_path}")
@@ -112,6 +116,7 @@ def main() -> None:
                 category=args.category,
                 bucket=args.bucket,
                 object_name=args.object_name,
+                raw_root=raw_root,
             )
         except Exception as exc:
             failures.append((file_path, exc))
@@ -148,7 +153,7 @@ def find_upload_files(input_path: Path, *, recursive: bool) -> list[Path]:
 
 
 def is_supported_file(path: Path) -> bool:
-    return path.suffix.lower() in SUPPORTED_EXTENSIONS and not path.name.startswith("~$")
+    return path.is_file() and not path.name.startswith("~$")
 
 
 if __name__ == "__main__":

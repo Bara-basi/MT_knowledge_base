@@ -309,6 +309,11 @@ cd /opt/mtsco-knowledge-base
 tar -xzf data.tar.gz
 ```
 
+## 同步 data/raw 到minio
+```bash
+.\.venv\Scripts\python.exe scripts\storage\upload_raw_documents.py data\raw --bucket knowledge-raw-docs --raw-root data\raw --init-folders --continue-on-error
+```
+
 ## 更新部署
 
 代码更新后：
@@ -368,3 +373,11 @@ cd E:\MTSCO_knowledge_base
 docker rm -f api
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-deps --force-recreate --no-build api
 ```
+
+## 其它脚本执行指令
+- 拆分标准文档
+```bash
+.venv/Scripts/activate  
+python scripts\ingestion\split_standard_pdf.py "minio://knowledge-raw-docs/产品标准" 
+```
+

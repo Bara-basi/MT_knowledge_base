@@ -3,8 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Iterable
+from pathlib import Path, PurePosixPath
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -12,6 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.services.parser.parser import parse_document
 from app.services.parser.paths import processing_subdir
+from app.db.minio import list_raw_document_objects, parse_raw_document_reference
 
 
 SUPPORTED_EXTENSIONS = {".docx", ".pptx", ".xlsx", ".pdf"}
@@ -19,7 +19,7 @@ SUPPORTED_EXTENSIONS = {".docx", ".pptx", ".xlsx", ".pdf"}
 
 @dataclass
 class ParseResult:
-    file_path: Path
+    file_path: str
     txt_file: Path
     item_count: int
 
@@ -39,7 +39,9 @@ def main() -> None:
     )
     parser.add_argument(
         "input_path",
-        help="Document file or folder to parse, for example data/raw/普通表格.",
+        nargs="?",
+        default="",
+        help="MinIO document object or prefix to parse. Default: bucket root.",
     )
     parser.add_argument(
         "--recursive",
@@ -60,7 +62,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    input_path = Path(args.input_path)
+    input_path = args.input_path
     document_files = find_document_files(input_path, recursive=args.recursive)
     if not document_files:
         raise SystemExit(f"No supported documents found under: {input_path}")
@@ -70,7 +72,7 @@ def main() -> None:
     print("Mode: parse only")
 
     results: list[ParseResult] = []
-    failures: list[tuple[Path, Exception]] = []
+    failures: list[tuple[str, Exception]] = []
 
     for index, file_path in enumerate(document_files, start=1):
         print(f"\n[{index}/{len(document_files)}] Parsing {file_path}", flush=True)
@@ -108,29 +110,58 @@ def main() -> None:
         raise SystemExit(1)
 
 
-def find_document_files(input_path: Path, *, recursive: bool) -> list[Path]:
-    if input_path.is_file():
-        return [input_path] if is_supported_document(input_path) else []
-
-    if not input_path.exists():
-        raise FileNotFoundError(f"Input path does not exist: {input_path}")
-    if not input_path.is_dir():
-        raise ValueError(f"Input path must be a file or folder: {input_path}")
-
-    iterator: Iterable[Path] = input_path.rglob("*") if recursive else input_path.iterdir()
+def find_document_files(input_path: str | Path, *, recursive: bool) -> list[str]:
+    objects = list_raw_document_objects(str(input_path or ""), recursive=recursive)
+    skipped_prefixes = split_version_source_prefixes(
+        reference.object_name for reference in objects
+    )
     return sorted(
-        path
-        for path in iterator
-        if path.is_file() and is_supported_document(path)
+        reference.uri
+        for reference in objects
+        if is_supported_document(reference.object_name)
+        and not is_shadowed_by_split_version(reference.object_name, skipped_prefixes)
     )
 
 
-def is_supported_document(path: Path) -> bool:
-    return path.suffix.lower() in SUPPORTED_EXTENSIONS and not path.name.startswith("~$")
+def is_supported_document(path: str | Path) -> bool:
+    source_path = _source_parts(path)
+    return source_path.suffix.lower() in SUPPORTED_EXTENSIONS and not source_path.name.startswith("~$")
 
 
-def _processing_txt_file(file_path: Path) -> Path:
-    return processing_subdir(file_path, "txt") / f"{file_path.stem}.txt"
+def _processing_txt_file(file_path: str | Path) -> Path:
+    source_path = _source_parts(file_path)
+    return processing_subdir(file_path, "txt") / f"{source_path.stem}.txt"
+
+
+def _source_parts(path: str | Path) -> PurePosixPath:
+    value = str(path).replace("\\", "/")
+    if value.startswith("minio://") or value.startswith("s3://") or "data/raw/" in value.lower():
+        return PurePosixPath(parse_raw_document_reference(value).object_name)
+    return PurePosixPath(value)
+
+
+def split_version_source_prefixes(object_names) -> set[str]:
+    prefixes: set[str] = set()
+    for object_name in object_names:
+        parts = PurePosixPath(str(object_name).replace("\\", "/")).parts
+        for index, part in enumerate(parts[:-1]):
+            if part.endswith("(切分版)"):
+                original = part[: -len("(切分版)")]
+                prefixes.add("/".join((*parts[:index], original)))
+    return {prefix for prefix in prefixes if prefix}
+
+
+def is_shadowed_by_split_version(object_name: str, skipped_prefixes: set[str]) -> bool:
+    normalized = str(object_name).replace("\\", "/").strip("/")
+    if "(切分版)" in normalized:
+        return False
+    for prefix in skipped_prefixes:
+        if normalized.startswith(f"{prefix}/"):
+            return True
+        original_file = f"{prefix}{PurePosixPath(normalized).suffix}"
+        if normalized == original_file:
+            return True
+    return False
 
 
 if __name__ == "__main__":
