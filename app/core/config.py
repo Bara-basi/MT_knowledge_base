@@ -225,6 +225,17 @@ class Settings:
     feishu_feedback_window_seconds: float = float(
         os.getenv("FEISHU_FEEDBACK_WINDOW_SECONDS", "1800")
     )
+    daily_report_enabled: bool = _env_bool("DAILY_REPORT_ENABLED", True)
+    daily_report_target_union_id: str = _get_first_env(
+        "DAILY_REPORT_TARGET_UNION_ID",
+        "DAILY_REPORT_TARGET_OPEN_ID",
+        default="on_ebc25d5669cabb3440819db2cfaa5c7c",
+    ).strip()
+    daily_report_target_session_id: str = os.getenv(
+        "DAILY_REPORT_TARGET_SESSION_ID",
+        "oc_b4325718ab22291bc7625ebd63d6f915",
+    ).strip()
+    daily_report_timezone: str = os.getenv("DAILY_REPORT_TIMEZONE", "Asia/Shanghai").strip()
     public_base_url: str = os.getenv(
         "PUBLIC_BASE_URL",
         "https://shopper-washable-crock.ngrok-free.dev",

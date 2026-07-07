@@ -17,6 +17,7 @@ from app.db.minio import (
     parse_raw_document_reference,
     upload_raw_document_stream,
 )
+from app.services.lark_document_sync import scan_lark_updates
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -126,3 +127,41 @@ async def upload_document_to_minio(
         "size": result.size,
         "url": result.url,
     }
+
+
+@router.post("/sync/lark/scan")
+def scan_lark_document_updates(
+    source: str | None = None,
+    dry_run: bool = False,
+    image_workers: int = 3,
+) -> dict[str, object]:
+    try:
+        result = scan_lark_updates(
+            source=source or "data/src/vector_src.json",
+            dry_run=dry_run,
+            image_analysis_workers=image_workers,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/sync/lark/update")
+def update_lark_document_by_name(
+    document_name: str,
+    source: str | None = None,
+    force: bool = True,
+    dry_run: bool = False,
+    image_workers: int = 3,
+) -> dict[str, object]:
+    try:
+        result = scan_lark_updates(
+            source=source or "data/src/vector_src.json",
+            document_name=document_name,
+            force=force,
+            dry_run=dry_run,
+            image_analysis_workers=image_workers,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return result.to_dict()

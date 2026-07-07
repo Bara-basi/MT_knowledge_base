@@ -5,16 +5,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import mimetypes
 import re
-import sys
 import time
 from pathlib import Path
 from typing import Any
 
-try:
-    from app.services.llm import LLMAPIError, LLMConfigError, LLMClient, get_llm_client
-except ModuleNotFoundError:
-    sys.path.append(str(Path(__file__).resolve().parents[1]))
-    from llm import LLMAPIError, LLMConfigError, LLMClient, get_llm_client
+from app.services.llm import LLMAPIError, LLMConfigError, LLMClient, get_llm_client
 
 
 IMAGE_ANALYSIS_MODEL = "Pro/moonshotai/Kimi-K2.6"

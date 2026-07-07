@@ -13,14 +13,9 @@ from PIL import Image, UnidentifiedImageError
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
-try:
-    from app.services.parser.img_parser import enrich_image_descriptions
-    from app.services.parser.paths import processing_subdir
-    from app.services.parser.word_parser import format_extracted_items
-except ModuleNotFoundError:
-    from img_parser import enrich_image_descriptions
-    from paths import processing_subdir
-    from word_parser import format_extracted_items
+from app.services.parser.img_parser import enrich_image_descriptions
+from app.services.parser.paths import processing_subdir
+from app.services.parser.word_parser import format_extracted_items
 
 
 IMAGE_EXTENSIONS = {

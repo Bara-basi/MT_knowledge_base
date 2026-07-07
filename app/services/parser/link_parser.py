@@ -1,15 +1,9 @@
 from __future__ import annotations
 
 import re
-import sys
 import time
-from pathlib import Path
 
-try:
-    from app.services.llm import LLMAPIError, LLMConfigError, LLMClient, get_llm_client
-except ModuleNotFoundError:
-    sys.path.append(str(Path(__file__).resolve().parents[1]))
-    from llm import LLMAPIError, LLMConfigError, LLMClient, get_llm_client
+from app.services.llm import LLMAPIError, LLMConfigError, LLMClient, get_llm_client
 
 
 URL_PATTERN = re.compile(r"https?://[^\s<>()，。；;、\"'）】]+", re.IGNORECASE)

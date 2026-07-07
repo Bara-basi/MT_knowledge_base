@@ -3,20 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import urlparse
 
-try:
-    from app.db.minio import download_raw_document_to_file, parse_raw_document_reference
-    from app.services.parser.excel_parser import parse_excel_document
-    from app.services.parser.pdf_parser import parse_pdf_document
-    from app.services.parser.powerpoint_parser import parse_powerpoint_document
-    from app.services.parser.standard_pdf_parser import parse_standard_pdf_document
-    from app.services.parser.word_parser import parse_word_document
-except ModuleNotFoundError:
-    from app.db.minio import download_raw_document_to_file, parse_raw_document_reference
-    from excel_parser import parse_excel_document
-    from pdf_parser import parse_pdf_document
-    from powerpoint_parser import parse_powerpoint_document
-    from standard_pdf_parser import parse_standard_pdf_document
-    from word_parser import parse_word_document
+from app.db.minio import download_raw_document_to_file, parse_raw_document_reference
 
 
 def parse_document(
@@ -30,18 +17,28 @@ def parse_document(
     suffix = path.suffix.lower()
 
     if suffix == ".docx":
+        from app.services.parser.word_parser import parse_word_document
+
         return parse_word_document(path, image_analysis_workers=image_analysis_workers)
     if suffix == ".xlsx":
+        from app.services.parser.excel_parser import parse_excel_document
+
         return parse_excel_document(path, image_analysis_workers=image_analysis_workers)
     if suffix == ".pptx":
+        from app.services.parser.powerpoint_parser import parse_powerpoint_document
+
         return parse_powerpoint_document(path, image_analysis_workers=image_analysis_workers)
     if suffix == ".pdf":
         if _is_standard_pdf_source(source):
+            from app.services.parser.standard_pdf_parser import parse_standard_pdf_document
+
             return parse_standard_pdf_document(
                 path,
                 image_analysis_workers=image_analysis_workers,
                 source_reference=source,
             )
+        from app.services.parser.pdf_parser import parse_pdf_document
+
         return parse_pdf_document(path, image_analysis_workers=image_analysis_workers)
 
     raise ValueError(f"Unsupported document type: {suffix or 'unknown'}")

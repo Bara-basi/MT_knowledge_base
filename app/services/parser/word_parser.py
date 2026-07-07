@@ -17,14 +17,9 @@ from docx.table import Table, _Cell
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
-try:
-    from app.services.parser.img_parser import enrich_image_descriptions
-    from app.services.parser.link_parser import enrich_links
-    from app.services.parser.paths import processing_subdir
-except ModuleNotFoundError:
-    from img_parser import enrich_image_descriptions
-    from link_parser import enrich_links
-    from paths import processing_subdir
+from app.services.parser.img_parser import enrich_image_descriptions
+from app.services.parser.link_parser import enrich_links
+from app.services.parser.paths import processing_subdir
 
 
 IMAGE_EXTENSIONS = {

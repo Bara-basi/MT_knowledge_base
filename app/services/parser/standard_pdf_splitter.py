@@ -14,40 +14,22 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised only in misconfigured envs
     fitz = None
 
-try:
-    from app.db.minio import (
-        DEFAULT_RAW_DOCUMENT_BUCKET,
-        build_minio_uri,
-        parse_raw_document_reference,
-        raw_document_object_name_for_file,
-        upload_raw_document_file,
-    )
-    from app.services.data_clean import clean_items
-    from app.services.parser.paths import processing_document_dir, processing_subdir
-    from app.services.parser.pdf_parser import (
-        PdfLine,
-        _build_items as _build_pdf_items,
-        _clean_pdf_lines,
-        _extract_lines as _extract_pdf_lines,
-    )
-    from app.services.parser.word_parser import format_extracted_items
-except ModuleNotFoundError:
-    from app.db.minio import (
-        DEFAULT_RAW_DOCUMENT_BUCKET,
-        build_minio_uri,
-        parse_raw_document_reference,
-        raw_document_object_name_for_file,
-        upload_raw_document_file,
-    )
-    from data_clean import clean_items
-    from paths import processing_document_dir, processing_subdir
-    from pdf_parser import (
-        PdfLine,
-        _build_items as _build_pdf_items,
-        _clean_pdf_lines,
-        _extract_lines as _extract_pdf_lines,
-    )
-    from word_parser import format_extracted_items
+from app.db.minio import (
+    DEFAULT_RAW_DOCUMENT_BUCKET,
+    build_minio_uri,
+    parse_raw_document_reference,
+    raw_document_object_name_for_file,
+    upload_raw_document_file,
+)
+from app.services.data_clean import clean_items
+from app.services.parser.paths import processing_document_dir, processing_subdir
+from app.services.parser.pdf_parser import (
+    PdfLine,
+    _build_items as _build_pdf_items,
+    _clean_pdf_lines,
+    _extract_lines as _extract_pdf_lines,
+)
+from app.services.parser.word_parser import format_extracted_items
 
 
 BODY_STYLE = "正文"

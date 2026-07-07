@@ -109,6 +109,81 @@ class VectorStoreService:
             "result": result,
         }
 
+    def delete_by_metadata_document_name(
+        self,
+        document_name: str,
+        *,
+        metadata_keys: Iterable[str] = ("file_path", "path"),
+        flush: bool = True,
+        batch_size: int = 4096,
+    ) -> dict[str, Any]:
+        cleaned_name = str(document_name or "").strip()
+        if not cleaned_name:
+            return {
+                "collection_name": self.config.name,
+                "document_name": cleaned_name,
+                "delete_count": 0,
+                "matched_ids": [],
+            }
+        if not self.client.has_collection(self.config.name):
+            return {
+                "collection_name": self.config.name,
+                "document_name": cleaned_name,
+                "delete_count": 0,
+                "matched_ids": [],
+            }
+
+        self.client.load_collection(self.config.name)
+        matched_ids = self.find_ids_by_metadata_document_name(
+            cleaned_name,
+            metadata_keys=metadata_keys,
+            batch_size=batch_size,
+        )
+        deleted = 0
+        for start in range(0, len(matched_ids), batch_size):
+            batch = matched_ids[start : start + batch_size]
+            result = self.client.delete(collection_name=self.config.name, ids=batch)
+            deleted += int(_result_value(result, "delete_count", len(batch)) or 0)
+        if flush and matched_ids:
+            self.client.flush(collection_name=self.config.name)
+        return {
+            "collection_name": self.config.name,
+            "document_name": cleaned_name,
+            "delete_count": deleted,
+            "matched_ids": matched_ids,
+        }
+
+    def find_ids_by_metadata_document_name(
+        self,
+        document_name: str,
+        *,
+        metadata_keys: Iterable[str] = ("file_path", "path"),
+        batch_size: int = 4096,
+    ) -> list[str]:
+        target_values = _document_name_match_values(document_name)
+        keys = tuple(str(key) for key in metadata_keys)
+        matched_ids: list[str] = []
+        iterator = self.client.query_iterator(
+            collection_name=self.config.name,
+            filter='id != ""',
+            output_fields=["id", "metadata"],
+            batch_size=batch_size,
+        )
+
+        try:
+            while True:
+                rows = iterator.next()
+                if not rows:
+                    break
+                for row in rows:
+                    metadata = row.get("metadata") or {}
+                    if _metadata_matches_document_name(metadata, keys, target_values):
+                        matched_ids.append(str(row["id"]))
+        finally:
+            iterator.close()
+
+        return matched_ids
+
     def has_file_id(self, file_id: str) -> bool:
         cleaned_file_id = str(file_id or "").strip()
         if not cleaned_file_id:
@@ -241,6 +316,32 @@ def _unique_file_ids(file_ids: Iterable[str]) -> list[str]:
 
 def _escape_milvus_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _document_name_match_values(document_name: str) -> tuple[str, ...]:
+    path = Path(str(document_name or "").strip())
+    values = [_normalize_metadata_match_text(path.name)]
+    if path.stem:
+        values.append(_normalize_metadata_match_text(path.stem))
+    return tuple(value for value in dict.fromkeys(values) if value)
+
+
+def _metadata_matches_document_name(
+    metadata: dict[str, Any],
+    keys: tuple[str, ...],
+    target_values: tuple[str, ...],
+) -> bool:
+    if not target_values:
+        return False
+    for key in keys:
+        value = _normalize_metadata_match_text(str(metadata.get(key) or ""))
+        if value and any(target in value for target in target_values):
+            return True
+    return False
+
+
+def _normalize_metadata_match_text(value: str) -> str:
+    return "".join(str(value or "").replace("\\", "/").lower().split())
 
 
 def _result_value(result: Any, key: str, default: Any = None) -> Any:

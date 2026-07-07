@@ -2467,6 +2467,29 @@ async def _send_feishu_markdown_message_to_chat(
     answer_feedback_id: str | None = None,
     answer_feedback_selected: str | None = None,
 ) -> str | None:
+    return await _send_feishu_markdown_message_to_receive_id(
+        receive_id=chat_id,
+        receive_id_type="chat_id",
+        markdown_text=markdown_text,
+        log_content=log_content,
+        stop_cancel_id=stop_cancel_id,
+        canceled_text=canceled_text,
+        answer_feedback_id=answer_feedback_id,
+        answer_feedback_selected=answer_feedback_selected,
+    )
+
+
+async def _send_feishu_markdown_message_to_receive_id(
+    *,
+    receive_id: str,
+    receive_id_type: str,
+    markdown_text: str,
+    log_content: bool = True,
+    stop_cancel_id: str | None = None,
+    canceled_text: str | None = None,
+    answer_feedback_id: str | None = None,
+    answer_feedback_selected: str | None = None,
+) -> str | None:
     if not settings.feishu_app_id or not settings.feishu_app_secret:
         _debug(
             "markdown send skipped",
@@ -2487,7 +2510,11 @@ async def _send_feishu_markdown_message_to_chat(
         answer_feedback_id=answer_feedback_id,
         answer_feedback_selected=answer_feedback_selected,
     )
-    fields: dict[str, Any] = {"chat_id": chat_id, "url": url}
+    fields: dict[str, Any] = {
+        "receive_id": receive_id,
+        "receive_id_type": receive_id_type,
+        "url": url,
+    }
     if log_content:
         fields["content_preview"] = _preview(content)
     _debug("markdown send api request", **fields)
@@ -2496,17 +2523,18 @@ async def _send_feishu_markdown_message_to_chat(
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 url,
-                params={"receive_id_type": "chat_id"},
+                params={"receive_id_type": receive_id_type},
                 headers={"Authorization": f"Bearer {token}"},
                 json={
-                    "receive_id": chat_id,
+                    "receive_id": receive_id,
                     "msg_type": "interactive",
                     "content": content,
                 },
             )
             _debug(
                 "markdown send api response",
-                chat_id=chat_id,
+                receive_id=receive_id,
+                receive_id_type=receive_id_type,
                 http_status=response.status_code,
                 body_preview=_preview(response.text),
             )
@@ -2535,7 +2563,8 @@ async def _send_feishu_markdown_message_to_chat(
     sent_message_id = _extract_feishu_message_id(result)
     _debug(
         "markdown send api success",
-        chat_id=chat_id,
+        receive_id=receive_id,
+        receive_id_type=receive_id_type,
         sent_message_id=sent_message_id,
     )
     return sent_message_id

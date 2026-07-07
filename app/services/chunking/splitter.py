@@ -8,17 +8,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
-try:
-    from app.db.minio import parse_raw_document_reference
-    from app.models.chunk import Chunk
-    from app.services.data_clean import clean_items
-except ModuleNotFoundError:
-    import sys
-
-    sys.path.append(str(Path(__file__).resolve().parents[3]))
-    from app.db.minio import parse_raw_document_reference
-    from app.models.chunk import Chunk
-    from app.services.data_clean import clean_items
+from app.db.minio import parse_raw_document_reference
+from app.models.chunk import Chunk
+from app.services.data_clean import clean_items
 
 
 ITEM_LINE_PATTERN = re.compile(r"^\[(?P<type>[^\]]+)]\s+\[(?P<style>[^\]]+)]\s*(?P<text>.*)$")

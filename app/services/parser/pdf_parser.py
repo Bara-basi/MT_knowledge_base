@@ -13,14 +13,9 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised only in misconfigured envs
     fitz = None
 
-try:
-    from app.services.data_clean import clean_items
-    from app.services.parser.paths import processing_subdir
-    from app.services.parser.word_parser import format_extracted_items
-except ModuleNotFoundError:
-    from data_clean import clean_items
-    from paths import processing_subdir
-    from word_parser import format_extracted_items
+from app.services.data_clean import clean_items
+from app.services.parser.paths import processing_subdir
+from app.services.parser.word_parser import format_extracted_items
 
 
 BODY_STYLE = "正文"
