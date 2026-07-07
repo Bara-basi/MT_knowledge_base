@@ -153,6 +153,119 @@ def test_unsupported_message_queues_notice_instead_of_silent_ignore(monkeypatch)
     ]
 
 
+def test_extract_sender_identity_prefers_union_id_with_type() -> None:
+    sender = {
+        "sender_id": {
+            "union_id": "user-union-id",
+            "open_id": "user-open-id",
+            "user_id": "user-id",
+        }
+    }
+
+    assert feishu._extract_sender_id(sender) == "user-union-id"
+    assert feishu._extract_sender_id_type(sender) == "union_id"
+
+
+def test_answer_feishu_message_resolves_sender_name_from_contact_api(monkeypatch) -> None:
+    captured_records: list[dict[str, object]] = []
+
+    async def fake_resolve_sender_name(**kwargs):
+        assert kwargs["sender_id"] == "user-open-id"
+        assert kwargs["sender_id_type"] == "open_id"
+        assert kwargs["sender_name"] is None
+        return "张三"
+
+    async def fake_create_chat_record(**kwargs) -> None:
+        captured_records.append({"kind": "question", **kwargs})
+
+    async def fake_record_chat_answer(**kwargs) -> None:
+        captured_records.append({"kind": "answer", **kwargs})
+
+    async def fake_ask_knowledge_base(_request):
+        return QueryResponse(question="question", answer="final answer")
+
+    async def fake_resolve_feedback(*_args, **_kwargs):
+        return None
+
+    async def fake_stop_feedback(*_args, **_kwargs) -> None:
+        return None
+
+    async def fake_send_message(**_kwargs):
+        return "sent-message-id"
+
+    async def fake_register_feedback(_answer: str):
+        return "feedback-id"
+
+    monkeypatch.setattr(feishu, "_resolve_feishu_sender_name", fake_resolve_sender_name)
+    monkeypatch.setattr(feishu, "_schedule_initial_feishu_feedback", lambda **_kwargs: None)
+    monkeypatch.setattr(feishu, "_resolve_initial_feishu_feedback", fake_resolve_feedback)
+    monkeypatch.setattr(feishu, "_stop_feishu_feedback_loop", fake_stop_feedback)
+    monkeypatch.setattr(feishu, "_discard_feishu_answer_cancel_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(feishu, "_register_feishu_answer_feedback_state", fake_register_feedback)
+    monkeypatch.setattr(feishu, "_try_send_feishu_markdown_message", fake_send_message)
+    monkeypatch.setattr(feishu, "ask_knowledge_base", fake_ask_knowledge_base)
+    monkeypatch.setattr(feishu, "create_chat_record", fake_create_chat_record)
+    monkeypatch.setattr(feishu, "record_chat_answer", fake_record_chat_answer)
+
+    asyncio.run(
+        feishu._answer_feishu_message(
+            question="question",
+            sender_id="user-open-id",
+            sender_id_type="open_id",
+            sender_name=None,
+            chat_id="chat-id",
+            message_id="message-id",
+            event_id="event-id",
+            chat_type="p2p",
+            dedupe_key="message:message-id",
+        )
+    )
+
+    assert [record["kind"] for record in captured_records] == ["question", "answer"]
+    assert captured_records[0]["user_name"] == "张三"
+    assert captured_records[1]["user_name"] == "张三"
+
+
+def test_extract_feishu_user_name_falls_back_to_i18n_name() -> None:
+    assert feishu._extract_feishu_user_name(
+        {"i18n_name": {"zh_cn": " 张三 ", "en_us": "Zhang San"}}
+    ) == "张三"
+
+
+def test_drive_file_edit_event_prints_raw_payload(capsys) -> None:
+    class FakeBackgroundTasks:
+        def add_task(self, func, **kwargs) -> None:  # pragma: no cover - should not run.
+            raise AssertionError("drive file edit events should not queue message tasks yet")
+
+    class FakeRequest:
+        client = "test-client"
+
+        async def json(self) -> dict:
+            return {
+                "header": {
+                    "event_type": "drive.file.edit_v1",
+                    "event_id": "event-drive-file-edit",
+                },
+                "event": {
+                    "file_token": "doccn-example-token",
+                    "file_type": "docx",
+                    "operator_id": {"open_id": "ou-example"},
+                },
+            }
+
+    result = asyncio.run(feishu.handle_feishu_events(FakeRequest(), FakeBackgroundTasks()))
+
+    assert result == {
+        "ok": True,
+        "accepted": True,
+        "event_type": "drive.file.edit_v1",
+        "event_id": "event-drive-file-edit",
+    }
+    stdout = capsys.readouterr().out
+    assert "drive.file.edit_v1 raw payload" in stdout
+    assert "doccn-example-token" in stdout
+
+
 def test_feishu_feedback_card_updates_until_final_answer(monkeypatch) -> None:
     sent_messages: list[tuple[str | None, str | None, str]] = []
     updates: list[tuple[str, str]] = []

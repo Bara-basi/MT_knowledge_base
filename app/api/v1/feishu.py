@@ -74,6 +74,7 @@ _comfort_feedback_interval_seconds = 60.0
 _feedback_texts_cache: list[str] | None = None
 _local_to_lark_mapping_dir = Path("data") / "metadata" / "local2lark_mapping"
 _local_to_lark_mapping_cache: dict[str, str] | None = None
+_feishu_user_name_cache: dict[tuple[str, str], str] = {}
 
 
 @dataclass
@@ -212,6 +213,9 @@ async def handle_feishu_events(
         _debug("card action handled", event_type=event_type, result=result)
         return result
 
+    if event_type == "drive.file.edit_v1":
+        return _handle_feishu_drive_file_edit_event(payload)
+
     if event_type != "im.message.receive_v1":
         _debug("event ignored", reason="unsupported_event_type", event_type=event_type)
         return {"ok": True, "ignored": True, "event_type": event_type}
@@ -261,6 +265,7 @@ async def handle_feishu_events(
         _answer_feishu_message,
         question=question,
         sender_id=_extract_sender_id(event.get("sender") or {}),
+        sender_id_type=_extract_sender_id_type(event.get("sender") or {}),
         sender_name=_extract_sender_name(event.get("sender") or {}),
         chat_id=message.get("chat_id"),
         message_id=message_id,
@@ -283,16 +288,43 @@ async def handle_feishu_events(
     }
 
 
+def _handle_feishu_drive_file_edit_event(payload: dict[str, Any]) -> dict[str, Any]:
+    header = payload.get("header") if isinstance(payload.get("header"), dict) else {}
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    event_type = header.get("event_type") or payload.get("type")
+    event_id = header.get("event_id")
+
+    _debug(
+        "drive file edit event received",
+        event_type=event_type,
+        event_id=event_id,
+        event_keys=list(event.keys()),
+    )
+    print(
+        "[feishu] drive.file.edit_v1 raw payload "
+        + json.dumps(payload, ensure_ascii=False, default=str),
+        flush=True,
+    )
+
+    return {
+        "ok": True,
+        "accepted": True,
+        "event_type": event_type,
+        "event_id": event_id,
+    }
+
+
 async def _answer_feishu_message(
     *,
     question: str,
-    sender_id: str | None,
-    sender_name: str | None,
-    chat_id: str | None,
-    message_id: str | None,
-    event_id: str | None,
-    chat_type: str | None,
-    dedupe_key: str | None,
+    sender_id: str | None = None,
+    sender_id_type: str | None = None,
+    sender_name: str | None = None,
+    chat_id: str | None = None,
+    message_id: str | None = None,
+    event_id: str | None = None,
+    chat_type: str | None = None,
+    dedupe_key: str | None = None,
 ) -> None:
     _debug(
         "background task started",
@@ -317,6 +349,14 @@ async def _answer_feishu_message(
         dedupe_key=dedupe_key,
         n8n_started_after=n8n_started_after,
         cancel_id=cancel_id,
+    )
+    sender_name = await _resolve_feishu_sender_name(
+        sender_id=sender_id,
+        sender_id_type=sender_id_type,
+        sender_name=sender_name,
+        event_id=event_id,
+        message_id=message_id,
+        dedupe_key=dedupe_key,
     )
 
     try:
@@ -2245,13 +2285,23 @@ def _split_feishu_post_line(text: str) -> list[str]:
 
 
 def _extract_sender_id(sender: dict[str, Any]) -> str | None:
+    sender_identity = _extract_sender_identity(sender)
+    return sender_identity[0] if sender_identity else None
+
+
+def _extract_sender_id_type(sender: dict[str, Any]) -> str | None:
+    sender_identity = _extract_sender_identity(sender)
+    return sender_identity[1] if sender_identity else None
+
+
+def _extract_sender_identity(sender: dict[str, Any]) -> tuple[str, str] | None:
     sender_id = sender.get("sender_id")
     if not isinstance(sender_id, dict):
         return None
     for key in ("union_id", "open_id", "user_id"):
         value = sender_id.get(key)
         if value:
-            return str(value)
+            return str(value), key
     return None
 
 
@@ -2267,6 +2317,113 @@ def _extract_sender_name(sender: dict[str, Any]) -> str | None:
             value = sender_id.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
+    return None
+
+
+async def _resolve_feishu_sender_name(
+    *,
+    sender_id: str | None,
+    sender_id_type: str | None,
+    sender_name: str | None,
+    event_id: str | None = None,
+    message_id: str | None = None,
+    dedupe_key: str | None = None,
+) -> str | None:
+    sender_name = _normalize_feishu_user_name(sender_name)
+    if sender_name:
+        return sender_name
+    if not sender_id or sender_id_type not in {"open_id", "union_id", "user_id"}:
+        return None
+    if not settings.feishu_app_id or not settings.feishu_app_secret:
+        return None
+
+    cache_key = (sender_id_type, sender_id)
+    cached_name = _feishu_user_name_cache.get(cache_key)
+    if cached_name:
+        return cached_name
+
+    try:
+        token = await _get_tenant_access_token()
+        user_info = await _fetch_feishu_user_info(
+            token=token,
+            user_id=sender_id,
+            user_id_type=sender_id_type,
+        )
+    except Exception as exc:  # noqa: BLE001 - a missing name must not block answers.
+        _warn(
+            "sender name lookup failed",
+            event_id=event_id,
+            message_id=message_id,
+            dedupe_key=dedupe_key,
+            sender_id_type=sender_id_type,
+            error=str(exc),
+        )
+        return None
+
+    resolved_name = _extract_feishu_user_name(user_info)
+    if resolved_name:
+        _feishu_user_name_cache[cache_key] = resolved_name
+    return resolved_name
+
+
+async def _fetch_feishu_user_info(
+    *,
+    token: str,
+    user_id: str,
+    user_id_type: str,
+) -> dict[str, Any]:
+    timeout = httpx.Timeout(settings.feishu_timeout)
+    url = f"{settings.feishu_base_url}/open-apis/contact/v3/users/basic_batch"
+    params = {
+        "user_id_type": user_id_type,
+    }
+    headers = {"Authorization": f"Bearer {token}"}
+    body = {"user_ids": [user_id]}
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(url, params=params, json=body, headers=headers)
+            response.raise_for_status()
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="Feishu user lookup API timed out") from exc
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text[:500]
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=f"Feishu user lookup API returned {exc.response.status_code}: {detail}",
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to call Feishu user lookup API: {exc}") from exc
+
+    result = response.json()
+    if result.get("code") != 0:
+        raise HTTPException(status_code=502, detail=f"Feishu user lookup API error: {result}")
+
+    users = ((result.get("data") or {}).get("users") or [])
+    if not users:
+        return {}
+    first_user = users[0]
+    return first_user if isinstance(first_user, dict) else {}
+
+
+def _extract_feishu_user_name(user_info: dict[str, Any]) -> str | None:
+    for key in ("name", "en_name", "nickname", "email", "employee_no", "employee_id"):
+        value = user_info.get(key)
+        name = _normalize_feishu_user_name(value)
+        if name:
+            return name
+    i18n_name = user_info.get("i18n_name")
+    if isinstance(i18n_name, dict):
+        for key in ("zh_cn", "en_us", "ja_jp"):
+            name = _normalize_feishu_user_name(i18n_name.get(key))
+            if name:
+                return name
+    return None
+
+
+def _normalize_feishu_user_name(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     return None
 
 
