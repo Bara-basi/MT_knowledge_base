@@ -17,8 +17,12 @@ FEISHU_ANSWER_FEEDBACK_TABLE = "feishu_answer_feedback_states"
 def get_postgres_connection() -> Connection[Any]:
     """Create a PostgreSQL connection from environment-backed settings."""
 
+    options: dict[str, Any] = {}
+    if settings.postgres_timezone:
+        options["options"] = f"-c timezone={settings.postgres_timezone}"
+
     if settings.database_url:
-        return psycopg.connect(settings.database_url, row_factory=dict_row)
+        return psycopg.connect(settings.database_url, row_factory=dict_row, **options)
 
     return psycopg.connect(
         host=settings.postgres_host,
@@ -27,6 +31,7 @@ def get_postgres_connection() -> Connection[Any]:
         user=settings.postgres_user,
         password=settings.postgres_password,
         row_factory=dict_row,
+        **options,
     )
 
 

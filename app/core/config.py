@@ -63,6 +63,7 @@ class Settings:
     postgres_password: str = os.getenv("POSTGRES_PASSWORD", "")
     database_url: str = os.getenv("DATABASE_URL", "")
     postgres_chat_table: str = os.getenv("POSTGRES_CHAT_TABLE", "chat_messages")
+    postgres_timezone: str = os.getenv("POSTGRES_TIMEZONE", os.getenv("PGTZ", "")).strip()
     chat_message_encryption_key: str = os.getenv(
         "CHAT_MESSAGE_ENCRYPTION_KEY",
         "change-me-before-production-chat-message-encryption-key",

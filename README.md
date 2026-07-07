@@ -196,6 +196,7 @@ curl http://127.0.0.1:8000/health
 常用访问地址：
 
 - FastAPI 文档：`http://服务器IP:8000/docs`
+- 
 - n8n：`http://服务器IP:5678`
 - MinIO 控制台：`http://服务器IP:9001`
 - Milvus：`http://服务器IP:19530`
@@ -380,4 +381,8 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-deps 
 .venv/Scripts/activate  
 python scripts\ingestion\split_standard_pdf.py "minio://knowledge-raw-docs/产品标准" 
 ```
-
+- 通过ssh隧道访问n8n
+```bash
+ssh -N -L 15678:127.0.0.1:5678 root@47.96.9.22
+```
+浏览器进入 http://localhost:15678
