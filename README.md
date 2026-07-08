@@ -376,23 +376,16 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-deps 
 ```
 
 ## 其它脚本执行指令
-### 拆分标准文档
+Linux服务器操作：
+1. 进入crontab
 ```bash
-.venv/Scripts/activate  
-python scripts\ingestion\split_standard_pdf.py "minio://knowledge-raw-docs/产品标准" 
+crontab -e
 ```
-
-### 通过ssh隧道访问n8n
-```bash
-ssh -N -L 15678:127.0.0.1:5678 root@47.96.9.22
-```
-浏览器进入 http://localhost:15678
-
-### 启动每日使用情况汇报任务
 ```bash
 CRON_TZ=Asia/Shanghai
 0 9 * * * cd /path/to/MTSCO_knowledge_base && .venv/bin/python scripts/reports/send_daily_report.py >> logs/daily_report.log 2>&1
 ```
+本地window操作：
 ```powershell 
 .\.venv\Scripts\python.exe scripts\reports\send_daily_report.py --loop
 ```
@@ -402,4 +395,3 @@ Get-CimInstance Win32_Process |
   Where-Object { $_.CommandLine -like "*send_daily_report.py*" } |
   Select-Object ProcessId, CommandLine
 ```
-

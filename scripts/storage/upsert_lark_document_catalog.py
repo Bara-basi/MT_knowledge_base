@@ -26,6 +26,11 @@ def load_env_file(path: Path) -> None:
 
 load_env_file(PROJECT_ROOT / ".env")
 
+from scripts.storage.lark_script_credentials import use_local_lark_credentials  # noqa: E402
+
+
+use_local_lark_credentials()
+
 from app.services.lark_document_catalog import (  # noqa: E402
     CATALOG_TABLE,
     DEFAULT_VECTOR_SRC,

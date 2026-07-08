@@ -12,6 +12,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
+from scripts.storage.lark_script_credentials import use_local_lark_credentials  # noqa: E402
+
+
+use_local_lark_credentials()
+
 from app.services.lark_document_sync import (  # noqa: E402
     DEFAULT_VECTOR_SRC,
     PACIFIC_FIXED_TZ,

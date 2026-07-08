@@ -61,12 +61,12 @@ def load_lark_link_mapping(mapping_dir: Path) -> dict[str, str]:
     return mapping
 
 
-def split_version_original_filename(object_name: str) -> str | None:
+def split_version_original_stem(object_name: str) -> str | None:
     parts = PurePosixPath(object_name.replace("\\", "/")).parts
     for part in parts[:-1]:
         split_suffix = "(\u5207\u5206\u7248)"
         if part.endswith(split_suffix):
-            return f"{part[: -len(split_suffix)]}.pdf"
+            return part[: -len(split_suffix)]
     return None
 
 
@@ -76,9 +76,12 @@ def lark_link_for_object(object_name: str, mapping: dict[str, str]) -> str:
     if direct_link:
         return direct_link
 
-    original_filename = split_version_original_filename(object_name)
-    if original_filename:
-        return mapping.get(normalize_filename_key(original_filename), "")
+    original_stem = split_version_original_stem(object_name)
+    if original_stem:
+        normalized_stem = normalize_filename_key(original_stem)
+        for filename_key, link in mapping.items():
+            if PurePosixPath(filename_key).stem == normalized_stem and link:
+                return link
     return ""
 
 
