@@ -26,12 +26,18 @@ def get_report_timezone() -> ZoneInfo:
         return ZoneInfo("Asia/Shanghai")
 
 
+def default_report_date(now: datetime | None = None) -> date:
+    tz = get_report_timezone()
+    current = now.astimezone(tz) if now else datetime.now(tz)
+    return current.date() - timedelta(days=1)
+
+
 def day_bounds(
     target_date: date | None = None,
     timezone: ZoneInfo | None = None,
 ) -> tuple[datetime, datetime]:
     tz = timezone or get_report_timezone()
-    day = target_date or datetime.now(tz).date()
+    day = target_date or default_report_date()
     start = datetime.combine(day, time.min, tzinfo=tz)
     return start, start + timedelta(days=1)
 
@@ -43,7 +49,8 @@ def fetch_daily_user_chat_stats(
     timezone: ZoneInfo | None = None,
 ) -> list[DailyUserChatStat]:
     ensure_chat_messages_table(table_name)
-    start, end = day_bounds(target_date=target_date, timezone=timezone)
+    report_date = target_date or default_report_date()
+    start, end = day_bounds(target_date=report_date, timezone=timezone)
     table = sql.Identifier(table_name or settings.postgres_chat_table)
 
     with postgres_connection() as conn:
@@ -82,22 +89,22 @@ def build_daily_report_text(
 ) -> str:
     tz = get_report_timezone()
     generated = generated_at.astimezone(tz) if generated_at else datetime.now(tz)
-    report_date = target_date or generated.date()
+    report_date = target_date or default_report_date(generated)
     total = sum(item.message_count for item in stats)
 
     lines = [
-        f"MTSCO知识库每日使用反馈（{report_date:%Y-%m-%d}）",
+        f"MTSCO知识库昨日使用反馈（{report_date:%Y-%m-%d}）",
         "",
-        f"截至 {generated:%H:%M}，今日飞书问答入口共收到 {total} 条提问。",
+        f"截至今日 {generated:%H:%M}，昨日飞书问答入口共收到 {total} 条提问。",
     ]
     if stats:
-        lines.append("用户使用次数如下：")
+        lines.append("昨日用户使用次数如下：")
         lines.extend(
             f"{index}. {item.user_name}：{item.message_count} 次"
             for index, item in enumerate(stats, start=1)
         )
     else:
-        lines.append("目前还没有产生新的问答记录。")
+        lines.append("昨日还没有产生新的问答记录。")
     return "\n".join(lines)
 
 
@@ -122,8 +129,9 @@ async def send_daily_report(
     if not union_id and not session_id:
         raise ValueError("Daily report target union_id or session_id is required.")
 
-    stats = await asyncio.to_thread(fetch_daily_user_chat_stats, target_date=target_date)
-    text = build_daily_report_text(stats, target_date=target_date)
+    report_date = target_date or default_report_date()
+    stats = await asyncio.to_thread(fetch_daily_user_chat_stats, target_date=report_date)
+    text = build_daily_report_text(stats, target_date=report_date)
     receive_id_type = "union_id" if union_id else "chat_id"
     receive_id = union_id or session_id
     if union_id:
@@ -147,6 +155,7 @@ async def send_daily_report(
         "target_session_id": session_id,
         "receive_id": receive_id,
         "receive_id_type": receive_id_type,
+        "report_date": report_date,
         "stats": stats,
         "text": text,
     }

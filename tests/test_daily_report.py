@@ -8,25 +8,33 @@ from zoneinfo import ZoneInfo
 from app.services import daily_report
 
 
-def test_build_daily_report_text_lists_user_counts() -> None:
+def test_default_report_date_uses_previous_day_in_report_timezone() -> None:
+    report_date = daily_report.default_report_date(
+        datetime(2026, 7, 8, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    )
+
+    assert report_date == date(2026, 7, 7)
+
+
+def test_build_daily_report_text_lists_previous_day_user_counts() -> None:
     text = daily_report.build_daily_report_text(
         [
             daily_report.DailyUserChatStat("Alice", 3),
             daily_report.DailyUserChatStat("Bob", 1),
         ],
         target_date=date(2026, 7, 7),
-        generated_at=datetime(2026, 7, 7, 9, 5, tzinfo=ZoneInfo("Asia/Shanghai")),
+        generated_at=datetime(2026, 7, 8, 9, 5, tzinfo=ZoneInfo("Asia/Shanghai")),
     )
 
-    assert "MTSCO知识库每日使用反馈（2026-07-07）" in text
-    assert "今日飞书问答入口共收到 4 条提问" in text
+    assert "MTSCO知识库昨日使用反馈（2026-07-07）" in text
+    assert "昨日飞书问答入口共收到 4 条提问" in text
     assert "1. Alice：3 次" in text
     assert "2. Bob：1 次" in text
     assert "PostgreSQL" not in text
     assert "chat_messages" not in text
 
 
-def test_fetch_daily_user_chat_stats_queries_current_day(monkeypatch) -> None:
+def test_fetch_daily_user_chat_stats_queries_target_day(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     class FakeCursor:
@@ -75,17 +83,19 @@ def test_fetch_daily_user_chat_stats_queries_current_day(monkeypatch) -> None:
     ]
 
 
-def test_send_daily_report_uses_union_id(monkeypatch) -> None:
+def test_send_daily_report_uses_default_previous_day(monkeypatch) -> None:
     sent: dict[str, object] = {}
+    fetched: dict[str, object] = {}
 
     def fake_fetch(*, target_date=None):
-        assert target_date == date(2026, 7, 7)
+        fetched["target_date"] = target_date
         return [daily_report.DailyUserChatStat("Alice", 2)]
 
     async def fake_send(**kwargs):
         sent.update(kwargs)
         return "om_test_message"
 
+    monkeypatch.setattr(daily_report, "default_report_date", lambda *_args, **_kwargs: date(2026, 7, 7))
     monkeypatch.setattr(daily_report, "fetch_daily_user_chat_stats", fake_fetch)
     monkeypatch.setattr(daily_report.feishu, "_send_feishu_markdown_message_to_receive_id", fake_send)
     monkeypatch.setattr(
@@ -104,15 +114,16 @@ def test_send_daily_report_uses_union_id(monkeypatch) -> None:
         daily_report.send_daily_report(
             target_union_id="on_ebc25d5669cabb3440819db2cfaa5c7c",
             target_session_id="oc_b4325718ab22291bc7625ebd63d6f915",
-            target_date=date(2026, 7, 7),
         )
     )
 
+    assert fetched["target_date"] == date(2026, 7, 7)
     assert sent["receive_id"] == "on_ebc25d5669cabb3440819db2cfaa5c7c"
     assert sent["receive_id_type"] == "union_id"
+    assert "MTSCO知识库昨日使用反馈（2026-07-07）" in sent["markdown_text"]
     assert "Alice：2 次" in sent["markdown_text"]
     assert result["ok"] is True
-    assert result["target_union_id"] == "on_ebc25d5669cabb3440819db2cfaa5c7c"
+    assert result["report_date"] == date(2026, 7, 7)
 
 
 def test_send_daily_report_skips_when_disabled(monkeypatch) -> None:
