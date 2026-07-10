@@ -65,6 +65,20 @@ def api_get(access_token: str, path: str, params=None):
     return data["data"]
 
 
+def api_post(access_token: str, path: str, json_body: dict, params=None):
+    resp = requests.post(
+        f"{BASE_URL}{path}",
+        headers={"Authorization": f"Bearer {access_token}"},
+        params=params or {},
+        json=json_body,
+        timeout=REQUEST_TIMEOUT,
+    )
+    data = resp.json()
+    if data["code"] != 0:
+        raise FeishuAPIError(data)
+    return data["data"]
+
+
 def parse_feishu_url(link: str) -> tuple[str, str]:
     parsed = urlparse(link)
     parts = [part for part in parsed.path.split("/") if part]
@@ -356,3 +370,25 @@ def normalize_source_mapping(value, source_type: str) -> dict[str, str]:
     if not isinstance(value, dict):
         raise ValueError(f"{source_type} must be a JSON object")
     return {str(name): str(link) for name, link in value.items()}
+
+
+def create_bitable_record(
+    access_token: str,
+    *,
+    app_token: str,
+    table_id: str,
+    fields: dict,
+    field_key: str | None = None,
+    user_id_type: str | None = None,
+) -> dict:
+    params = {}
+    if field_key:
+        params["field_key"] = field_key
+    if user_id_type:
+        params["user_id_type"] = user_id_type
+    return api_post(
+        access_token,
+        f"/bitable/v1/apps/{app_token}/tables/{table_id}/records",
+        {"fields": fields},
+        params=params,
+    ).get("record", {})

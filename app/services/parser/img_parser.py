@@ -12,7 +12,7 @@ from typing import Any
 from app.services.llm import LLMAPIError, LLMConfigError, LLMClient, get_llm_client
 
 
-IMAGE_ANALYSIS_MODEL = "Pro/moonshotai/Kimi-K2.6"
+IMAGE_ANALYSIS_MODEL = "kimi-k2.6"
 ALREADY_SATISFIED = "already satisfied"
 VIDEO_LIKE_SUFFIXES = {".gif", ".git"}
 

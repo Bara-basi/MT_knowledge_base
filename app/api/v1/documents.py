@@ -17,7 +17,7 @@ from app.db.minio import (
     parse_raw_document_reference,
     upload_raw_document_stream,
 )
-from app.services.lark_document_sync import scan_lark_updates
+from app.services.lark_document_sync import ingest_lark_document_link, scan_lark_updates
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -164,4 +164,29 @@ def update_lark_document_by_name(
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/sync/lark/ingest")
+def ingest_lark_document(
+    document_link: str,
+    bucket: str = "knowledge-raw-docs",
+    object_name: str | None = None,
+    category: str | None = None,
+    source_name: str | None = None,
+    image_workers: int = 3,
+) -> dict[str, object]:
+    try:
+        result = ingest_lark_document_link(
+            document_link,
+            bucket=bucket,
+            object_name=object_name,
+            category=category,
+            source_name=source_name,
+            image_analysis_workers=image_workers,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if result.status == "failed":
+        raise HTTPException(status_code=500, detail=result.to_dict())
     return result.to_dict()

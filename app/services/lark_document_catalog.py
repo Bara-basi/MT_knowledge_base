@@ -331,6 +331,25 @@ def collect_records(source_path: str | Path) -> tuple[list[dict[str, Any]], list
     return list(records.values()), failures
 
 
+def collect_link_record(
+    document_link: str,
+    *,
+    source_name: str | None = None,
+    access_token: str | None = None,
+) -> dict[str, Any]:
+    token = access_token or get_access_token()
+    records: dict[str, dict[str, Any]] = {}
+    collect_direct_link_record(
+        token,
+        source_name=source_name or document_link,
+        source_url=document_link,
+        records=records,
+    )
+    if not records:
+        raise ValueError(f"No supported document found for Lark link: {document_link}")
+    return next(iter(records.values()))
+
+
 def ensure_catalog_table(table_name: str = CATALOG_TABLE) -> None:
     table = sql.Identifier(table_name)
     with postgres_connection() as conn:
@@ -423,6 +442,40 @@ def upsert_records(rows: list[dict[str, Any]], table_name: str = CATALOG_TABLE) 
                 [{**row, "path_titles": Jsonb(row["path_titles"]), "raw_node": Jsonb(row["raw_node"])} for row in rows],
             )
     return len(rows)
+
+
+def mark_missing_records_deleted(
+    document_keys: list[str],
+    table_name: str = CATALOG_TABLE,
+) -> int:
+    table = sql.Identifier(table_name)
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            if document_keys:
+                cur.execute(
+                    sql.SQL(
+                        """
+                        UPDATE {table}
+                        SET is_deleted = TRUE,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE NOT is_deleted
+                          AND NOT (document_key = ANY(%s))
+                        """
+                    ).format(table=table),
+                    (document_keys,),
+                )
+            else:
+                cur.execute(
+                    sql.SQL(
+                        """
+                        UPDATE {table}
+                        SET is_deleted = TRUE,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE NOT is_deleted
+                        """
+                    ).format(table=table)
+                )
+            return cur.rowcount or 0
 
 
 def sync_ingestion_registry_times(

@@ -38,6 +38,7 @@ from app.services.lark_document_catalog import (  # noqa: E402
     catalog_summary,
     collect_records,
     ensure_catalog_table,
+    # mark_missing_records_deleted,
     sync_ingestion_registry_times,
     upsert_records,
 )
@@ -87,6 +88,16 @@ def main() -> int:
     if not args.dry_run:
         ensure_catalog_table(args.catalog_table)
         result["upserted_rows"] = upsert_records(records, args.catalog_table)
+        # Deletion marking is intentionally disabled for now. A missing item in one
+        # scan should not mark catalog rows as deleted until we add confirmation.
+        # result["marked_deleted_rows"] = mark_missing_records_deleted(
+        #     [
+        #         str(record.get("document_key"))
+        #         for record in records
+        #         if record.get("document_key")
+        #     ],
+        #     args.catalog_table,
+        # )
         if not args.no_sync_ingestion_registry:
             result["synced_ingestion_rows"] = sync_ingestion_registry_times(
                 catalog_table_name=args.catalog_table,
