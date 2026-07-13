@@ -63,11 +63,16 @@ class Settings:
     postgres_password: str = os.getenv("POSTGRES_PASSWORD", "")
     database_url: str = os.getenv("DATABASE_URL", "")
     postgres_chat_table: str = os.getenv("POSTGRES_CHAT_TABLE", "chat_messages")
+    postgres_conversation_topics_table: str = os.getenv(
+        "POSTGRES_CONVERSATION_TOPICS_TABLE",
+        "conversation_topics",
+    )
     postgres_timezone: str = os.getenv("POSTGRES_TIMEZONE", os.getenv("PGTZ", "")).strip()
     chat_message_encryption_key: str = os.getenv(
         "CHAT_MESSAGE_ENCRYPTION_KEY",
         "change-me-before-production-chat-message-encryption-key",
     )
+    conversation_topic_recent_limit: int = int(os.getenv("CONVERSATION_TOPIC_RECENT_LIMIT", "5"))
     neo4j_uri: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
     neo4j_user: str = os.getenv("NEO4J_USER", "neo4j")
     neo4j_password: str = os.getenv("NEO4J_PASSWORD", "")

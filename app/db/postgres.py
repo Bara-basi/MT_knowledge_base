@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Any, Iterator
+from uuid import UUID, uuid4
 
 import psycopg
 from psycopg import Connection, sql
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from app.core.config import settings
 
 
 CHAT_MESSAGES_TABLE_COMMENT = "MTSCO knowledge base encrypted chat messages"
+CONVERSATION_TOPICS_TABLE = "conversation_topics"
+CONVERSATION_TOPICS_TABLE_COMMENT = "Virtual conversation topics for Feishu chat sessions"
+CHAT_TEXT_ENCRYPTION_PREFIX = "fernet:v1:"
 FEISHU_ANSWER_FEEDBACK_TABLE = "feishu_answer_feedback_states"
 
 
@@ -64,6 +70,7 @@ def ensure_chat_messages_table(table_name: str | None = None) -> dict[str, Any]:
                         user_name TEXT,
                         session_id VARCHAR(128) NOT NULL,
                         conversation_id VARCHAR(128) NOT NULL,
+                        topic_id UUID,
                         create_time TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                         question TEXT NOT NULL,
                         answer TEXT NOT NULL DEFAULT ''
@@ -73,6 +80,11 @@ def ensure_chat_messages_table(table_name: str | None = None) -> dict[str, Any]:
             )
             cur.execute(
                 sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS user_name TEXT").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS topic_id UUID").format(
                     table=table
                 )
             )
@@ -115,6 +127,18 @@ def ensure_chat_messages_table(table_name: str | None = None) -> dict[str, Any]:
                 )
             )
             cur.execute(
+                sql.SQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS {index}
+                    ON {table} (topic_id, create_time DESC)
+                    WHERE topic_id IS NOT NULL
+                    """
+                ).format(
+                    index=sql.Identifier(f"{table_name}_topic_recent_idx"),
+                    table=table,
+                )
+            )
+            cur.execute(
                 """
                 SELECT column_name, data_type, is_nullable, column_default
                 FROM information_schema.columns
@@ -132,6 +156,475 @@ def ensure_chat_messages_table(table_name: str | None = None) -> dict[str, Any]:
     }
 
 
+def ensure_conversation_topics_table(
+    table_name: str | None = None,
+) -> dict[str, Any]:
+    """Create the virtual conversation topic table if needed."""
+
+    table_name = table_name or settings.postgres_conversation_topics_table
+    table = sql.Identifier(table_name)
+
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+            cur.execute(
+                sql.SQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS {table} (
+                        topic_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        user_id VARCHAR(128) NOT NULL,
+                        session_id VARCHAR(128) NOT NULL,
+                        topic TEXT NOT NULL,
+                        summary TEXT NOT NULL DEFAULT '',
+                        started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        last_message_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        message_count INTEGER NOT NULL DEFAULT 0,
+                        status VARCHAR(16) NOT NULL DEFAULT 'active',
+                        metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                        CONSTRAINT conversation_topics_message_count_nonnegative
+                            CHECK (message_count >= 0),
+                        CONSTRAINT conversation_topics_status_check
+                            CHECK (status IN ('active', 'archived'))
+                    )
+                    """
+                ).format(table=table)
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL(
+                    "UPDATE {table} SET updated_at = COALESCE(updated_at, started_at, CURRENT_TIMESTAMP) "
+                    "WHERE updated_at IS NULL"
+                ).format(table=table)
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ALTER COLUMN updated_at SET DEFAULT CURRENT_TIMESTAMP").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ALTER COLUMN updated_at SET NOT NULL").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL(
+                    "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMPTZ"
+                ).format(table=table)
+            )
+            cur.execute(
+                sql.SQL(
+                    "UPDATE {table} SET last_message_at = COALESCE(last_message_at, updated_at, started_at, CURRENT_TIMESTAMP) "
+                    "WHERE last_message_at IS NULL"
+                ).format(table=table)
+            )
+            cur.execute(
+                sql.SQL(
+                    "ALTER TABLE {table} ALTER COLUMN last_message_at SET DEFAULT CURRENT_TIMESTAMP"
+                ).format(table=table)
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ALTER COLUMN last_message_at SET NOT NULL").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS message_count INTEGER").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL(
+                    "UPDATE {table} SET message_count = COALESCE(message_count, 0) "
+                    "WHERE message_count IS NULL"
+                ).format(table=table)
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ALTER COLUMN message_count SET DEFAULT 0").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ALTER COLUMN message_count SET NOT NULL").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS status VARCHAR(16)").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL(
+                    "UPDATE {table} SET status = COALESCE(NULLIF(status, ''), 'active') "
+                    "WHERE status IS NULL OR status = ''"
+                ).format(table=table)
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ALTER COLUMN status SET DEFAULT 'active'").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ALTER COLUMN status SET NOT NULL").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS metadata JSONB").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL(
+                    "UPDATE {table} SET metadata = COALESCE(metadata, '{{}}'::jsonb) "
+                    "WHERE metadata IS NULL"
+                ).format(table=table)
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ALTER COLUMN metadata SET DEFAULT '{{}}'::jsonb").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ALTER COLUMN metadata SET NOT NULL").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL("COMMENT ON TABLE {table} IS {comment}").format(
+                    table=table,
+                    comment=sql.Literal(CONVERSATION_TOPICS_TABLE_COMMENT),
+                )
+            )
+            cur.execute(
+                sql.SQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS {index}
+                    ON {table} (user_id, session_id, last_message_at DESC)
+                    WHERE status = 'active'
+                    """
+                ).format(
+                    index=sql.Identifier(f"{table_name}_active_recent_idx"),
+                    table=table,
+                )
+            )
+            cur.execute(
+                sql.SQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS {index}
+                    ON {table} (user_id, session_id, started_at DESC)
+                    """
+                ).format(
+                    index=sql.Identifier(f"{table_name}_started_at_idx"),
+                    table=table,
+                )
+            )
+            cur.execute(
+                """
+                SELECT column_name, data_type, is_nullable, column_default
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = %s
+                ORDER BY ordinal_position
+                """,
+                (table_name,),
+            )
+            columns = cur.fetchall()
+
+    return {
+        "table_name": table_name,
+        "columns": columns,
+    }
+
+
+def create_conversation_topic(
+    *,
+    user_id: str,
+    session_id: str,
+    topic: str,
+    summary: str = "",
+    topic_id: UUID | str | None = None,
+    started_at: datetime | None = None,
+    metadata: dict[str, Any] | None = None,
+    table_name: str | None = None,
+) -> dict[str, Any]:
+    """Insert a virtual topic row and return the persisted record."""
+
+    table_name = table_name or settings.postgres_conversation_topics_table
+    table = sql.Identifier(table_name)
+    topic_id = topic_id or uuid4()
+    metadata = metadata or {}
+    _require_encrypted_topic_text("topic", topic)
+    _require_encrypted_topic_text("summary", summary)
+
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    INSERT INTO {table} (
+                        topic_id,
+                        user_id,
+                        session_id,
+                        topic,
+                        summary,
+                        started_at,
+                        updated_at,
+                        last_message_at,
+                        message_count,
+                        status,
+                        metadata
+                    )
+                    VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        COALESCE(%s, CURRENT_TIMESTAMP),
+                        CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP,
+                        0,
+                        'active',
+                        %s
+                    )
+                    RETURNING
+                        topic_id,
+                        user_id,
+                        session_id,
+                        topic,
+                        summary,
+                        started_at,
+                        updated_at,
+                        last_message_at,
+                        message_count,
+                        status,
+                        metadata
+                    """
+                ).format(table=table),
+                (
+                    topic_id,
+                    user_id,
+                    session_id,
+                    topic,
+                    summary,
+                    started_at,
+                    Jsonb(metadata),
+                ),
+            )
+            row = cur.fetchone()
+
+    return dict(row or {})
+
+
+def update_conversation_topic(
+    *,
+    topic_id: UUID | str,
+    topic: str | None = None,
+    summary: str | None = None,
+    message_increment: int = 1,
+    metadata: dict[str, Any] | None = None,
+    table_name: str | None = None,
+) -> dict[str, Any]:
+    """Refresh a topic after a new turn has been assigned to it."""
+
+    table_name = table_name or settings.postgres_conversation_topics_table
+    table = sql.Identifier(table_name)
+    if topic is not None:
+        _require_encrypted_topic_text("topic", topic)
+    if summary is not None:
+        _require_encrypted_topic_text("summary", summary)
+
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    UPDATE {table}
+                    SET topic = COALESCE(%s, topic),
+                        summary = COALESCE(%s, summary),
+                        updated_at = CURRENT_TIMESTAMP,
+                        last_message_at = CURRENT_TIMESTAMP,
+                        message_count = message_count + %s,
+                        metadata = CASE
+                            WHEN %s::jsonb IS NULL THEN metadata
+                            ELSE metadata || %s::jsonb
+                        END
+                    WHERE topic_id = %s
+                    RETURNING
+                        topic_id,
+                        user_id,
+                        session_id,
+                        topic,
+                        summary,
+                        started_at,
+                        updated_at,
+                        last_message_at,
+                        message_count,
+                        status,
+                        metadata
+                    """
+                ).format(table=table),
+                (
+                    topic,
+                    summary,
+                    message_increment,
+                    Jsonb(metadata) if metadata is not None else None,
+                    Jsonb(metadata) if metadata is not None else None,
+                    topic_id,
+                ),
+            )
+            row = cur.fetchone()
+
+    return dict(row or {})
+
+
+def list_recent_conversation_topics(
+    *,
+    user_id: str,
+    session_id: str,
+    limit: int = 5,
+    table_name: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return the active recent topics that can still be considered for context stitching."""
+
+    table_name = table_name or settings.postgres_conversation_topics_table
+    table = sql.Identifier(table_name)
+    limit = max(1, min(int(limit), 50))
+
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    SELECT
+                        topic_id,
+                        user_id,
+                        session_id,
+                        topic,
+                        summary,
+                        started_at,
+                        updated_at,
+                        last_message_at,
+                        message_count,
+                        status,
+                        metadata
+                    FROM {table}
+                    WHERE user_id = %s
+                      AND session_id = %s
+                      AND status = 'active'
+                    ORDER BY last_message_at DESC, started_at DESC
+                    LIMIT %s
+                    """
+                ).format(table=table),
+                (user_id, session_id, limit),
+            )
+            rows = cur.fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def get_conversation_topic(
+    *,
+    topic_id: UUID | str,
+    user_id: str,
+    session_id: str,
+    table_name: str | None = None,
+) -> dict[str, Any]:
+    """Return one active topic scoped to the Feishu user/session."""
+
+    table_name = table_name or settings.postgres_conversation_topics_table
+    table = sql.Identifier(table_name)
+
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    SELECT
+                        topic_id,
+                        user_id,
+                        session_id,
+                        topic,
+                        summary,
+                        started_at,
+                        updated_at,
+                        last_message_at,
+                        message_count,
+                        status,
+                        metadata
+                    FROM {table}
+                    WHERE topic_id = %s
+                      AND user_id = %s
+                      AND session_id = %s
+                      AND status = 'active'
+                    """
+                ).format(table=table),
+                (topic_id, user_id, session_id),
+            )
+            row = cur.fetchone()
+
+    return dict(row or {})
+
+
+def touch_conversation_topic_activity(
+    *,
+    topic_id: UUID | str,
+    user_id: str,
+    session_id: str,
+    table_name: str | None = None,
+) -> dict[str, Any]:
+    """Mark a topic as active after a completed turn is assigned to it."""
+
+    table_name = table_name or settings.postgres_conversation_topics_table
+    table = sql.Identifier(table_name)
+
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    UPDATE {table}
+                    SET updated_at = CURRENT_TIMESTAMP,
+                        last_message_at = CURRENT_TIMESTAMP,
+                        message_count = message_count + 1
+                    WHERE topic_id = %s
+                      AND user_id = %s
+                      AND session_id = %s
+                      AND status = 'active'
+                    RETURNING
+                        topic_id,
+                        user_id,
+                        session_id,
+                        topic,
+                        summary,
+                        started_at,
+                        updated_at,
+                        last_message_at,
+                        message_count,
+                        status,
+                        metadata
+                    """
+                ).format(table=table),
+                (topic_id, user_id, session_id),
+            )
+            row = cur.fetchone()
+
+    return dict(row or {})
+
+
+def _require_encrypted_topic_text(field_name: str, value: str) -> None:
+    if not value.startswith(CHAT_TEXT_ENCRYPTION_PREFIX):
+        raise ValueError(
+            f"conversation topic {field_name} must be encrypted with chat text encryption"
+        )
+
+
 def insert_chat_message(
     *,
     user_id: str,
@@ -140,6 +633,7 @@ def insert_chat_message(
     question: str,
     answer: str,
     user_name: str | None = None,
+    topic_id: UUID | str | None = None,
     table_name: str | None = None,
 ) -> dict[str, Any]:
     """Insert one chat message row and return the inserted values."""
@@ -157,15 +651,17 @@ def insert_chat_message(
                         user_name,
                         session_id,
                         conversation_id,
+                        topic_id,
                         question,
                         answer
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     RETURNING
                         user_id,
                         user_name,
                         session_id,
                         conversation_id,
+                        topic_id,
                         create_time,
                         question,
                         answer
@@ -176,6 +672,7 @@ def insert_chat_message(
                     user_name,
                     session_id,
                     conversation_id,
+                    topic_id,
                     question,
                     answer,
                 ),
@@ -217,6 +714,7 @@ def create_chat_message(
                         user_name,
                         session_id,
                         conversation_id,
+                        topic_id,
                         create_time,
                         question,
                         answer
@@ -236,6 +734,7 @@ def update_chat_answer(
     conversation_id: str,
     answer: str,
     user_name: str | None = None,
+    topic_id: UUID | str | None = None,
     table_name: str | None = None,
 ) -> dict[str, Any]:
     """Attach an answer to the latest matching chat row."""
@@ -250,7 +749,8 @@ def update_chat_answer(
                     """
                     UPDATE {table}
                     SET answer = %s,
-                        user_name = COALESCE(%s, user_name)
+                        user_name = COALESCE(%s, user_name),
+                        topic_id = COALESCE(%s::uuid, topic_id)
                     WHERE ctid = (
                         SELECT ctid
                         FROM {table}
@@ -266,16 +766,107 @@ def update_chat_answer(
                         user_name,
                         session_id,
                         conversation_id,
+                        topic_id,
                         create_time,
                         question,
                         answer
                     """
                 ).format(table=table),
-                (answer, user_name, user_id, session_id, conversation_id),
+                (answer, user_name, topic_id, user_id, session_id, conversation_id),
             )
             row = cur.fetchone()
 
     return dict(row or {})
+
+
+def assign_latest_chat_message_topic(
+    *,
+    user_id: str,
+    session_id: str,
+    conversation_id: str,
+    topic_id: UUID | str,
+    table_name: str | None = None,
+) -> dict[str, Any]:
+    """Attach the latest matching chat row to a virtual topic."""
+
+    table_name = table_name or settings.postgres_chat_table
+    table = sql.Identifier(table_name)
+
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    UPDATE {table}
+                    SET topic_id = %s
+                    WHERE ctid = (
+                        SELECT ctid
+                        FROM {table}
+                        WHERE user_id = %s
+                          AND session_id = %s
+                          AND conversation_id = %s
+                        ORDER BY create_time DESC, ctid DESC
+                        LIMIT 1
+                    )
+                    RETURNING
+                        user_id,
+                        user_name,
+                        session_id,
+                        conversation_id,
+                        topic_id,
+                        create_time,
+                        question,
+                        answer
+                    """
+                ).format(table=table),
+                (topic_id, user_id, session_id, conversation_id),
+            )
+            row = cur.fetchone()
+
+    return dict(row or {})
+
+
+def list_chat_messages_by_topic(
+    *,
+    topic_id: UUID | str,
+    user_id: str,
+    session_id: str,
+    limit: int = 10,
+    table_name: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return recent chat turns already attached to one virtual topic."""
+
+    table_name = table_name or settings.postgres_chat_table
+    table = sql.Identifier(table_name)
+    limit = max(1, min(int(limit), 100))
+
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    SELECT
+                        user_id,
+                        user_name,
+                        session_id,
+                        conversation_id,
+                        topic_id,
+                        create_time,
+                        question,
+                        answer
+                    FROM {table}
+                    WHERE topic_id = %s
+                      AND user_id = %s
+                      AND session_id = %s
+                    ORDER BY create_time DESC, ctid DESC
+                    LIMIT %s
+                    """
+                ).format(table=table),
+                (topic_id, user_id, session_id, limit),
+            )
+            rows = cur.fetchall()
+
+    return [dict(row) for row in reversed(rows)]
 
 
 def ensure_feishu_answer_feedback_table() -> None:

@@ -456,6 +456,7 @@ async def _answer_feishu_message(
                 conversation_id=chat_id,
                 question=question,
                 answer=response.answer,
+                topic_id=response.topic_id,
             )
             _debug(
                 "chat answer recorded",

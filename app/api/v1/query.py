@@ -3,13 +3,19 @@ from __future__ import annotations
 import re
 import unicodedata
 from typing import Any
+from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, HTTPException
 
 from app.core.config import settings
 from app.schemas.query import N8nQueryRequest, QueryRequest, QueryResponse
+from app.services.chat import list_recent_conversation_topic_records
+from app.services.chat.topic_selection import consume_topic_selection
 
+
+NO_RECENT_CONVERSATION = "无近期对话"
+TOPIC_ID_KEYS = ("topic_id", "current_topic_id", "selected_topic_id")
 
 router = APIRouter(prefix="/query", tags=["query"])
 
@@ -25,9 +31,17 @@ async def query_knowledge_base(request: QueryRequest) -> QueryResponse:
 
 async def ask_knowledge_base(request: QueryRequest) -> QueryResponse:
     """Forward a user question to the n8n QA agent and normalize its answer."""
+
     sanitized_question = sanitize_question_for_n8n(request.question)
     n8n_request = request.model_copy(update={"question": sanitized_question})
-    payload = N8nQueryRequest(**n8n_request.model_dump()).model_dump()
+    topic_context = await build_topic_context_for_n8n(
+        user_id=request.user_id,
+        session_id=request.session_id,
+    )
+    payload = N8nQueryRequest(
+        **n8n_request.model_dump(),
+        **topic_context,
+    ).model_dump()
     print(
         "[query] n8n request "
         f"url={settings.n8n_query_webhook_url!r} "
@@ -36,6 +50,9 @@ async def ask_knowledge_base(request: QueryRequest) -> QueryResponse:
         f"user_id={request.user_id!r} "
         f"session_id={request.session_id!r} "
         f"conversation_id={request.conversation_id!r} "
+        f"current_topic={topic_context['current_topic']!r} "
+        f"current_summary={topic_context['current_summary']!r} "
+        f"history_topics={len(topic_context['history_topics'])} topics "
         f"metadata_keys={list(request.metadata.keys())}",
         flush=True,
     )
@@ -73,6 +90,10 @@ async def ask_knowledge_base(request: QueryRequest) -> QueryResponse:
 
     raw_response = _parse_n8n_response(response)
     answer = _extract_answer(raw_response)
+    topic_id = _extract_topic_id(raw_response) or consume_topic_selection(
+        user_id=request.user_id,
+        session_id=request.session_id,
+    )
 
     if not answer:
         raise HTTPException(
@@ -83,11 +104,60 @@ async def ask_knowledge_base(request: QueryRequest) -> QueryResponse:
     return QueryResponse(
         question=request.question,
         answer=answer,
+        topic_id=topic_id,
     )
+
+
+async def build_topic_context_for_n8n(
+    *,
+    user_id: str | None,
+    session_id: str | None,
+) -> dict[str, Any]:
+    """Build the compact topic-context payload n8n uses for topic routing."""
+
+    fallback = {
+        "current_topic": NO_RECENT_CONVERSATION,
+        "current_summary": NO_RECENT_CONVERSATION,
+        "history_topics": [],
+    }
+    if not user_id or not session_id:
+        return fallback
+
+    try:
+        topics = await list_recent_conversation_topic_records(
+            user_id=user_id,
+            session_id=session_id,
+            limit=settings.conversation_topic_recent_limit,
+        )
+    except Exception as exc:  # noqa: BLE001 - topic context should not block QA.
+        print(
+            "[query][warn] failed to load recent conversation topics "
+            f"user_id={user_id!r} session_id={session_id!r} error={exc}",
+            flush=True,
+        )
+        return fallback
+
+    if not topics:
+        return fallback
+
+    history_topics = [
+        {
+            "topic_id": str(topic["topic_id"]),
+            "topic": topic["topic"],
+            "summary": topic["summary"],
+        }
+        for topic in topics
+    ]
+    return {
+        "current_topic": history_topics[0]["topic"] or NO_RECENT_CONVERSATION,
+        "current_summary": history_topics[0]["summary"] or NO_RECENT_CONVERSATION,
+        "history_topics": history_topics,
+    }
 
 
 def sanitize_question_for_n8n(question: str) -> str:
     """Normalize user text before n8n inserts it into workflow JSON expressions."""
+
     text = unicodedata.normalize("NFC", question)
     text = text.replace("\ufeff", "").replace("\u200b", "")
     text = text.replace("\u200c", "").replace("\u200d", "")
@@ -144,6 +214,43 @@ def _extract_answer(raw_response: Any) -> str:
                     return answer
 
     return ""
+
+
+def _extract_topic_id(raw_response: Any) -> str | None:
+    if isinstance(raw_response, list):
+        for item in raw_response:
+            topic_id = _extract_topic_id(item)
+            if topic_id:
+                return topic_id
+        return None
+
+    if not isinstance(raw_response, dict):
+        return None
+
+    for key in TOPIC_ID_KEYS:
+        topic_id = _normalize_topic_id(raw_response.get(key))
+        if topic_id:
+            return topic_id
+
+    for key in ("topic", "selected_topic", "current_topic", "data", "result"):
+        value = raw_response.get(key)
+        if isinstance(value, (dict, list)):
+            topic_id = _extract_topic_id(value)
+            if topic_id:
+                return topic_id
+    return None
+
+
+def _normalize_topic_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return str(UUID(text))
+    except ValueError:
+        return None
 
 
 def _response_text(response: httpx.Response) -> str:

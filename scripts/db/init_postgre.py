@@ -31,27 +31,17 @@ load_env_file(PROJECT_ROOT / ".env")
 from app.db.postgres import (  # noqa: E402
     check_postgres_health,
     ensure_chat_messages_table,
+    ensure_conversation_topics_table,
     insert_chat_message,
 )
 
 
 SAMPLE_MESSAGE = {
-    "question": (
-        "我下周要组织一批新员工参加入职培训，培训结束后需要进行线上考核。作为管理员，"
-        "我需要完成以下几个关联任务：首先，我需要创建一个新的题库专门用来存放这次培训的考核题目，"
-        "并且希望能够快速批量导入而不是一道道手动录入；其次，我要基于这个题库发布一场正式的考试，"
-        "有几个硬性要求：为了防止员工重复刷分，必须限制每人只能考一次，如果试卷里的题目数量不足系统"
-        "要自动禁止考试不能凑数，而且考试中必须包含简答题需要人工批改而不是系统自动判分，还要指定"
-        "具体的阅卷负责人；最后，我需要把这场考试添加到现有的“新员工入职培训”学习项目中作为结业考核环节。"
-        "请详细说明完成这些任务的每个步骤的完整操作路径、关键设置点的具体选项和按钮位置，以及根据操作指引，"
-        "哪些地方最容易被忽略或操作失误导致整个设置无效？"
-    ),
+    "question": "请说明如何批量导入培训题目并发布考试。",
     "user_id": "on_ebc25d5669cabb3440819db2cfaa5c7c",
     "session_id": "oc_161f3d51b1e5caf056812ab5312f6cb6",
     "conversation_id": "oc_161f3d51b1e5caf056812ab5312f6cb6",
     "answer": "初始化测试回答",
-    "fallback": False,
-    "reason": "",
 }
 
 
@@ -77,7 +67,10 @@ def main() -> None:
     if args.check_only:
         result = check_postgres_health()
     else:
-        result = ensure_chat_messages_table(table_name=args.table_name)
+        result = {
+            "chat_messages": ensure_chat_messages_table(table_name=args.table_name),
+            "conversation_topics": ensure_conversation_topics_table(),
+        }
         if args.insert_sample:
             result["sample_row"] = insert_chat_message(
                 table_name=args.table_name,

@@ -22,10 +22,14 @@ class N8nQueryRequest(BaseModel):
     session_id: str | None = None
     conversation_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    current_topic: str = "无近期对话"
+    current_summary: str = "无近期对话"
+    history_topics: list[dict[str, Any]] = Field(default_factory=list)
     source: Literal["fastapi"] = "fastapi"
 
 
 class QueryResponse(BaseModel):
     question: str
     answer: str
+    topic_id: str | None = None
     status: Literal["success"] = "success"

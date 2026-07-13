@@ -2,12 +2,14 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+from app.api.v1.chat import router as chat_router
 from app.api.v1.documents import router as documents_router
 from app.api.v1.feishu import router as feishu_router
 from app.api.v1.query import router as query_router
 from app.api.v1.retrieval import router as retrieval_router
 
 router = APIRouter()
+router.include_router(chat_router)
 router.include_router(documents_router)
 router.include_router(feishu_router)
 router.include_router(query_router)
