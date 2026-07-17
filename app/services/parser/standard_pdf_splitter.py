@@ -167,34 +167,6 @@ STANDARD_SMALL_RESIDUAL_FONT_DELTA = 0.7
 STANDARD_SMALL_RESIDUAL_MAX_CHARS = 180
 
 
-def parse_standard_pdf_document(
-    file_path: str | Path,
-    *,
-    image_analysis_workers: int = 3,
-    title_page_max_chars: int = DEFAULT_TITLE_PAGE_MAX_CHARS,
-    source_reference: str | Path | None = None,
-    split_prefix: str | None = None,
-) -> list[dict[str, Any]]:
-    """Split long ASME/ASTM standard PDFs into smaller PDF sections.
-
-    This parser is intentionally focused on the first debugging step: detecting
-    standard title pages and writing per-standard PDF chunks. Full text/table
-    extraction can be layered onto these section files after the boundary logic
-    is stable.
-    """
-    sections = split_standard_pdf_document(
-        file_path,
-        image_analysis_workers=image_analysis_workers,
-        title_page_max_chars=title_page_max_chars,
-        source_reference=source_reference,
-        split_prefix=split_prefix,
-    )
-    items, txt_paths = extract_and_write_standard_section_texts(sections)
-
-    _log(f"wrote parsed txt files: {len(txt_paths)}")
-    return items
-
-
 def split_standard_pdf_document(
     file_path: str | Path,
     *,
@@ -348,6 +320,53 @@ def upload_standard_pdf_sections_to_minio(
             )
         )
     return uploaded
+
+
+def publish_standard_pdf_sections_from_manifest(
+    manifest_path: str | Path,
+    *,
+    source_reference: str | Path | None = None,
+) -> list[StandardPdfSection]:
+    """Publish existing local section PDFs and persist their canonical source URIs."""
+    path = Path(manifest_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Standard split manifest not found: {path}")
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    sections = [
+        StandardPdfSection(
+            index=int(item.get("index") or 0),
+            title=str(item.get("title") or ""),
+            standard_code=str(item.get("standard_code") or ""),
+            start_page=int(item.get("start_page") or 0),
+            end_page=int(item.get("end_page") or 0),
+            output_path=str(item.get("output_path") or ""),
+            section_dir=str(item.get("section_dir") or ""),
+            text_pdf_path=str(item.get("text_pdf_path") or ""),
+            source_uri=str(item.get("source_uri") or ""),
+        )
+        for item in payload.get("sections", [])
+        if isinstance(item, dict)
+    ]
+    if not sections:
+        raise ValueError(f"Standard split manifest contains no sections: {path}")
+    if all(section.source_uri for section in sections):
+        return sections
+
+    source_file = str(payload.get("source_pdf") or "").strip()
+    source_ref = source_reference or payload.get("source_reference") or source_file
+    if not source_file or not str(source_ref or "").strip():
+        raise ValueError(f"Standard split manifest is missing its parent source: {path}")
+
+    published = upload_standard_pdf_sections_to_minio(
+        source_file,
+        sections,
+        source_reference=source_ref,
+    )
+    payload["source_reference"] = str(source_ref)
+    payload["sections"] = [asdict(section) for section in published]
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return published
 
 
 def write_split_manifest(
@@ -1649,7 +1668,11 @@ def _section_ranges(
 
     ranges: list[tuple[StandardTitlePage | None, int, int]] = []
     for index, title_page in enumerate(title_pages):
-        start_index = max(title_page.page_index, content_start_index)
+        start_index = (
+            content_start_index
+            if index == 0
+            else max(title_page.page_index, content_start_index)
+        )
         next_start = title_pages[index + 1].page_index if index + 1 < len(title_pages) else content_end_index + 1
         end_index = min(next_start - 1, content_end_index)
         if start_index <= end_index:

@@ -119,3 +119,40 @@ def test_embed_prepared_document_reuses_existing_embedding_when_rebuild_disabled
 
     assert result.embedding_file == embedding_file
     assert result.upsert_count == 0
+
+
+def test_embed_prepared_document_force_upserts_migrated_metadata(tmp_path) -> None:
+    chunk_file = tmp_path / "demo.chunks.json"
+    embedding_file = tmp_path / "demo.embeddings.json"
+    chunk_file.write_text("[]", encoding="utf-8")
+    embedding_file.write_text("[]", encoding="utf-8")
+    prepared = PreparedDocument(
+        file_path="minio://knowledge-raw-docs/产品标准/demo(切分版)/SA-1.pdf",
+        txt_file=tmp_path / "demo.txt",
+        chunk_file=chunk_file,
+        embedding_file=embedding_file,
+        chunks=[],
+        force_upsert=True,
+    )
+
+    class EmbeddingServiceStub:
+        def embed_chunk_file(self, *_args, **_kwargs):
+            raise AssertionError("existing embedding should be reused")
+
+    class VectorStoreStub:
+        def upsert_embedding_file(self, *_args, **_kwargs):
+            return {"upsert_count": 1}
+
+    result = embed_prepared_document(
+        prepared,
+        embedding_service=EmbeddingServiceStub(),
+        vector_store_service=VectorStoreStub(),
+        flush=True,
+        bm25_model=None,
+        bm25_model_file=None,
+        rebuild=False,
+        skip_existing_upsert=True,
+    )
+
+    assert result.upsert_count == 1
+    assert not result.upsert_skipped

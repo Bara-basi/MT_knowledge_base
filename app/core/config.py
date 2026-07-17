@@ -77,6 +77,7 @@ class Settings:
     neo4j_user: str = os.getenv("NEO4J_USER", "neo4j")
     neo4j_password: str = os.getenv("NEO4J_PASSWORD", "")
     neo4j_database: str = os.getenv("NEO4J_DATABASE", "neo4j")
+    neo4j_query_timeout: float = float(os.getenv("NEO4J_QUERY_TIMEOUT", "10"))
     neo4j_graph_name: str = os.getenv("NEO4J_GRAPH_NAME", "MTSCO知识图谱")
 
     minio_endpoint: str = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")

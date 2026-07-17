@@ -18,8 +18,13 @@ from app.services.embedding import (
     load_bm25_embedding_function,
     load_chunks,
 )
-from app.services.parser.parser import parse_document
+from app.services.parser.parser import (
+    is_generated_standard_pdf_section,
+    is_standard_pdf_source,
+    parse_document,
+)
 from app.services.parser.paths import processing_document_dir
+from app.services.parser.standard_pdf_splitter import publish_standard_pdf_sections_from_manifest
 from app.services.vector_store import VectorStoreService, load_embedding_records
 
 
@@ -44,6 +49,7 @@ class PreparedDocument:
     chunk_file: Path
     embedding_file: Path
     chunks: list
+    force_upsert: bool = False
 
 
 def ingest_document(
@@ -115,6 +121,10 @@ def prepare_document(
     rebuild: bool = True,
     parse: bool = True,
 ) -> PreparedDocument:
+    if is_standard_pdf_document(file_path):
+        raise ValueError(
+            "Standard PDFs produce multiple prepared documents; use prepare_documents() instead."
+        )
     document_name = _source_stem(file_path)
     processing_dir = processing_document_dir(file_path)
     txt_file = processing_dir / "txt" / f"{document_name}.txt"
@@ -161,22 +171,45 @@ def prepare_standard_pdf_sections(
         section_txt_files = find_standard_section_txt_files(processing_dir)
     if not section_txt_files:
         raise FileNotFoundError(f"No standard section txt files found under: {processing_dir}")
+    if any(standard_section_source_for_txt(path) is None for path in section_txt_files):
+        publish_standard_pdf_sections_from_manifest(
+            processing_dir / "manifest.json",
+            source_reference=file_path,
+        )
 
     prepared_documents: list[PreparedDocument] = []
     for txt_file in section_txt_files:
         section_dir = txt_file.parent.parent
         section_pdf = section_pdf_for_txt(txt_file)
-        source_file = standard_section_source_for_txt(txt_file) or (
-            section_pdf if section_pdf.exists() else txt_file
-        )
+        source_file = standard_section_source_for_txt(txt_file)
+        if source_file is None:
+            raise ValueError(
+                "Standard section is missing its published source_uri after publication: "
+                f"{section_pdf}"
+            )
         chunk_file = section_dir / "chunk" / f"{txt_file.stem}.chunks.json"
         embedding_file = section_dir / "embedding" / f"{txt_file.stem}.embeddings.json"
+        force_upsert = False
         if not rebuild and chunk_file.exists():
             chunks = load_chunks(chunk_file)
+            if not _chunks_reference_source(chunks, source_file):
+                parsed_items = load_items_from_txt(txt_file)
+                chunks = split_items(parsed_items, source_file=source_file)
+                save_chunks(chunks, chunk_file)
+                force_upsert = True
         else:
             parsed_items = load_items_from_txt(txt_file)
             chunks = split_items(parsed_items, source_file=source_file)
             save_chunks(chunks, chunk_file)
+        if (
+            not rebuild
+            and embedding_file.exists()
+            and not _embedding_file_references_source(embedding_file, source_file)
+        ):
+            embedding_file.unlink()
+            force_upsert = True
+        if not rebuild and not embedding_file.exists():
+            force_upsert = True
         prepared_documents.append(
             PreparedDocument(
                 file_path=source_file,
@@ -184,6 +217,7 @@ def prepare_standard_pdf_sections(
                 chunk_file=chunk_file,
                 embedding_file=embedding_file,
                 chunks=chunks,
+                force_upsert=force_upsert,
             )
         )
     return prepared_documents
@@ -206,10 +240,10 @@ def standard_section_source_for_txt(txt_file: Path) -> str | None:
     for section in payload.get("sections", []):
         if not isinstance(section, dict):
             continue
-        output_path = Path(str(section.get("output_path") or ""))
+        output_path = PurePosixPath(str(section.get("output_path") or "").replace("\\", "/"))
         if output_path.stem == txt_file.stem:
             source_uri = str(section.get("source_uri") or "").strip()
-            return source_uri or None
+            return parse_raw_document_reference(source_uri).uri if source_uri else None
     return None
 
 
@@ -240,7 +274,7 @@ def embed_prepared_document(
     upsert_count = 0
     upsert_skipped = False
     if vector_store_service is not None:
-        if skip_existing_upsert and embedding_file_exists_in_vector_store(
+        if skip_existing_upsert and not prepared.force_upsert and embedding_file_exists_in_vector_store(
             prepared.embedding_file,
             vector_store_service,
         ):
@@ -288,12 +322,11 @@ def embedding_file_file_ids(embedding_file: Path) -> list[str]:
 
 def find_document_files(input_path: str | Path, *, recursive: bool) -> list[str]:
     objects = list_raw_document_objects(str(input_path or ""), recursive=recursive)
-    skipped_prefixes = split_version_source_prefixes(reference.object_name for reference in objects)
     return sorted(
         reference.uri
         for reference in objects
         if is_supported_document_name(reference.object_name)
-        and not is_shadowed_by_split_version(reference.object_name, skipped_prefixes)
+        and not is_generated_standard_pdf_section(reference.object_name)
     )
 
 
@@ -303,42 +336,43 @@ def is_supported_document_name(name: str) -> bool:
 
 
 def is_standard_pdf_document(path: str | Path) -> bool:
-    normalized = str(path).replace("\\", "/")
-    return (
-        _source_suffix(path) == ".pdf"
-        and "鏍囧噯鏂囨。" in normalized
-        and "(鍒囧垎鐗?" not in normalized
-    )
-
-
-def split_version_source_prefixes(object_names) -> set[str]:
-    prefixes: set[str] = set()
-    for object_name in object_names:
-        parts = PurePosixPath(str(object_name).replace("\\", "/")).parts
-        for index, part in enumerate(parts[:-1]):
-            if part.endswith("(鍒囧垎鐗?"):
-                original = part[: -len("(鍒囧垎鐗?")]
-                prefixes.add("/".join((*parts[:index], original)))
-    return {prefix for prefix in prefixes if prefix}
-
-
-def is_shadowed_by_split_version(object_name: str, skipped_prefixes: set[str]) -> bool:
-    normalized = str(object_name).replace("\\", "/").strip("/")
-    if "(鍒囧垎鐗?" in normalized:
-        return False
-    for prefix in skipped_prefixes:
-        if normalized.startswith(f"{prefix}/"):
-            return True
-        original_file = f"{prefix}{PurePosixPath(normalized).suffix}"
-        if normalized == original_file:
-            return True
-    return False
+    return is_standard_pdf_source(path)
 
 
 def document_file_id(file_path: str | Path) -> str:
     suffix = _source_suffix(file_path)
     file_type = "doc" if suffix == ".docx" else suffix.lstrip(".") or "unknown"
     return build_file_id(file_type, _source_stem(file_path) or "unknown")
+
+
+def _chunks_reference_source(chunks: list, source_file: str | Path) -> bool:
+    if not chunks:
+        return True
+    expected = str(source_file).replace("\\", "/").strip()
+    return all(
+        str(getattr(chunk, "metadata", {}).get("file_path") or "")
+        .replace("\\", "/")
+        .strip()
+        == expected
+        for chunk in chunks
+    )
+
+
+def _embedding_file_references_source(
+    embedding_file: Path,
+    source_file: str | Path,
+) -> bool:
+    records = load_embedding_records(embedding_file)
+    if not records:
+        return True
+    expected = str(source_file).replace("\\", "/").strip()
+    return all(
+        str((record.get("metadata") or {}).get("file_path") or "")
+        .replace("\\", "/")
+        .strip()
+        == expected
+        for record in records
+    )
 
 
 def _source_parts(path: str | Path) -> PurePosixPath:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from app.db.minio import download_raw_document_to_file, parse_raw_document_reference
 
@@ -29,14 +29,16 @@ def parse_document(
 
         return parse_powerpoint_document(path, image_analysis_workers=image_analysis_workers)
     if suffix == ".pdf":
-        if _is_standard_pdf_source(source):
-            from app.services.parser.standard_pdf_parser import parse_standard_pdf_document
+        if is_standard_pdf_source(source):
+            from app.services.parser.standard_pdf_parser import parse_standard_pdf_sections
+            from app.services.parser.standard_pdf_splitter import split_standard_pdf_document
 
-            return parse_standard_pdf_document(
+            sections = split_standard_pdf_document(
                 path,
                 image_analysis_workers=image_analysis_workers,
                 source_reference=source,
             )
+            return parse_standard_pdf_sections(sections)
         from app.services.parser.pdf_parser import parse_pdf_document
 
         return parse_pdf_document(path, image_analysis_workers=image_analysis_workers)
@@ -69,9 +71,28 @@ def _is_local_data_raw_path(path: Path) -> bool:
     return True
 
 
-def _is_standard_pdf_source(value: str) -> bool:
-    normalized = value.strip().replace("\\", "/")
-    return "标准文档" in normalized and "(切分版)" not in normalized
+def is_standard_pdf_source(value: str | Path) -> bool:
+    """Return whether a PDF needs the split-then-parse standard pipeline."""
+    normalized = str(value).strip().replace("\\", "/")
+    decoded = unquote(normalized)
+    parsed = urlparse(decoded)
+    source_path = Path(parsed.path if parsed.scheme else decoded)
+    if source_path.suffix.lower() != ".pdf" or is_generated_standard_pdf_section(decoded):
+        return False
+    return (
+        "标准文档" in decoded
+        or "产品标准" in decoded
+        or source_path.name.upper().startswith("ASME")
+    )
+
+
+def is_generated_standard_pdf_section(value: str | Path) -> bool:
+    """Return whether a path belongs to generated ``(切分版)`` section PDFs."""
+    return "(切分版)" in unquote(str(value).replace("\\", "/"))
+
+
+# Backward-compatible alias for callers that used the previous private helper.
+_is_standard_pdf_source = is_standard_pdf_source
 
 
 if __name__ == "__main__":

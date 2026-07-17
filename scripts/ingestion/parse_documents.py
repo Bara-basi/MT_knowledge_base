@@ -9,7 +9,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.services.parser.parser import parse_document
+from app.services.parser.parser import is_generated_standard_pdf_section, parse_document
 from app.services.parser.paths import processing_subdir
 from app.db.minio import list_raw_document_objects, parse_raw_document_reference
 
@@ -112,14 +112,11 @@ def main() -> None:
 
 def find_document_files(input_path: str | Path, *, recursive: bool) -> list[str]:
     objects = list_raw_document_objects(str(input_path or ""), recursive=recursive)
-    skipped_prefixes = split_version_source_prefixes(
-        reference.object_name for reference in objects
-    )
     return sorted(
         reference.uri
         for reference in objects
         if is_supported_document(reference.object_name)
-        and not is_shadowed_by_split_version(reference.object_name, skipped_prefixes)
+        and not is_generated_standard_pdf_section(reference.object_name)
     )
 
 
@@ -138,30 +135,6 @@ def _source_parts(path: str | Path) -> PurePosixPath:
     if value.startswith("minio://") or value.startswith("s3://") or "data/raw/" in value.lower():
         return PurePosixPath(parse_raw_document_reference(value).object_name)
     return PurePosixPath(value)
-
-
-def split_version_source_prefixes(object_names) -> set[str]:
-    prefixes: set[str] = set()
-    for object_name in object_names:
-        parts = PurePosixPath(str(object_name).replace("\\", "/")).parts
-        for index, part in enumerate(parts[:-1]):
-            if part.endswith("(切分版)"):
-                original = part[: -len("(切分版)")]
-                prefixes.add("/".join((*parts[:index], original)))
-    return {prefix for prefix in prefixes if prefix}
-
-
-def is_shadowed_by_split_version(object_name: str, skipped_prefixes: set[str]) -> bool:
-    normalized = str(object_name).replace("\\", "/").strip("/")
-    if "(切分版)" in normalized:
-        return False
-    for prefix in skipped_prefixes:
-        if normalized.startswith(f"{prefix}/"):
-            return True
-        original_file = f"{prefix}{PurePosixPath(normalized).suffix}"
-        if normalized == original_file:
-            return True
-    return False
 
 
 if __name__ == "__main__":
