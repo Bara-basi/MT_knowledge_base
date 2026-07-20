@@ -4,7 +4,7 @@ from collections.abc import Generator
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
-from neo4j.exceptions import Neo4jError
+from neo4j.exceptions import DriverError, Neo4jError
 
 from app.schemas.graph import (
     GraphQueryRequest,
@@ -71,7 +71,7 @@ def query_graph(
             )
     except (GraphQueryValidationError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Neo4jError as exc:
+    except (DriverError, Neo4jError) as exc:
         raise HTTPException(status_code=503, detail="Neo4j graph query failed") from exc
     return GraphQueryResponse(
         return_type=request.return_type,
@@ -98,7 +98,7 @@ def find_product_standards(
         )
     except (GraphQueryValidationError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Neo4jError as exc:
+    except (DriverError, Neo4jError) as exc:
         raise HTTPException(status_code=503, detail="Neo4j graph query failed") from exc
     return ProductStandardsResponse.model_validate(result)
 
@@ -121,6 +121,6 @@ def find_standard_context(
         )
     except (GraphQueryValidationError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Neo4jError as exc:
+    except (DriverError, Neo4jError) as exc:
         raise HTTPException(status_code=503, detail="Neo4j graph query failed") from exc
     return StandardContextResponse.model_validate(result)

@@ -384,10 +384,20 @@ crontab -e
 ```bash
 CRON_TZ=Asia/Shanghai
 0 9 * * * cd /path/to/MTSCO_knowledge_base && .venv/bin/python scripts/reports/send_daily_report.py >> logs/daily_report.log 2>&1
+35 17 * * 5 cd /path/to/MTSCO_knowledge_base && .venv/bin/python scripts/reports/send_weekly_report.py >> logs/weekly_report.log 2>&1
 ```
+
+周报统计最近一个已结束的“上周五 17:30—本周五 17:30”区间。需要立即验证发送效果时，可单次强制触发：
+
+```bash
+.venv/bin/python scripts/reports/send_weekly_report.py --force
+```
+
 本地window操作：
 ```powershell 
 .\.venv\Scripts\python.exe scripts\reports\send_daily_report.py --loop
+.\.venv\Scripts\python.exe scripts\reports\send_weekly_report.py --loop
+.\.venv\Scripts\python.exe scripts\reports\send_weekly_report.py --force
 ```
 > 查看任务状态
 ```powershell

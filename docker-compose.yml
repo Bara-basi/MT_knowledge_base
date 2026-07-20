@@ -18,11 +18,18 @@ services:
       POSTGRES_TIMEZONE: ${POSTGRES_TIMEZONE:-Etc/GMT+8}
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       CHAT_MESSAGE_ENCRYPTION_KEY: ${CHAT_MESSAGE_ENCRYPTION_KEY}
+      NEO4J_URI: ${NEO4J_INTERNAL_URI:-bolt://neo4j:7687}
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      NEO4J_DATABASE: ${NEO4J_DATABASE:-neo4j}
+      NEO4J_GRAPH_NAME: ${NEO4J_GRAPH_NAME:-MTSCO知识图谱}
+      NEO4J_QUERY_TIMEOUT: ${NEO4J_QUERY_TIMEOUT:-10}
       MINIO_ENDPOINT: ${MINIO_INTERNAL_ENDPOINT:-http://milvus-minio:9000}
       MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-http://localhost:9000}
       MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY_ID}
       MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_ACCESS_KEY}
       MINIO_BUCKET: ${APP_MINIO_BUCKET}
+      MINIO_STANDARD_ASSET_BUCKET: ${MINIO_STANDARD_ASSET_BUCKET:-knowledge-standard-assets}
       MINIO_SECURE: ${MINIO_SECURE:-false}
       USE_LOCAL_EMBEDDING_MODEL: ${USE_LOCAL_EMBEDDING_MODEL:-true}
       USE_LOCAL_RERANK_MODEL: ${USE_LOCAL_RERANK_MODEL:-true}
@@ -72,6 +79,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      neo4j:
+        condition: service_healthy
 
   milvus-etcd:
     image: quay.io/coreos/etcd:v3.5.18
@@ -105,6 +114,7 @@ services:
       /bin/sh -c "
       mc alias set local ${MINIO_INTERNAL_ENDPOINT:-http://milvus-minio:9000} ${MINIO_ACCESS_KEY_ID} ${MINIO_SECRET_ACCESS_KEY};
       mc mb --ignore-existing local/${APP_MINIO_BUCKET};
+      mc mb --ignore-existing local/${MINIO_STANDARD_ASSET_BUCKET:-knowledge-standard-assets};
       "
     networks:
       - ai-net
@@ -152,6 +162,16 @@ services:
       - neo4j_plugins:/plugins
     networks:
       - ai-net
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "password=$${NEO4J_AUTH#*/}; cypher-shell -a bolt://localhost:7687 -u neo4j -p \"$$password\" 'RETURN 1' >/dev/null 2>&1",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
   postgres:
     image: ${POSTGRES_IMAGE:-postgres:16-alpine}

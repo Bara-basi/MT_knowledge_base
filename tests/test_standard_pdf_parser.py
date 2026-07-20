@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import fitz
 
+from app.db.minio import build_minio_uri
 from app.services.parser.standard_pdf_parser import (
     StandardAsset,
     StandardPdfSection,
@@ -14,7 +16,85 @@ from app.services.parser.standard_pdf_parser import (
     split_standard_pdf,
     write_masked_text_pdfs,
 )
+from app.services.parser.standard_pdf_splitter import publish_standard_assets_from_manifest
 from app.services.parser.paths import processing_document_dir
+
+
+def test_publish_standard_assets_persists_canonical_minio_uri(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image_path = tmp_path / "table - TABLE 1.png"
+    image_path.write_bytes(b"png")
+    manifest_path = tmp_path / "assets_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "assets": [
+                    {
+                        "index": 1,
+                        "asset_type": "table",
+                        "caption": "TABLE 1",
+                        "section_index": 1,
+                        "standard_code": "SA-1",
+                        "section_page": 1,
+                        "source_page": 1,
+                        "bbox": [0, 0, 10, 10],
+                        "image_path": str(image_path),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    section = StandardPdfSection(
+        index=1,
+        title="Demo",
+        standard_code="SA-1",
+        start_page=1,
+        end_page=1,
+        output_path=str(tmp_path / "SA-1.pdf"),
+        source_uri=build_minio_uri(
+            "knowledge-raw-docs",
+            "产品标准/ASME-demo(切分版)/SA-1.pdf",
+        ),
+    )
+    uploads: list[tuple[str, str, str]] = []
+
+    class FakeClient:
+        def fput_object(self, bucket, object_name, path, **_kwargs):
+            uploads.append((bucket, object_name, path))
+
+    monkeypatch.setattr(
+        "app.services.parser.standard_pdf_splitter.ensure_bucket",
+        lambda bucket: bucket,
+    )
+    monkeypatch.setattr(
+        "app.services.parser.standard_pdf_splitter.get_minio_client",
+        lambda: FakeClient(),
+    )
+
+    assets = publish_standard_assets_from_manifest(
+        manifest_path,
+        [section],
+        asset_bucket="knowledge-standard-assets",
+        verify_existing=False,
+    )
+
+    expected_uri = build_minio_uri(
+        "knowledge-standard-assets",
+        "产品标准/ASME-demo(切分版)/SA-1/table - TABLE 1.png",
+    )
+    assert assets[0].source_uri == expected_uri
+    assert uploads == [
+        (
+            "knowledge-standard-assets",
+            "产品标准/ASME-demo(切分版)/SA-1/table - TABLE 1.png",
+            str(image_path),
+        )
+    ]
+    saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert saved["assets"][0]["source_uri"] == expected_uri
 
 
 def _insert_centered_text(page, text: str, y: int, *, fontsize: int) -> None:

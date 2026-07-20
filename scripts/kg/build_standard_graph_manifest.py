@@ -4,12 +4,26 @@ import argparse
 import hashlib
 import json
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.db.minio import DEFAULT_RAW_DOCUMENT_BUCKET, build_minio_uri
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from app.db.minio import (
+    DEFAULT_RAW_DOCUMENT_BUCKET,
+    build_minio_uri,
+)
+from app.core.config import settings
+from app.services.parser.standard_pdf_splitter import (
+    StandardAsset,
+    StandardPdfSection,
+    publish_standard_assets_from_manifest,
+)
 
 
 STANDARD_VERSION = "ASME2023"
@@ -166,6 +180,62 @@ def find_section_docs(root: Path) -> list[SectionDoc]:
     return docs
 
 
+def load_published_sources(
+    processing_root: Path,
+    *,
+    asset_bucket: str = settings.minio_standard_asset_bucket,
+    publish_assets: bool = True,
+    verify_assets: bool = True,
+) -> tuple[dict[Path, str], dict[Path, str]]:
+    """Load canonical small-PDF and extracted-image URIs from parser manifests."""
+    section_sources: dict[Path, str] = {}
+    asset_sources: dict[Path, str] = {}
+    for volume_dir in sorted(path for path in processing_root.iterdir() if path.is_dir()):
+        split_manifest_path = volume_dir / "manifest.json"
+        asset_manifest_path = volume_dir / "assets_manifest.json"
+        if not split_manifest_path.is_file():
+            raise FileNotFoundError(f"Standard split manifest not found: {split_manifest_path}")
+        if not asset_manifest_path.is_file():
+            raise FileNotFoundError(f"Standard asset manifest not found: {asset_manifest_path}")
+
+        split_payload = json.loads(split_manifest_path.read_text(encoding="utf-8"))
+        sections = [StandardPdfSection(**item) for item in split_payload.get("sections", [])]
+        for section in sections:
+            if not section.source_uri:
+                raise ValueError(f"Standard section is not published to MinIO: {section.output_path}")
+            local_section_dir = (
+                Path(section.section_dir)
+                if section.section_dir
+                else Path(section.output_path).parent.parent
+            )
+            section_sources[local_section_dir.resolve()] = section.source_uri
+
+        if publish_assets:
+            assets: list[StandardAsset] | list[dict[str, Any]] = publish_standard_assets_from_manifest(
+                asset_manifest_path,
+                sections,
+                asset_bucket=asset_bucket,
+                verify_existing=verify_assets,
+            )
+        else:
+            asset_payload = json.loads(asset_manifest_path.read_text(encoding="utf-8"))
+            assets = [item for item in asset_payload.get("assets", []) if isinstance(item, dict)]
+
+        for asset in assets:
+            if isinstance(asset, StandardAsset):
+                image_path = asset.image_path
+                source_uri = asset.source_uri
+            else:
+                image_path = str(asset.get("image_path") or "")
+                source_uri = str(asset.get("source_uri") or "")
+            if not image_path or not source_uri:
+                raise ValueError(
+                    f"Standard asset is not published to MinIO: {image_path or asset_manifest_path}"
+                )
+            asset_sources[Path(image_path).resolve()] = source_uri
+    return section_sources, asset_sources
+
+
 def make_node(label: str, key: str, name: str, create_at: str, create_by: str, **properties: Any) -> dict[str, Any]:
     return {
         "id": node_id(label, key),
@@ -303,20 +373,88 @@ PRODUCT_STANDARD_MAP: dict[str, list[dict[str, Any]]] = {
     "bar": [
         {"standard": "ASTM A182", "context": "材质标准"},
     ],
+    "wire": [],
 }
 
 
-PRODUCT_NAMES = {
-    "seamless_pipe": "Seamless Pipe",
-    "seamless_tube": "Seamless Tube",
-    "welded_pipe": "Welded Pipe",
-    "welded_tube": "Welded Tube",
-    "butt_weld_fitting_forged": "Butt Weld Fitting (Forged)",
-    "low_pressure_fitting_cast": "Low Pressure Fitting (Cast)",
-    "high_pressure_fitting_forged": "High Pressure Fitting (Forged)",
-    "flange": "Flange",
-    "plate": "Plate",
-    "bar": "Bar",
+PRODUCT_METADATA: dict[str, dict[str, Any]] = {
+    "seamless_pipe": {
+        "name": "Seamless Pipe",
+        "chinese_name": "无缝管（Pipe）",
+        "aliases": ["无缝管", "无缝钢管", "无缝管道", "smls pipe", "seamless pipe"],
+        "category": "无缝管",
+        "product_type": "pipe",
+    },
+    "seamless_tube": {
+        "name": "Seamless Tube",
+        "chinese_name": "无缝管（Tube）",
+        "aliases": ["无缝管", "无缝换热管", "无缝仪表管", "smls tube", "seamless tube"],
+        "category": "无缝管",
+        "product_type": "tube",
+    },
+    "welded_pipe": {
+        "name": "Welded Pipe",
+        "chinese_name": "焊管（Pipe）",
+        "aliases": ["焊管", "焊接钢管", "焊接管道", "welded pipe"],
+        "category": "焊管",
+        "product_type": "pipe",
+    },
+    "welded_tube": {
+        "name": "Welded Tube",
+        "chinese_name": "焊管（Tube）",
+        "aliases": ["焊管", "焊接换热管", "焊接仪表管", "welded tube"],
+        "category": "焊管",
+        "product_type": "tube",
+    },
+    "butt_weld_fitting_forged": {
+        "name": "Butt Weld Fitting (Forged)",
+        "chinese_name": "对焊管件（锻造）",
+        "aliases": ["管件", "对焊管件", "锻制对焊管件", "对焊件", "butt weld fitting"],
+        "category": "管件",
+        "product_type": "forged_butt_weld_fitting",
+    },
+    "low_pressure_fitting_cast": {
+        "name": "Low Pressure Fitting (Cast)",
+        "chinese_name": "低压管件（铸造）",
+        "aliases": ["管件", "低压管件", "铸造管件", "铸件管件", "low pressure fitting"],
+        "category": "管件",
+        "product_type": "cast_low_pressure_fitting",
+    },
+    "high_pressure_fitting_forged": {
+        "name": "High Pressure Fitting (Forged)",
+        "chinese_name": "高压管件（锻造）",
+        "aliases": ["管件", "高压管件", "锻制管件", "承插管件", "high pressure fitting"],
+        "category": "管件",
+        "product_type": "forged_high_pressure_fitting",
+    },
+    "flange": {
+        "name": "Flange",
+        "chinese_name": "法兰",
+        "aliases": ["法兰", "法兰盘", "flange"],
+        "category": "法兰",
+        "product_type": "flange",
+    },
+    "plate": {
+        "name": "Plate",
+        "chinese_name": "板材",
+        "aliases": ["板材&棒材", "板材", "钢板", "不锈钢板", "板卷", "卷板", "plate"],
+        "category": "板材&棒材",
+        "product_type": "plate",
+    },
+    "bar": {
+        "name": "Bar",
+        "chinese_name": "棒材",
+        "aliases": ["板材&棒材", "棒材", "圆钢", "不锈钢棒材", "bar"],
+        "category": "板材&棒材",
+        "product_type": "bar",
+    },
+    "wire": {
+        "name": "Wire",
+        "chinese_name": "线材",
+        "aliases": ["线材", "不锈钢线材", "盘条", "wire", "wire rod"],
+        "category": "线材",
+        "product_type": "wire",
+    },
 }
 
 
@@ -326,9 +464,22 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
             fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
 
-def build_manifest(processing_root: Path, output_dir: Path) -> None:
+def build_manifest(
+    processing_root: Path,
+    output_dir: Path,
+    *,
+    asset_bucket: str = settings.minio_standard_asset_bucket,
+    publish_assets: bool = True,
+    verify_assets: bool = True,
+) -> None:
     create_at = now_iso()
     docs = find_section_docs(processing_root)
+    section_sources, asset_sources = load_published_sources(
+        processing_root,
+        asset_bucket=asset_bucket,
+        publish_assets=publish_assets,
+        verify_assets=verify_assets,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     nodes: dict[str, dict[str, Any]] = {}
@@ -392,14 +543,16 @@ def build_manifest(processing_root: Path, output_dir: Path) -> None:
             volume_doc_ids[doc.volume_dir] = volume_doc
 
         standard_id = add_standard(doc.standard_code, doc.standard_title)
+        section_source_uri = section_sources.get(doc.section_dir.resolve())
+        if not section_source_uri:
+            raise ValueError(f"No published small-PDF URI for section: {doc.section_dir}")
         section_doc_node = make_node(
             "Document",
             str(doc.section_dir),
             doc.section_dir.name,
             create_at,
             CREATE_BY_CODE,
-            file_path=str(doc.pdf_path or doc.txt_path),
-            txt_path=str(doc.txt_path),
+            file_path=section_source_uri,
             document_level="sub_document",
             source_volume=doc.volume_dir.name,
         )
@@ -419,7 +572,7 @@ def build_manifest(processing_root: Path, output_dir: Path) -> None:
                 create_at,
                 CREATE_BY_CODE,
                 title=section_title,
-                file_path=str(doc.txt_path),
+                file_path=section_source_uri,
             )
             nodes[section_node["id"]] = section_node
             edge = make_edge("has_section", section_doc_node["id"], section_node["id"], create_at, CREATE_BY_CODE)
@@ -428,6 +581,9 @@ def build_manifest(processing_root: Path, output_dir: Path) -> None:
         img_dir = doc.section_dir / "img"
         if img_dir.exists():
             for table_path in sorted(p for p in img_dir.iterdir() if p.is_file()):
+                table_source_uri = asset_sources.get(table_path.resolve())
+                if not table_source_uri:
+                    raise ValueError(f"No published MinIO image URI for table asset: {table_path}")
                 table_name = table_slug(table_path.stem)
                 table_node = make_node(
                     "Table",
@@ -436,7 +592,7 @@ def build_manifest(processing_root: Path, output_dir: Path) -> None:
                     create_at,
                     CREATE_BY_CODE,
                     title=table_path.stem,
-                    file_path=str(table_path),
+                    file_path=table_source_uri,
                 )
                 nodes[table_node["id"]] = table_node
                 edge = make_edge("has_table", section_doc_node["id"], table_node["id"], create_at, CREATE_BY_CODE)
@@ -451,14 +607,14 @@ def build_manifest(processing_root: Path, output_dir: Path) -> None:
                     ref_id,
                     create_at,
                     CREATE_BY_CODE,
-                    source_file=str(doc.json_path),
+                    source_file=section_source_uri,
                     raw_reference_code=ref_code,
                 )
                 edges[edge["id"]] = edge
 
     product_source_path = build_minio_uri(
         DEFAULT_RAW_DOCUMENT_BUCKET,
-        "产品知识框架讲解.docx",
+        "元数据文档/产品知识框架讲解.docx",
     )
     product_extract = {
         "source_file": product_source_path,
@@ -466,6 +622,7 @@ def build_manifest(processing_root: Path, output_dir: Path) -> None:
         "create_by": CREATE_BY_MANUAL,
         "note": "Extracted from the single image embedded in 产品知识框架讲解.docx.",
         "products": PRODUCT_STANDARD_MAP,
+        "product_metadata": PRODUCT_METADATA,
     }
     (output_dir / "product_standard_extract.json").write_text(
         json.dumps(product_extract, ensure_ascii=False, indent=2),
@@ -473,13 +630,18 @@ def build_manifest(processing_root: Path, output_dir: Path) -> None:
     )
 
     for product_key, refs in PRODUCT_STANDARD_MAP.items():
+        product_metadata = PRODUCT_METADATA[product_key]
         product_node = make_node(
             "Product",
             product_key,
-            PRODUCT_NAMES[product_key],
+            str(product_metadata["name"]),
             create_at,
             CREATE_BY_MANUAL,
             source_file=str(product_source_path),
+            chinese_name=product_metadata["chinese_name"],
+            aliases=product_metadata["aliases"],
+            category=product_metadata["category"],
+            product_type=product_metadata["product_type"],
         )
         nodes[product_node["id"]] = product_node
         for ref in refs:
@@ -541,7 +703,7 @@ This directory contains the candidate node and edge list for the standard-refere
 
 - `nodes.jsonl`: candidate nodes.
 - `edges.jsonl`: candidate edges.
-- `product_standard_extract.json`: manual extraction from `minio://knowledge-raw-docs/产品知识框架讲解.docx`.
+- `product_standard_extract.json`: manual extraction from `minio://knowledge-raw-docs/元数据文档/产品知识框架讲解.docx`.
 - `summary.json`: machine-readable counts and paths.
 - `summary.json` also declares `subgraph_name`; `scripts/kg/import_graph_manifest.py` reads it as the default `sub_graph_name` property during Neo4j import.
 
@@ -567,8 +729,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build candidate graph manifest for ASME standard product subgraph.")
     parser.add_argument("--processing-root", default="data/processing/产品标准", type=Path)
     parser.add_argument("--output-dir", default="data/metadata/graph/standard_product_subgraph", type=Path)
+    parser.add_argument("--asset-bucket", default=settings.minio_standard_asset_bucket)
+    parser.add_argument("--no-upload-assets", action="store_true")
+    parser.add_argument("--skip-asset-verification", action="store_true")
     args = parser.parse_args()
-    build_manifest(args.processing_root, args.output_dir)
+    build_manifest(
+        args.processing_root,
+        args.output_dir,
+        asset_bucket=args.asset_bucket,
+        publish_assets=not args.no_upload_assets,
+        verify_assets=not args.skip_asset_verification,
+    )
     print(f"Wrote graph manifest to {args.output_dir}")
 
 

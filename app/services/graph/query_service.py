@@ -489,7 +489,11 @@ def keyword_match_query(label: str, *, fuzzy: bool) -> str:
     WITH node,
          coalesce(node.aliases, []) +
          CASE WHEN properties(node)['alias'] IS NULL
-              THEN [] ELSE [toString(properties(node)['alias'])] END
+              THEN [] ELSE [toString(properties(node)['alias'])] END +
+         CASE WHEN node.chinese_name IS NULL
+              THEN [] ELSE [toString(node.chinese_name)] END +
+         CASE WHEN node.category IS NULL
+              THEN [] ELSE [toString(node.category)] END
          AS search_aliases
     WHERE {predicate}
     WITH node, {score} AS score

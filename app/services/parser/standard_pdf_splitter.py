@@ -5,7 +5,7 @@ import re
 import shutil
 import time
 from dataclasses import asdict, dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from statistics import median
 from typing import Any
 
@@ -16,11 +16,16 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only in misconfigure
 
 from app.db.minio import (
     DEFAULT_RAW_DOCUMENT_BUCKET,
+    DEFAULT_STANDARD_ASSET_BUCKET,
     build_minio_uri,
+    ensure_bucket,
+    get_minio_client,
+    guess_content_type,
     parse_raw_document_reference,
     raw_document_object_name_for_file,
     upload_raw_document_file,
 )
+from app.core.config import settings
 from app.services.data_clean import clean_items
 from app.services.parser.paths import processing_document_dir, processing_subdir
 from app.services.parser.pdf_parser import (
@@ -119,6 +124,7 @@ class StandardAsset:
     source_page: int
     bbox: tuple[float, float, float, float]
     image_path: str
+    source_uri: str = ""
 
 
 TABLE_CAPTION_PATTERN = re.compile(
@@ -398,6 +404,7 @@ def extract_standard_assets_from_sections(
     sections: list[StandardPdfSection],
     *,
     render_zoom: float = ASSET_RENDER_ZOOM,
+    asset_bucket: str | None = None,
 ) -> Path:
     source_path = Path(source_file)
     output_dir = processing_document_dir(source_path)
@@ -406,6 +413,10 @@ def extract_standard_assets_from_sections(
     _clear_existing_section_images(source_path, sections)
 
     assets: list[StandardAsset] = []
+    target_asset_bucket = (
+        asset_bucket or settings.minio_standard_asset_bucket or DEFAULT_STANDARD_ASSET_BUCKET
+    )
+    asset_client = None
     used_asset_names: dict[Path, set[str]] = {}
     for section in sections:
         section_path = Path(section.output_path)
@@ -430,6 +441,19 @@ def extract_standard_assets_from_sections(
                         alpha=False,
                     )
                     pixmap.save(image_path)
+                    source_uri = ""
+                    if section.source_uri:
+                        if asset_client is None:
+                            ensure_bucket(target_asset_bucket)
+                            asset_client = get_minio_client()
+                        object_name = standard_asset_object_name(section, image_path.name)
+                        asset_client.fput_object(
+                            target_asset_bucket,
+                            object_name,
+                            str(image_path),
+                            content_type=guess_content_type(image_path.name),
+                        )
+                        source_uri = build_minio_uri(target_asset_bucket, object_name)
                     assets.append(
                         StandardAsset(
                             index=asset_index,
@@ -441,6 +465,7 @@ def extract_standard_assets_from_sections(
                             source_page=section.start_page + page_index,
                             bbox=_rect_tuple(clip),
                             image_path=str(image_path),
+                            source_uri=source_uri,
                         )
                     )
 
@@ -448,11 +473,79 @@ def extract_standard_assets_from_sections(
     payload = {
         "source_pdf": str(source_path),
         "render_zoom": render_zoom,
+        "asset_bucket": target_asset_bucket,
         "asset_count": len(assets),
         "assets": [asdict(asset) for asset in assets],
     }
     manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return manifest_path
+
+
+def publish_standard_assets_from_manifest(
+    manifest_path: str | Path,
+    sections: list[StandardPdfSection],
+    *,
+    asset_bucket: str | None = None,
+    verify_existing: bool = True,
+) -> list[StandardAsset]:
+    """Publish locally extracted standard assets and persist canonical MinIO URIs."""
+    path = Path(manifest_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assets = [StandardAsset(**item) for item in payload.get("assets", [])]
+    if not assets:
+        return []
+
+    section_by_index = {section.index: section for section in sections}
+    target_bucket = asset_bucket or str(
+        payload.get("asset_bucket")
+        or settings.minio_standard_asset_bucket
+        or DEFAULT_STANDARD_ASSET_BUCKET
+    )
+    ensure_bucket(target_bucket)
+    client = get_minio_client()
+    published: list[StandardAsset] = []
+    for asset in assets:
+        section = section_by_index.get(asset.section_index)
+        if section is None or not section.source_uri:
+            raise ValueError(
+                f"Asset {asset.index} has no published standard section source_uri: {path}"
+            )
+        local_path = Path(asset.image_path)
+        object_name = standard_asset_object_name(section, local_path.name)
+        source_uri = build_minio_uri(target_bucket, object_name)
+        exists = False
+        if asset.source_uri == source_uri:
+            if verify_existing:
+                try:
+                    client.stat_object(target_bucket, object_name)
+                    exists = True
+                except Exception:  # MinIO uses several transport/S3 exception types.
+                    exists = False
+            else:
+                exists = True
+        if not exists:
+            if not local_path.is_file():
+                raise FileNotFoundError(f"Standard asset image not found: {local_path}")
+            client.fput_object(
+                target_bucket,
+                object_name,
+                str(local_path),
+                content_type=guess_content_type(local_path.name),
+            )
+        published.append(replace(asset, source_uri=source_uri))
+
+    payload["asset_bucket"] = target_bucket
+    payload["assets"] = [asdict(asset) for asset in published]
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return published
+
+
+def standard_asset_object_name(section: StandardPdfSection, filename: str) -> str:
+    """Return a stable asset object name derived from the published small PDF."""
+    reference = parse_raw_document_reference(section.source_uri)
+    section_pdf = PurePosixPath(reference.object_name)
+    section_prefix = section_pdf.parent / section_pdf.stem
+    return (section_prefix / filename).as_posix()
 
 
 def load_standard_assets_manifest(manifest_path: str | Path) -> list[StandardAsset]:

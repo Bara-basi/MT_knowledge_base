@@ -22,6 +22,7 @@ RAW_DOCUMENT_CATEGORIES: dict[str, str] = {
 
 RAW_DOCUMENT_PREFIXES = frozenset(RAW_DOCUMENT_CATEGORIES.values())
 DEFAULT_RAW_DOCUMENT_BUCKET = "knowledge-raw-docs"
+DEFAULT_STANDARD_ASSET_BUCKET = "knowledge-standard-assets"
 RAW_DOCUMENT_CACHE_ROOT = Path("data") / "processing" / ".minio_cache"
 LOCAL_RAW_ROOT = Path("data") / "raw"
 
@@ -216,7 +217,7 @@ def parse_raw_document_reference(
     *,
     bucket: str | None = None,
 ) -> RawDocumentObject:
-    text = unquote(str(raw_path)).strip().strip("\"'").replace("\\", "/")
+    text = str(raw_path).strip().strip("\"'").replace("\\", "/")
     if not text:
         raise ValueError("Missing raw document path")
 
@@ -226,14 +227,21 @@ def parse_raw_document_reference(
     if parsed.scheme in {"minio", "s3"}:
         if not parsed.netloc:
             raise ValueError(f"Missing bucket in MinIO document reference: {raw_path}")
-        return RawDocumentObject(parsed.netloc, _normalize_object_name(parsed.path.lstrip("/")))
+        return RawDocumentObject(
+            parsed.netloc,
+            _normalize_object_name(unquote(parsed.path).lstrip("/")),
+        )
 
     if parsed.scheme in {"http", "https"}:
         public_ref = _parse_public_object_url(text)
         if public_ref is not None:
             return public_ref
 
-    return RawDocumentObject(target_bucket, _normalize_object_name(_strip_local_raw_prefix(text, target_bucket)))
+    local_text = unquote(text)
+    return RawDocumentObject(
+        target_bucket,
+        _normalize_object_name(_strip_local_raw_prefix(local_text, target_bucket)),
+    )
 
 
 def raw_document_object_exists(raw_path: str | Path, *, bucket: str | None = None) -> bool:

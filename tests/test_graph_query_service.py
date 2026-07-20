@@ -5,6 +5,7 @@ import pytest
 from app.services.graph.query_service import (
     GraphQueryService,
     GraphQueryValidationError,
+    keyword_match_query,
     normalize_search_text,
     validate_read_only_cypher,
 )
@@ -74,6 +75,13 @@ def test_execute_cypher_wraps_query_with_hard_result_limit() -> None:
 
 def test_normalized_search_ignores_common_standard_separators() -> None:
     assert normalize_search_text("SA-312 / SA-312M") == "sa312sa312m"
+
+
+def test_keyword_search_includes_chinese_name_and_category() -> None:
+    query = keyword_match_query("Product", fuzzy=False)
+
+    assert "node.chinese_name" in query
+    assert "node.category" in query
 
 
 class StubDomainService:
