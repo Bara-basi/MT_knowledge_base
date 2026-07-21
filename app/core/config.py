@@ -101,6 +101,10 @@ class Settings:
         "MINIO_STANDARD_ASSET_BUCKET",
         "knowledge-standard-assets",
     )
+    minio_processed_document_bucket: str = os.getenv(
+        "MINIO_PROCESSED_DOCUMENT_BUCKET",
+        "knowledge-processed-docs",
+    )
     minio_secure: bool = _env_bool("MINIO_SECURE", False)
 
     embedding_model_name: str = os.getenv(

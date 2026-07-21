@@ -4,6 +4,8 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from app.db.minio import download_raw_document_to_file, parse_raw_document_reference
+from app.services.parser.paths import processing_document_dir
+from app.services.processed_document_assets import synchronize_processed_assets
 
 
 def parse_document(
@@ -19,16 +21,16 @@ def parse_document(
     if suffix == ".docx":
         from app.services.parser.word_parser import parse_word_document
 
-        return parse_word_document(path, image_analysis_workers=image_analysis_workers)
-    if suffix == ".xlsx":
+        items = parse_word_document(path, image_analysis_workers=image_analysis_workers)
+    elif suffix == ".xlsx":
         from app.services.parser.excel_parser import parse_excel_document
 
-        return parse_excel_document(path, image_analysis_workers=image_analysis_workers)
-    if suffix == ".pptx":
+        items = parse_excel_document(path, image_analysis_workers=image_analysis_workers)
+    elif suffix == ".pptx":
         from app.services.parser.powerpoint_parser import parse_powerpoint_document
 
-        return parse_powerpoint_document(path, image_analysis_workers=image_analysis_workers)
-    if suffix == ".pdf":
+        items = parse_powerpoint_document(path, image_analysis_workers=image_analysis_workers)
+    elif suffix == ".pdf":
         if is_standard_pdf_source(source):
             from app.services.parser.standard_pdf_parser import parse_standard_pdf_sections
             from app.services.parser.standard_pdf_splitter import split_standard_pdf_document
@@ -38,12 +40,21 @@ def parse_document(
                 image_analysis_workers=image_analysis_workers,
                 source_reference=source,
             )
-            return parse_standard_pdf_sections(sections)
-        from app.services.parser.pdf_parser import parse_pdf_document
+            items = parse_standard_pdf_sections(sections)
+        else:
+            from app.services.parser.pdf_parser import parse_pdf_document
 
-        return parse_pdf_document(path, image_analysis_workers=image_analysis_workers)
+            items = parse_pdf_document(path, image_analysis_workers=image_analysis_workers)
+    else:
+        raise ValueError(f"Unsupported document type: {suffix or 'unknown'}")
 
-    raise ValueError(f"Unsupported document type: {suffix or 'unknown'}")
+    # `path` may be a cache file while `source` is a MinIO URI.  Synchronize the
+    # parser's real output to the source-derived local path and the archive.
+    synchronize_processed_assets(
+        source,
+        produced_processing_dir=processing_document_dir(path),
+    )
+    return items
 
 
 def _local_parser_path(file_path: str | Path) -> Path:

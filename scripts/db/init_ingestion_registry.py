@@ -116,10 +116,16 @@ def ensure_ingestion_registry_table(table_name: str = TABLE_NAME) -> None:
                         document_original_path TEXT NOT NULL UNIQUE,
                         document_name TEXT NOT NULL,
                         document_link TEXT NOT NULL DEFAULT '',
-                        is_synced BOOLEAN NOT NULL DEFAULT FALSE
+                        is_synced BOOLEAN NOT NULL DEFAULT FALSE,
+                        processed_document_path TEXT
                     )
                     """
                 ).format(table=table)
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS processed_document_path TEXT").format(
+                    table=table
+                )
             )
             cur.execute(
                 sql.SQL("COMMENT ON TABLE {table} IS {comment}").format(
@@ -134,6 +140,7 @@ def ensure_ingestion_registry_table(table_name: str = TABLE_NAME) -> None:
                 "document_name": "\u6587\u6863\u540d",
                 "document_link": "\u6587\u6863\u94fe\u63a5\uff08\u98de\u4e66\u94fe\u63a5\uff09",
                 "is_synced": "\u662f\u5426\u540c\u6b65",
+                "processed_document_path": "\u5904\u7406\u540e\u6587\u4ef6\uff08txt/img\uff09MinIO\u8def\u5f84",
             }
             for column, comment in column_comments.items():
                 cur.execute(

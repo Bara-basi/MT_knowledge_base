@@ -1,0 +1,2 @@
+1. 同步processing数据到minio:
+`.\.venv\Scripts\python.exe scripts\storage\migrate_processed_assets_to_minio.py --apply --continue-on-error`

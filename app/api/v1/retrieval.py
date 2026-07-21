@@ -7,11 +7,16 @@ import json
 from fastapi import APIRouter, HTTPException
 
 from app.schemas.retrieval import (
+    DocumentDirectRetrievalRequest,
+    DocumentDirectRetrievalResponse,
+    DocumentSearchRequest,
+    DocumentSearchResponse,
     FilteredFlowRetrievalRequest,
     FlowRetrievalRequest,
     FlowRetrievalResponse,
     FlowRetrievedChunk,
 )
+from app.services.document_direct_retrieval import build_direct_chunks, search_processed_documents
 from app.services.retrieval import RetrievalResult, get_retrieval_service
 
 
@@ -67,6 +72,49 @@ def retrieve_filtered_flow_chunks(
         query=request.query,
         count=len(chunks),
         chunks=chunks,
+    )
+
+
+@router.post(
+    "/documents/search",
+    response_model=DocumentSearchResponse,
+    response_model_exclude_none=True,
+)
+def search_direct_documents(request: DocumentSearchRequest) -> DocumentSearchResponse:
+    """Find processed document archive paths by ingestion registry document name."""
+
+    try:
+        matches = search_processed_documents(request.query, limit=request.limit)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Document search failed: {exc}") from exc
+    return DocumentSearchResponse(
+        query=request.query,
+        count=len(matches),
+        matches=matches,
+    )
+
+
+@router.post(
+    "/document-direct",
+    response_model=DocumentDirectRetrievalResponse,
+    response_model_exclude_none=True,
+)
+def retrieve_direct_document(request: DocumentDirectRetrievalRequest) -> DocumentDirectRetrievalResponse:
+    """Return each matched processed document as one direct-linked context block."""
+
+    try:
+        chunks, matches = build_direct_chunks(
+            request.query,
+            limit=request.limit,
+            max_chars_per_document=request.max_chars_per_document,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Document direct retrieval failed: {exc}") from exc
+    return DocumentDirectRetrievalResponse(
+        query=request.query,
+        count=len(chunks),
+        chunks=chunks,
+        matches=matches,
     )
 
 

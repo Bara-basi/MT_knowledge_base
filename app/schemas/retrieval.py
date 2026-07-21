@@ -77,3 +77,39 @@ class FlowRetrievalResponse(BaseModel):
     type: Literal["flow"] = "flow"
     count: int
     chunks: list[FlowRetrievedChunk]
+
+
+class DocumentSearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=500, description="Document name or title hint.")
+    limit: int = Field(10, ge=1, le=50, description="Maximum document matches to return.")
+
+
+class DocumentSearchMatch(BaseModel):
+    document_name: str
+    processed_document_path: str
+    document_original_path: str = ""
+    match_mode: Literal["exact", "fuzzy"]
+
+
+class DocumentSearchResponse(BaseModel):
+    query: str
+    type: Literal["document_search"] = "document_search"
+    count: int
+    matches: list[DocumentSearchMatch]
+
+
+class DocumentDirectRetrievalRequest(DocumentSearchRequest):
+    max_chars_per_document: int = Field(
+        120_000,
+        ge=1_000,
+        le=500_000,
+        description="Maximum text characters returned for each direct-linked document.",
+    )
+
+
+class DocumentDirectRetrievalResponse(BaseModel):
+    query: str
+    type: Literal["document_direct"] = "document_direct"
+    count: int
+    chunks: list[FlowRetrievedChunk]
+    matches: list[DocumentSearchMatch]
