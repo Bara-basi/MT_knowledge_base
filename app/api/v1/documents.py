@@ -5,6 +5,7 @@ from pathlib import PurePosixPath
 from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel, Field
 from fastapi.responses import StreamingResponse
 from minio.error import S3Error
 
@@ -18,8 +19,30 @@ from app.db.minio import (
     upload_raw_document_stream,
 )
 from app.services.lark_document_sync import ingest_lark_document_link, scan_lark_updates
+from app.services.agent_documents import (
+    MAX_AGENT_CONTEXT_DOCUMENTS,
+    MAX_AGENT_CONTEXT_IMAGES,
+    MAX_AGENT_PDF_PAGES,
+    is_missing_minio_object,
+    prepare_agent_context_assets,
+    prepare_agent_vision_payload,
+)
 
 router = APIRouter(prefix="/documents", tags=["documents"])
+
+
+class AgentVisionPayloadRequest(BaseModel):
+    path: str = Field(..., min_length=1, max_length=4096)
+    max_pages: int = Field(
+        MAX_AGENT_PDF_PAGES,
+        ge=1,
+        le=MAX_AGENT_PDF_PAGES,
+    )
+
+
+class AgentContextAssetsRequest(BaseModel):
+    document_paths: list[str] = Field(default_factory=list, max_length=MAX_AGENT_CONTEXT_DOCUMENTS)
+    image_paths: list[str] = Field(default_factory=list, max_length=MAX_AGENT_CONTEXT_IMAGES)
 
 
 @router.get("/minio/categories")
@@ -60,6 +83,38 @@ def download_raw_document(path: str) -> StreamingResponse:
         media_type=media_type,
         headers=headers,
     )
+
+
+@router.post("/agent-vision-payload")
+def prepare_document_for_agent_vision(
+    request: AgentVisionPayloadRequest,
+) -> dict[str, object]:
+    try:
+        return prepare_agent_vision_payload(
+            request.path,
+            max_pages=request.max_pages,
+        ).to_dict()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except S3Error as exc:
+        if is_missing_minio_object(exc):
+            raise HTTPException(status_code=404, detail=f"Document not found: {request.path}") from exc
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Document preparation failed: {exc}") from exc
+
+
+@router.post("/agent-context-assets")
+def prepare_context_assets_for_final_agent(
+    request: AgentContextAssetsRequest,
+) -> dict[str, object]:
+    try:
+        return prepare_agent_context_assets(
+            request.document_paths,
+            request.image_paths,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Agent asset preparation failed: {exc}") from exc
 
 
 def resolve_raw_document_object(raw_path: str, bucket: str | None = None) -> RawDocumentObject:

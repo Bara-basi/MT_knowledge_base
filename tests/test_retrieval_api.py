@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from app.api.v1.retrieval import _sort_flow_results, _to_flow_chunk
+from app.api.v1.retrieval import (
+    _sort_flow_results,
+    _to_flow_chunk,
+    build_agent_metadata_filter,
+)
+from app.schemas.retrieval import FilteredFlowRetrievalRequest
 from app.services.rerank import RerankScore
 from app.services.retrieval import RetrievalResult, RetrievalService
 
@@ -155,3 +160,58 @@ def test_rerank_limit_is_maximum_after_filters() -> None:
     )
 
     assert [result.id for result in ranked] == ["a", "b"]
+
+
+def test_agent_metadata_filter_uses_allowlisted_structured_fields() -> None:
+    request = FilteredFlowRetrievalRequest(
+        query="A213 化学成分",
+        file_path='minio://knowledge-raw-docs/A213 "special".pdf',
+        chunk_type="table",
+        path_prefix="Chemical_Requirements%",
+    )
+
+    expression = build_agent_metadata_filter(request)
+
+    assert 'metadata["file_path"] == "minio://knowledge-raw-docs/A213 \\"special\\".pdf"' in expression
+    assert 'metadata["chunk_type"] == "table"' in expression
+    assert 'metadata["path"] like "Chemical\\\\_Requirements\\\\%%"' in expression
+
+
+def test_retrieval_service_applies_same_filter_to_dense_and_sparse_requests() -> None:
+    class FakeEmbeddingService:
+        def embed_query(self, query):
+            return [0.1, 0.2]
+
+        def embed_bm25_query(self, query, model_path):
+            return {1: 0.5}
+
+    class FakeClient:
+        def hybrid_search(self, **kwargs):
+            self.kwargs = kwargs
+            return [[]]
+
+    service = RetrievalService.__new__(RetrievalService)
+    service.embedding_service = FakeEmbeddingService()
+    service.rerank_service = FakeRerankService([])
+    service.client = FakeClient()
+    service.config = type(
+        "Config",
+        (),
+        {"name": "test", "metric_type": "COSINE"},
+    )()
+    service._dense_search_ef = lambda recall_limit: 64
+
+    from unittest.mock import patch
+
+    with patch("app.services.retrieval.ensure_chunk_collection"):
+        service.search(
+            "query",
+            limit=2,
+            recall_limit=3,
+            rerank=False,
+            filter_expression='metadata["file_path"] == "demo.pdf"',
+        )
+
+    requests = service.client.kwargs["reqs"]
+    assert len(requests) == 2
+    assert all(request.filter == 'metadata["file_path"] == "demo.pdf"' for request in requests)

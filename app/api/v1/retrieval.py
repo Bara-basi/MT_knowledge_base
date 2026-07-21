@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import json
 
 from fastapi import APIRouter, HTTPException
 
 from app.schemas.retrieval import (
+    FilteredFlowRetrievalRequest,
     FlowRetrievalRequest,
     FlowRetrievalResponse,
     FlowRetrievedChunk,
@@ -24,6 +26,62 @@ router = APIRouter(prefix="/retrieval", tags=["retrieval"])
 def retrieve_flow_chunks(request: FlowRetrievalRequest) -> FlowRetrievalResponse:
     """Recall and rerank chunks for process-style QA contexts."""
     return _retrieve_flow_chunks(request)
+
+
+@router.post(
+    "/filtered",
+    response_model=FlowRetrievalResponse,
+    response_model_exclude_none=True,
+)
+def retrieve_filtered_flow_chunks(
+    request: FilteredFlowRetrievalRequest,
+) -> FlowRetrievalResponse:
+    """Hybrid retrieval constrained to a graph-supplied document path."""
+
+    filter_expression = build_agent_metadata_filter(request)
+    print(
+        "[retrieval] filtered request "
+        f"query={request.query!r} file_path={request.file_path!r} "
+        f"chunk_type={request.chunk_type!r} path_prefix={request.path_prefix!r}",
+        flush=True,
+    )
+    bm25_model_file = _resolve_bm25_model_file(request)
+    try:
+        results = get_retrieval_service().search(
+            request.query,
+            limit=request.limit,
+            bm25_model_file=bm25_model_file,
+            recall_limit=request.recall_limit,
+            rerank=request.rerank,
+            filter_expression=filter_expression,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Filtered retrieval failed: {exc}") from exc
+
+    chunks = [_to_flow_chunk(result, debug=request.debug) for result in results]
+    return FlowRetrievalResponse(
+        query=request.query,
+        count=len(chunks),
+        chunks=chunks,
+    )
+
+
+def build_agent_metadata_filter(request: FilteredFlowRetrievalRequest) -> str:
+    clauses = [f'metadata["file_path"] == {_milvus_string(request.file_path)}']
+    if request.chunk_type:
+        clauses.append(f'metadata["chunk_type"] == {_milvus_string(request.chunk_type)}')
+    if request.path_prefix:
+        prefix = request.path_prefix.replace("%", "\\%").replace("_", "\\_")
+        clauses.append(f'metadata["path"] like {_milvus_string(prefix + "%")}')
+    return " and ".join(clauses)
+
+
+def _milvus_string(value: str) -> str:
+    return json.dumps(str(value).strip(), ensure_ascii=False)
 
 
 def _retrieve_flow_chunks(request: FlowRetrievalRequest) -> FlowRetrievalResponse:

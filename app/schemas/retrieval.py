@@ -34,6 +34,31 @@ class FlowRetrievalRequest(BaseModel):
     )
 
 
+class FilteredFlowRetrievalRequest(FlowRetrievalRequest):
+    limit: int = Field(
+        8,
+        ge=1,
+        le=20,
+        description="Maximum filtered chunks returned to the QA agent.",
+    )
+    file_path: str = Field(
+        ...,
+        min_length=1,
+        max_length=2048,
+        description="Exact document file_path supplied by graph retrieval.",
+    )
+    chunk_type: str | None = Field(
+        None,
+        max_length=64,
+        description="Optional exact metadata.chunk_type filter.",
+    )
+    path_prefix: str | None = Field(
+        None,
+        max_length=500,
+        description="Optional metadata.path prefix used to narrow the document section.",
+    )
+
+
 class FlowRetrievedChunk(BaseModel):
     chunk_id: str
     content: str

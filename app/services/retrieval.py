@@ -66,6 +66,7 @@ class RetrievalService:
         bm25_model_file: str | Path | None = None,
         recall_limit: int | None = None,
         rerank: bool = True,
+        filter_expression: str | None = None,
     ) -> list[RetrievalResult]:
         recall_limit = recall_limit or max(
             limit * settings.retrieval_recall_multiplier,
@@ -88,6 +89,7 @@ class RetrievalService:
                 "params": {"ef": dense_search_ef},
             },
             limit=recall_limit,
+            filter=filter_expression,
         )
         sparse_request = AnnSearchRequest(
             data=[query_sparse_vector],
@@ -97,6 +99,7 @@ class RetrievalService:
                 "params": {"drop_ratio_search": 0.2},
             },
             limit=recall_limit,
+            filter=filter_expression,
         )
 
         raw_results = self.client.hybrid_search(
