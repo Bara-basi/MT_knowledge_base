@@ -250,6 +250,7 @@ class Settings:
         "oc_b4325718ab22291bc7625ebd63d6f915",
     ).strip()
     daily_report_timezone: str = os.getenv("DAILY_REPORT_TIMEZONE", "Asia/Shanghai").strip()
+    daily_report_departments: str = os.getenv("DAILY_REPORT_DEPARTMENTS", "").strip()
     weekly_report_enabled: bool = _env_bool("WEEKLY_REPORT_ENABLED", True)
     weekly_report_target_union_id: str = _get_first_env(
         "WEEKLY_REPORT_TARGET_UNION_ID",
@@ -267,6 +268,10 @@ class Settings:
         "WEEKLY_REPORT_TIMEZONE",
         "DAILY_REPORT_TIMEZONE",
         default="Asia/Shanghai",
+    ).strip()
+    weekly_report_departments: str = _get_first_env(
+        "WEEKLY_REPORT_DEPARTMENTS",
+        "DAILY_REPORT_DEPARTMENTS",
     ).strip()
     public_base_url: str = os.getenv(
         "PUBLIC_BASE_URL",

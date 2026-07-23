@@ -880,6 +880,108 @@ def test_feishu_card_renders_different_consecutive_images_vertically(monkeypatch
     assert elements[1]["columns"][1]["elements"] == []
 
 
+def test_upload_local_image_downloads_minio_image_before_feishu_upload(monkeypatch) -> None:
+    calls = {}
+
+    class FakeMinioClient:
+        def fget_object(self, bucket, object_name, file_path):
+            calls["minio"] = {
+                "bucket": bucket,
+                "object_name": object_name,
+                "file_path": file_path,
+            }
+            with open(file_path, "wb") as image_file:
+                image_file.write(b"png-bytes")
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"code":0,"data":{"image_key":"img_v3_minio"}}'
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"code": 0, "data": {"image_key": "img_v3_minio"}}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def post(self, url, headers, data, files):
+            filename, image_file, mime_type = files["image"]
+            calls["feishu"] = {
+                "url": url,
+                "headers": headers,
+                "data": data,
+                "filename": filename,
+                "mime_type": mime_type,
+                "bytes": image_file.read(),
+                "temp_exists_during_upload": feishu.Path(image_file.name).is_file(),
+                "temp_path": image_file.name,
+            }
+            return FakeResponse()
+
+    monkeypatch.setattr(feishu, "get_minio_client", lambda: FakeMinioClient())
+    monkeypatch.setattr(feishu.httpx, "AsyncClient", FakeAsyncClient)
+
+    image_key = asyncio.run(
+        feishu._upload_local_image(
+            "minio://knowledge-processed-docs/%E8%BF%88%E6%8B%93%E6%80%9D%E5%AD%A6%E9%99%A2/"
+            "%E6%88%90%E9%95%BF%E6%89%8B%E5%86%8C%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E.docx/"
+            "img/image_0002.png",
+            "tenant-token",
+        )
+    )
+
+    assert image_key == "img_v3_minio"
+    assert calls["minio"]["bucket"] == "knowledge-processed-docs"
+    assert calls["minio"]["object_name"] == "迈拓思学院/成长手册使用说明.docx/img/image_0002.png"
+    assert calls["feishu"]["bytes"] == b"png-bytes"
+    assert calls["feishu"]["filename"].endswith(".png")
+    assert calls["feishu"]["mime_type"] == "image/png"
+    assert calls["feishu"]["temp_exists_during_upload"] is True
+    assert not feishu.Path(calls["feishu"]["temp_path"]).exists()
+
+
+def test_download_minio_image_to_temp_decodes_standard_asset_uri(monkeypatch) -> None:
+    calls = {}
+
+    class FakeMinioClient:
+        def fget_object(self, bucket, object_name, file_path):
+            calls["bucket"] = bucket
+            calls["object_name"] = object_name
+            with open(file_path, "wb") as image_file:
+                image_file.write(b"standard-image")
+
+    monkeypatch.setattr(feishu, "get_minio_client", lambda: FakeMinioClient())
+
+    temp_path = feishu._download_minio_image_to_temp(
+        "minio://knowledge-standard-assets/%E4%BA%A7%E5%93%81%E6%A0%87%E5%87%86/"
+        "ASME-Sec-II-A-Vol1-2023%28%E5%88%87%E5%88%86%E7%89%88%29/"
+        "SA-213_SA-213M%20-%20SPECIFICATION/table%20-%20TABLE%201%20Chemical%20Composition"
+        "%20Limits%2C%20%25%20A%20%2C%20for%20Low%20Alloy%20Steel.png"
+    )
+
+    try:
+        assert temp_path is not None
+        assert temp_path.read_bytes() == b"standard-image"
+        assert calls["bucket"] == "knowledge-standard-assets"
+        assert calls["object_name"] == (
+            "产品标准/ASME-Sec-II-A-Vol1-2023(切分版)/"
+            "SA-213_SA-213M - SPECIFICATION/table - TABLE 1 Chemical Composition"
+            " Limits, % A , for Low Alloy Steel.png"
+        )
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
 def test_feishu_card_preserves_markdown_for_json2_renderer() -> None:
     markdown = (
         "### 标题\n\n"

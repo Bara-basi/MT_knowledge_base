@@ -68,6 +68,13 @@ def ensure_chat_messages_table(table_name: str | None = None) -> dict[str, Any]:
                     CREATE TABLE IF NOT EXISTS {table} (
                         user_id VARCHAR(128) NOT NULL,
                         user_name TEXT,
+                        feishu_user_id TEXT,
+                        feishu_open_id TEXT,
+                        department_ids TEXT[],
+                        department_names TEXT[],
+                        job_title TEXT,
+                        employee_type TEXT,
+                        user_profile_updated_at TIMESTAMPTZ,
                         session_id VARCHAR(128) NOT NULL,
                         conversation_id VARCHAR(128) NOT NULL,
                         topic_id UUID,
@@ -83,6 +90,23 @@ def ensure_chat_messages_table(table_name: str | None = None) -> dict[str, Any]:
                     table=table
                 )
             )
+            profile_columns = (
+                ("feishu_user_id", "TEXT"),
+                ("feishu_open_id", "TEXT"),
+                ("department_ids", "TEXT[]"),
+                ("department_names", "TEXT[]"),
+                ("job_title", "TEXT"),
+                ("employee_type", "TEXT"),
+                ("user_profile_updated_at", "TIMESTAMPTZ"),
+            )
+            for column_name, column_type in profile_columns:
+                cur.execute(
+                    sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {type}").format(
+                        table=table,
+                        column=sql.Identifier(column_name),
+                        type=sql.SQL(column_type),
+                    )
+                )
             cur.execute(
                 sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS topic_id UUID").format(
                     table=table
@@ -154,6 +178,116 @@ def ensure_chat_messages_table(table_name: str | None = None) -> dict[str, Any]:
         "table_name": table_name,
         "columns": columns,
     }
+
+
+def ensure_chat_user_profile_columns(table_name: str | None = None) -> dict[str, Any]:
+    """Add only the Feishu profile columns needed by the backfill job."""
+
+    table_name = table_name or settings.postgres_chat_table
+    table = sql.Identifier(table_name)
+    profile_columns = (
+        ("feishu_user_id", "TEXT"),
+        ("feishu_open_id", "TEXT"),
+        ("department_ids", "TEXT[]"),
+        ("department_names", "TEXT[]"),
+        ("job_title", "TEXT"),
+        ("employee_type", "TEXT"),
+        ("user_profile_updated_at", "TIMESTAMPTZ"),
+    )
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            for column_name, column_type in profile_columns:
+                cur.execute(
+                    sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {type}").format(
+                        table=table,
+                        column=sql.Identifier(column_name),
+                        type=sql.SQL(column_type),
+                    )
+                )
+    return {"table_name": table_name, "columns": [name for name, _ in profile_columns]}
+
+
+def list_chat_user_profile_backfill_candidates(
+    *,
+    table_name: str | None = None,
+    union_ids: list[str] | tuple[str, ...] | None = None,
+    force: bool = False,
+) -> list[dict[str, Any]]:
+    """List distinct Feishu union IDs whose historical rows need enrichment."""
+
+    table_name = table_name or settings.postgres_chat_table
+    conditions = [sql.SQL("BTRIM(user_id) <> ''"), sql.SQL("user_id <> 'unknown-user'")]
+    parameters: list[Any] = []
+
+    normalized_ids = tuple(dict.fromkeys(str(item).strip() for item in union_ids or () if str(item).strip()))
+    if normalized_ids:
+        conditions.append(sql.SQL("user_id = ANY(%s)"))
+        parameters.append(list(normalized_ids))
+    if not force:
+        conditions.append(sql.SQL("user_profile_updated_at IS NULL"))
+
+    query = sql.SQL(
+        """
+        SELECT user_id AS union_id, COUNT(*)::INTEGER AS row_count
+        FROM {table}
+        WHERE {conditions}
+        GROUP BY user_id
+        ORDER BY user_id
+        """
+    ).format(
+        table=sql.Identifier(table_name),
+        conditions=sql.SQL(" AND ").join(conditions),
+    )
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, parameters)
+            return list(cur.fetchall())
+
+
+def update_chat_user_profile(
+    *,
+    union_id: str,
+    feishu_user_id: str | None,
+    feishu_open_id: str | None,
+    user_name: str | None,
+    department_ids: list[str] | tuple[str, ...],
+    department_names: list[str] | tuple[str, ...],
+    job_title: str | None,
+    employee_type: Any,
+    table_name: str | None = None,
+) -> int:
+    """Apply one Feishu user profile to every historical message for that user."""
+
+    table_name = table_name or settings.postgres_chat_table
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    UPDATE {table}
+                    SET user_name = COALESCE(%s, user_name),
+                        feishu_user_id = %s,
+                        feishu_open_id = %s,
+                        department_ids = %s,
+                        department_names = %s,
+                        job_title = %s,
+                        employee_type = %s,
+                        user_profile_updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = %s
+                    """
+                ).format(table=sql.Identifier(table_name)),
+                (
+                    user_name,
+                    feishu_user_id,
+                    feishu_open_id,
+                    list(department_ids),
+                    list(department_names),
+                    job_title,
+                    None if employee_type is None else str(employee_type),
+                    union_id,
+                ),
+            )
+            return cur.rowcount
 
 
 def ensure_conversation_topics_table(

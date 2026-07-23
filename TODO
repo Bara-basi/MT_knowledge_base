@@ -1,2 +1,20 @@
 1. 同步processing数据到minio:
 `.\.venv\Scripts\python.exe scripts\storage\migrate_processed_assets_to_minio.py --apply --continue-on-error`
+
+2. 消息表同步用户部门信息
+运行    `scripts\db\backfill_chat_user_profiles.py`
+
+3. 更新日报/周报功能
+```bash
+crontab -e
+```
+
+```bash
+CRON_TZ=Asia/Shanghai
+
+# 每天 09:00 发送前一天的日报
+0 9 * * * cd /path/to/MTSCO_knowledge_base && .venv/bin/python scripts/reports/send_daily_report.py --department 迈拓思学园 >> logs/daily_report.log 2>&1
+
+# 每周五 17:35 发送周报
+35 17 * * 5 cd /path/to/MTSCO_knowledge_base && .venv/bin/python scripts/reports/send_weekly_report.py --department 迈拓思学园 >> logs/weekly_report.log 2>&1
+```

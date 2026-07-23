@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from app.services import weekly_report
+from app.services.usage_report import UsageReportData, UsageUserStat
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -36,10 +37,13 @@ def test_build_weekly_report_text_lists_user_counts() -> None:
         report_end=datetime(2026, 7, 17, 17, 30, tzinfo=SHANGHAI),
     )
 
-    assert "MTSCO知识库本周使用反馈（2026-07-10 17:30—2026-07-17 17:30）" in text
-    assert "上周五 17:30 至本周五 17:30，飞书问答入口共收到 7 条提问" in text
-    assert "1. Alice：5 次" in text
-    assert "2. Bob：2 次" in text
+    assert "📊 **MTSCO 知识库 · 周使用简报**" in text
+    assert "2026-07-10 17:30 — 2026-07-17 17:30" in text
+    assert "💬 **7** 条提问" in text
+    assert "🥇 Alice" in text
+    assert "🥈 Bob" in text
+    assert "Top 3 用户贡献占比：**100.0%**" in text
+    assert "统计范围：全部用户" in text
     assert "PostgreSQL" not in text
     assert "chat_messages" not in text
 
@@ -95,14 +99,19 @@ def test_send_weekly_report_uses_default_completed_week(monkeypatch) -> None:
 
     def fake_fetch(*, report_end=None):
         fetched["report_end"] = report_end
-        return [weekly_report.WeeklyUserChatStat("Alice", 3)]
+        return UsageReportData(
+            user_stats=[UsageUserStat("Alice", 3, 3)],
+            total_questions=3,
+            active_users=1,
+            answered_questions=3,
+        )
 
     async def fake_send(**kwargs):
         sent.update(kwargs)
         return "om_test_message"
 
     monkeypatch.setattr(weekly_report, "default_report_end", lambda *_args, **_kwargs: report_end)
-    monkeypatch.setattr(weekly_report, "fetch_weekly_user_chat_stats", fake_fetch)
+    monkeypatch.setattr(weekly_report, "fetch_weekly_report_data", fake_fetch)
     monkeypatch.setattr(
         weekly_report.feishu,
         "_send_feishu_markdown_message_to_receive_id",
@@ -125,17 +134,22 @@ def test_send_weekly_report_uses_default_completed_week(monkeypatch) -> None:
     assert fetched["report_end"] == report_end
     assert sent["receive_id"] == "on_target"
     assert sent["receive_id_type"] == "union_id"
-    assert "2026-07-10 17:30—2026-07-17 17:30" in sent["markdown_text"]
+    assert "2026-07-10 17:30 — 2026-07-17 17:30" in sent["markdown_text"]
     assert result["ok"] is True
     assert result["report_start"] == datetime(2026, 7, 10, 17, 30, tzinfo=SHANGHAI)
     assert result["report_end"] == report_end
+    assert result["report_data"].total_questions == 3
 
 
 def test_send_weekly_report_force_bypasses_disabled_setting(monkeypatch) -> None:
     async def fake_send(**_kwargs):
         return "om_test_message"
 
-    monkeypatch.setattr(weekly_report, "fetch_weekly_user_chat_stats", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        weekly_report,
+        "fetch_weekly_report_data",
+        lambda **_kwargs: UsageReportData(),
+    )
     monkeypatch.setattr(
         weekly_report.feishu,
         "_send_feishu_markdown_message_to_receive_id",

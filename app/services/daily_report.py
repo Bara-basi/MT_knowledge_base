@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from typing import Any
+from typing import Any, Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from psycopg import sql
@@ -11,12 +10,16 @@ from psycopg import sql
 from app.api.v1 import feishu
 from app.core.config import settings
 from app.db.postgres import ensure_chat_messages_table, postgres_connection
+from app.services.usage_report import (
+    UsageReportData,
+    UsageUserStat,
+    build_usage_report_text,
+    fetch_usage_report_data,
+    normalize_department_names,
+)
 
 
-@dataclass(frozen=True)
-class DailyUserChatStat:
-    user_name: str
-    message_count: int
+DailyUserChatStat = UsageUserStat
 
 
 def get_report_timezone() -> ZoneInfo:
@@ -47,11 +50,18 @@ def fetch_daily_user_chat_stats(
     target_date: date | None = None,
     table_name: str | None = None,
     timezone: ZoneInfo | None = None,
+    department_names: Iterable[str] | str | None = None,
 ) -> list[DailyUserChatStat]:
     ensure_chat_messages_table(table_name)
     report_date = target_date or default_report_date()
     start, end = day_bounds(target_date=report_date, timezone=timezone)
     table = sql.Identifier(table_name or settings.postgres_chat_table)
+    departments = normalize_department_names(department_names)
+    department_condition = (
+        sql.SQL(" AND COALESCE(department_names, ARRAY[]::TEXT[]) && %s::TEXT[]")
+        if departments
+        else sql.SQL("")
+    )
 
     with postgres_connection() as conn:
         with conn.cursor() as cur:
@@ -64,11 +74,12 @@ def fetch_daily_user_chat_stats(
                     FROM {table}
                     WHERE create_time >= %s
                       AND create_time < %s
+                      {department_condition}
                     GROUP BY COALESCE(NULLIF(BTRIM(user_name), ''), '未识别用户')
                     ORDER BY message_count DESC, user_name ASC
                     """
-                ).format(table=table),
-                (start, end),
+                ).format(table=table, department_condition=department_condition),
+                (start, end, list(departments)) if departments else (start, end),
             )
             rows = cur.fetchall()
 
@@ -81,31 +92,53 @@ def fetch_daily_user_chat_stats(
     ]
 
 
+def fetch_daily_report_data(
+    *,
+    target_date: date | None = None,
+    table_name: str | None = None,
+    timezone: ZoneInfo | None = None,
+    department_names: Iterable[str] | str | None = None,
+) -> UsageReportData:
+    tz = timezone or get_report_timezone()
+    start, end = day_bounds(target_date=target_date, timezone=tz)
+    return fetch_usage_report_data(
+        start=start,
+        end=end,
+        granularity="daily",
+        timezone=tz,
+        table_name=table_name,
+        department_names=department_names,
+    )
+
+
 def build_daily_report_text(
     stats: list[DailyUserChatStat],
     *,
     target_date: date | None = None,
     generated_at: datetime | None = None,
+    report_data: UsageReportData | None = None,
 ) -> str:
     tz = get_report_timezone()
     generated = generated_at.astimezone(tz) if generated_at else datetime.now(tz)
     report_date = target_date or default_report_date(generated)
-    total = sum(item.message_count for item in stats)
+    data = report_data or _basic_report_data(stats)
+    return build_usage_report_text(
+        data,
+        title="MTSCO 知识库 · 日使用简报",
+        period_text=f"{report_date:%Y-%m-%d}（昨日） · 生成于 {generated:%H:%M}",
+        comparison_label="前一日",
+        distribution_title="时段分布",
+    )
 
-    lines = [
-        f"MTSCO知识库昨日使用反馈（{report_date:%Y-%m-%d}）",
-        "",
-        f"截至今日 {generated:%H:%M}，昨日飞书问答入口共收到 {total} 条提问。",
-    ]
-    if stats:
-        lines.append("昨日用户使用次数如下：")
-        lines.extend(
-            f"{index}. {item.user_name}：{item.message_count} 次"
-            for index, item in enumerate(stats, start=1)
-        )
-    else:
-        lines.append("昨日还没有产生新的问答记录。")
-    return "\n".join(lines)
+
+def _basic_report_data(stats: list[DailyUserChatStat]) -> UsageReportData:
+    total = sum(item.message_count for item in stats)
+    return UsageReportData(
+        user_stats=list(stats),
+        total_questions=total,
+        active_users=len(stats),
+        answered_questions=total,
+    )
 
 
 async def send_daily_report(
@@ -114,6 +147,7 @@ async def send_daily_report(
     target_open_id: str | None = None,
     target_session_id: str | None = None,
     target_date: date | None = None,
+    department_names: Iterable[str] | str | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
     if not force and not settings.daily_report_enabled:
@@ -130,8 +164,21 @@ async def send_daily_report(
         raise ValueError("Daily report target union_id or session_id is required.")
 
     report_date = target_date or default_report_date()
-    stats = await asyncio.to_thread(fetch_daily_user_chat_stats, target_date=report_date)
-    text = build_daily_report_text(stats, target_date=report_date)
+    departments = normalize_department_names(
+        department_names
+        if department_names is not None
+        else getattr(settings, "daily_report_departments", "")
+    )
+    fetch_kwargs: dict[str, Any] = {"target_date": report_date}
+    if departments:
+        fetch_kwargs["department_names"] = departments
+    report_data = await asyncio.to_thread(fetch_daily_report_data, **fetch_kwargs)
+    stats = report_data.user_stats
+    text = build_daily_report_text(
+        stats,
+        target_date=report_date,
+        report_data=report_data,
+    )
     receive_id_type = "union_id" if union_id else "chat_id"
     receive_id = union_id or session_id
     if union_id:
@@ -156,7 +203,9 @@ async def send_daily_report(
         "receive_id": receive_id,
         "receive_id_type": receive_id_type,
         "report_date": report_date,
+        "department_names": departments,
         "stats": stats,
+        "report_data": report_data,
         "text": text,
     }
 
@@ -176,7 +225,12 @@ def seconds_until_next_daily_run(
     return max((next_run - current).total_seconds(), 0.0)
 
 
-async def run_daily_report_loop(*, hour: int = 9, minute: int = 0) -> None:
+async def run_daily_report_loop(
+    *,
+    hour: int = 9,
+    minute: int = 0,
+    department_names: Iterable[str] | str | None = None,
+) -> None:
     while True:
         await asyncio.sleep(seconds_until_next_daily_run(hour=hour, minute=minute))
-        await send_daily_report()
+        await send_daily_report(department_names=department_names)

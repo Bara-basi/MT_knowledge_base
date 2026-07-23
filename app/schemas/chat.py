@@ -85,7 +85,13 @@ class ConversationTopicContextRequest(BaseModel):
     user_id: str = Field(..., min_length=1, description="Feishu union_id.")
     session_id: str = Field(..., min_length=1, description="Feishu chat_id/session id.")
     topic_id: UUID
+    summary: str = Field(..., description="Latest topic summary to persist.")
     k: int = Field(10, ge=1, le=50, description="Recent turns to return for the topic.")
+
+    @field_validator("summary")
+    @classmethod
+    def reject_corrupted_text(cls, value: str) -> str:
+        return _reject_corrupted_text(value) or ""
 
 
 class ConversationTopicContextResponse(BaseModel):

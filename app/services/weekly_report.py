@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from datetime import datetime, time, timedelta
-from typing import Any
+from typing import Any, Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from psycopg import sql
@@ -11,16 +10,20 @@ from psycopg import sql
 from app.api.v1 import feishu
 from app.core.config import settings
 from app.db.postgres import ensure_chat_messages_table, postgres_connection
+from app.services.usage_report import (
+    UsageReportData,
+    UsageUserStat,
+    build_usage_report_text,
+    fetch_usage_report_data,
+    normalize_department_names,
+)
 
 
 FRIDAY_WEEKDAY = 4
 REPORT_CUTOFF = time(hour=17, minute=30)
 
 
-@dataclass(frozen=True)
-class WeeklyUserChatStat:
-    user_name: str
-    message_count: int
+WeeklyUserChatStat = UsageUserStat
 
 
 def get_report_timezone() -> ZoneInfo:
@@ -61,10 +64,17 @@ def fetch_weekly_user_chat_stats(
     report_end: datetime | None = None,
     table_name: str | None = None,
     timezone: ZoneInfo | None = None,
+    department_names: Iterable[str] | str | None = None,
 ) -> list[WeeklyUserChatStat]:
     ensure_chat_messages_table(table_name)
     start, end = week_bounds(report_end=report_end, timezone=timezone)
     table = sql.Identifier(table_name or settings.postgres_chat_table)
+    departments = normalize_department_names(department_names)
+    department_condition = (
+        sql.SQL(" AND COALESCE(department_names, ARRAY[]::TEXT[]) && %s::TEXT[]")
+        if departments
+        else sql.SQL("")
+    )
 
     with postgres_connection() as conn:
         with conn.cursor() as cur:
@@ -77,11 +87,12 @@ def fetch_weekly_user_chat_stats(
                     FROM {table}
                     WHERE create_time >= %s
                       AND create_time < %s
+                      {department_condition}
                     GROUP BY COALESCE(NULLIF(BTRIM(user_name), ''), '未识别用户')
                     ORDER BY message_count DESC, user_name ASC
                     """
-                ).format(table=table),
-                (start, end),
+                ).format(table=table, department_condition=department_condition),
+                (start, end, list(departments)) if departments else (start, end),
             )
             rows = cur.fetchall()
 
@@ -94,28 +105,50 @@ def fetch_weekly_user_chat_stats(
     ]
 
 
+def fetch_weekly_report_data(
+    *,
+    report_end: datetime | None = None,
+    table_name: str | None = None,
+    timezone: ZoneInfo | None = None,
+    department_names: Iterable[str] | str | None = None,
+) -> UsageReportData:
+    tz = timezone or get_report_timezone()
+    start, end = week_bounds(report_end=report_end, timezone=tz)
+    return fetch_usage_report_data(
+        start=start,
+        end=end,
+        granularity="weekly",
+        timezone=tz,
+        table_name=table_name,
+        department_names=department_names,
+    )
+
+
 def build_weekly_report_text(
     stats: list[WeeklyUserChatStat],
     *,
     report_end: datetime | None = None,
+    report_data: UsageReportData | None = None,
 ) -> str:
     start, end = week_bounds(report_end=report_end)
-    total = sum(item.message_count for item in stats)
+    data = report_data or _basic_report_data(stats)
+    return build_usage_report_text(
+        data,
+        title="MTSCO 知识库 · 周使用简报",
+        period_text=f"{start:%Y-%m-%d %H:%M} — {end:%Y-%m-%d %H:%M}",
+        comparison_label="上一周期",
+        distribution_title="每日趋势（按 17:30 截止）",
+    )
 
-    lines = [
-        f"MTSCO知识库本周使用反馈（{start:%Y-%m-%d %H:%M}—{end:%Y-%m-%d %H:%M}）",
-        "",
-        f"上周五 {start:%H:%M} 至本周五 {end:%H:%M}，飞书问答入口共收到 {total} 条提问。",
-    ]
-    if stats:
-        lines.append("本周用户使用次数如下：")
-        lines.extend(
-            f"{index}. {item.user_name}：{item.message_count} 次"
-            for index, item in enumerate(stats, start=1)
-        )
-    else:
-        lines.append("本周还没有产生新的问答记录。")
-    return "\n".join(lines)
+
+def _basic_report_data(stats: list[WeeklyUserChatStat]) -> UsageReportData:
+    total = sum(item.message_count for item in stats)
+    return UsageReportData(
+        user_stats=list(stats),
+        total_questions=total,
+        active_users=len(stats),
+        answered_questions=total,
+    )
 
 
 async def send_weekly_report(
@@ -124,6 +157,7 @@ async def send_weekly_report(
     target_open_id: str | None = None,
     target_session_id: str | None = None,
     report_end: datetime | None = None,
+    department_names: Iterable[str] | str | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
     if not force and not settings.weekly_report_enabled:
@@ -143,8 +177,17 @@ async def send_weekly_report(
 
     end = report_end or default_report_end()
     start, end = week_bounds(report_end=end)
-    stats = await asyncio.to_thread(fetch_weekly_user_chat_stats, report_end=end)
-    text = build_weekly_report_text(stats, report_end=end)
+    departments = normalize_department_names(
+        department_names
+        if department_names is not None
+        else getattr(settings, "weekly_report_departments", "")
+    )
+    fetch_kwargs: dict[str, Any] = {"report_end": end}
+    if departments:
+        fetch_kwargs["department_names"] = departments
+    report_data = await asyncio.to_thread(fetch_weekly_report_data, **fetch_kwargs)
+    stats = report_data.user_stats
+    text = build_weekly_report_text(stats, report_end=end, report_data=report_data)
     receive_id_type = "union_id" if union_id else "chat_id"
     receive_id = union_id or session_id
     if union_id:
@@ -170,7 +213,9 @@ async def send_weekly_report(
         "receive_id_type": receive_id_type,
         "report_start": start,
         "report_end": end,
+        "department_names": departments,
         "stats": stats,
+        "report_data": report_data,
         "text": text,
     }
 
@@ -198,9 +243,10 @@ async def run_weekly_report_loop(
     weekday: int = FRIDAY_WEEKDAY,
     hour: int = 17,
     minute: int = 35,
+    department_names: Iterable[str] | str | None = None,
 ) -> None:
     while True:
         await asyncio.sleep(
             seconds_until_next_weekly_run(weekday=weekday, hour=hour, minute=minute)
         )
-        await send_weekly_report()
+        await send_weekly_report(department_names=department_names)

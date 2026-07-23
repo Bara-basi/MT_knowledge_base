@@ -6,6 +6,7 @@ import json
 import logging
 import mimetypes
 import re
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -24,7 +25,7 @@ except Exception:  # pragma: no cover - Pillow is optional at runtime.
 
 from app.api.v1.query import ask_knowledge_base
 from app.core.config import settings
-from app.db.minio import parse_raw_document_reference
+from app.db.minio import get_minio_client, parse_raw_document_reference
 from app.db.postgres import (
     delete_expired_feishu_answer_feedback_states,
     get_feishu_answer_feedback_state,
@@ -83,6 +84,21 @@ class _ReferenceSource:
     label: str
     description: str
     url: str
+
+
+@dataclass(frozen=True)
+class FeishuUserProfile:
+    union_id: str
+    user_id: str | None
+    open_id: str | None
+    name: str | None
+    department_ids: tuple[str, ...]
+    department_names: tuple[str, ...]
+    job_title: str | None
+    employee_type: Any
+    department_field_available: bool
+    job_title_field_available: bool
+    returned_fields: tuple[str, ...]
 
 
 @dataclass
@@ -2374,16 +2390,17 @@ async def _fetch_feishu_user_info(
     user_id_type: str,
 ) -> dict[str, Any]:
     timeout = httpx.Timeout(settings.feishu_timeout)
-    url = f"{settings.feishu_base_url}/open-apis/contact/v3/users/basic_batch"
+    encoded_user_id = quote(user_id, safe="")
+    url = f"{settings.feishu_base_url}/open-apis/contact/v3/users/{encoded_user_id}"
     params = {
         "user_id_type": user_id_type,
+        "department_id_type": "open_department_id",
     }
     headers = {"Authorization": f"Bearer {token}"}
-    body = {"user_ids": [user_id]}
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(url, params=params, json=body, headers=headers)
+            response = await client.get(url, params=params, headers=headers)
             response.raise_for_status()
     except httpx.TimeoutException as exc:
         raise HTTPException(status_code=504, detail="Feishu user lookup API timed out") from exc
@@ -2400,11 +2417,113 @@ async def _fetch_feishu_user_info(
     if result.get("code") != 0:
         raise HTTPException(status_code=502, detail=f"Feishu user lookup API error: {result}")
 
-    users = ((result.get("data") or {}).get("users") or [])
-    if not users:
-        return {}
-    first_user = users[0]
-    return first_user if isinstance(first_user, dict) else {}
+    user = ((result.get("data") or {}).get("user") or {})
+    return user if isinstance(user, dict) else {}
+
+
+async def fetch_feishu_user_profile_by_union_id(union_id: str) -> FeishuUserProfile:
+    """Resolve a Feishu union_id into tenant user, department, and job information."""
+    normalized_union_id = str(union_id).strip()
+    if not normalized_union_id:
+        raise ValueError("Feishu union_id is required.")
+    if not settings.feishu_app_id or not settings.feishu_app_secret:
+        raise ValueError("Feishu app credentials are required.")
+
+    token = await _get_tenant_access_token()
+    user_info = await _fetch_feishu_user_info(
+        token=token,
+        user_id=normalized_union_id,
+        user_id_type="union_id",
+    )
+    if not user_info:
+        raise ValueError("Feishu user was not found or is outside the contact scope.")
+
+    raw_department_ids = user_info.get("department_ids")
+    department_ids = (
+        tuple(str(item).strip() for item in raw_department_ids if str(item).strip())
+        if isinstance(raw_department_ids, list)
+        else ()
+    )
+    department_infos = await asyncio.gather(
+        *(
+            _fetch_feishu_department_info(token=token, department_id=department_id)
+            for department_id in department_ids
+        ),
+        return_exceptions=True,
+    )
+    department_names = tuple(
+        name
+        for info in department_infos
+        if isinstance(info, dict) and (name := _extract_feishu_department_name(info))
+    )
+    return FeishuUserProfile(
+        union_id=str(user_info.get("union_id") or normalized_union_id),
+        user_id=_normalize_feishu_user_name(user_info.get("user_id")),
+        open_id=_normalize_feishu_user_name(user_info.get("open_id")),
+        name=_extract_feishu_user_name(user_info),
+        department_ids=department_ids,
+        department_names=department_names,
+        job_title=_normalize_feishu_user_name(user_info.get("job_title")),
+        employee_type=user_info.get("employee_type"),
+        department_field_available="department_ids" in user_info,
+        job_title_field_available="job_title" in user_info,
+        returned_fields=tuple(sorted(user_info)),
+    )
+
+
+async def _fetch_feishu_department_info(
+    *,
+    token: str,
+    department_id: str,
+) -> dict[str, Any]:
+    timeout = httpx.Timeout(settings.feishu_timeout)
+    encoded_department_id = quote(department_id, safe="")
+    url = (
+        f"{settings.feishu_base_url}/open-apis/contact/v3/departments/"
+        f"{encoded_department_id}"
+    )
+    params = {
+        "department_id_type": "open_department_id",
+        "user_id_type": "user_id",
+    }
+    headers = {"Authorization": f"Bearer {token}"}
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url, params=params, headers=headers)
+            response.raise_for_status()
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="Feishu department lookup API timed out") from exc
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text[:500]
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=f"Feishu department lookup API returned {exc.response.status_code}: {detail}",
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to call Feishu department lookup API: {exc}",
+        ) from exc
+
+    result = response.json()
+    if result.get("code") != 0:
+        raise HTTPException(status_code=502, detail=f"Feishu department lookup API error: {result}")
+    department = ((result.get("data") or {}).get("department") or {})
+    return department if isinstance(department, dict) else {}
+
+
+def _extract_feishu_department_name(department_info: dict[str, Any]) -> str | None:
+    name = _normalize_feishu_user_name(department_info.get("name"))
+    if name:
+        return name
+    i18n_name = department_info.get("i18n_name")
+    if isinstance(i18n_name, dict):
+        for key in ("zh_cn", "en_us", "ja_jp"):
+            name = _normalize_feishu_user_name(i18n_name.get(key))
+            if name:
+                return name
+    return None
 
 
 def _extract_feishu_user_name(user_info: dict[str, Any]) -> str | None:
@@ -3699,49 +3818,96 @@ def _link_tag_to_markdown(raw_link: str) -> str:
 
 
 async def _upload_local_image(raw_path: str, token: str) -> str | None:
-    image_path = _resolve_local_image_path(raw_path)
+    image_path, temporary_path = _resolve_image_upload_path(raw_path)
     if image_path is None:
-        _warn("image ignored because local file does not exist", path=raw_path)
+        _warn("image ignored because file does not exist or cannot be downloaded", path=raw_path)
         return None
 
-    mime_type = mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"
-    url = f"{settings.feishu_base_url}/open-apis/im/v1/images"
-    timeout = httpx.Timeout(settings.feishu_timeout)
-
-    _debug("image upload request", path=str(image_path), url=url, mime_type=mime_type)
     try:
-        with image_path.open("rb") as image_file:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(
-                    url,
-                    headers={"Authorization": f"Bearer {token}"},
-                    data={"image_type": "message"},
-                    files={"image": (image_path.name, image_file, mime_type)},
-                )
-        _debug(
-            "image upload response",
-            path=str(image_path),
-            http_status=response.status_code,
-            body_preview=_preview(response.text),
+        mime_type = mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"
+        url = f"{settings.feishu_base_url}/open-apis/im/v1/images"
+        timeout = httpx.Timeout(settings.feishu_timeout)
+
+        _debug("image upload request", path=str(image_path), url=url, mime_type=mime_type)
+        try:
+            with image_path.open("rb") as image_file:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    response = await client.post(
+                        url,
+                        headers={"Authorization": f"Bearer {token}"},
+                        data={"image_type": "message"},
+                        files={"image": (image_path.name, image_file, mime_type)},
+                    )
+            _debug(
+                "image upload response",
+                path=str(image_path),
+                http_status=response.status_code,
+                body_preview=_preview(response.text),
+            )
+            response.raise_for_status()
+        except (OSError, httpx.HTTPError) as exc:
+            _warn("image ignored because upload failed", path=str(image_path), error=str(exc))
+            return None
+
+        try:
+            result = response.json()
+        except ValueError:
+            _warn("image ignored because upload response is not json", path=str(image_path))
+            return None
+
+        image_key = (result.get("data") or {}).get("image_key")
+        if result.get("code") != 0 or not image_key:
+            _warn("image ignored because upload API returned error", path=str(image_path), response=result)
+            return None
+
+        _debug("image upload success", path=str(image_path), image_key=image_key)
+        return str(image_key)
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError as exc:
+                _warn("temporary minio image cleanup failed", path=str(temporary_path), error=str(exc))
+
+
+def _resolve_image_upload_path(raw_path: str) -> tuple[Path | None, Path | None]:
+    minio_path = _download_minio_image_to_temp(raw_path)
+    if minio_path is not None:
+        return minio_path, minio_path
+    return _resolve_local_image_path(raw_path), None
+
+
+def _download_minio_image_to_temp(raw_path: str) -> Path | None:
+    if not _is_minio_reference(raw_path):
+        return None
+    try:
+        reference = parse_raw_document_reference(raw_path)
+    except ValueError as exc:
+        _warn("image ignored because minio reference is invalid", path=raw_path, error=str(exc))
+        return None
+
+    suffix = PurePosixPath(reference.object_name).suffix or ".image"
+    handle = tempfile.NamedTemporaryFile(prefix="feishu-minio-image-", suffix=suffix, delete=False)
+    temp_path = Path(handle.name)
+    handle.close()
+    try:
+        get_minio_client().fget_object(reference.bucket, reference.object_name, str(temp_path))
+    except Exception as exc:
+        temp_path.unlink(missing_ok=True)
+        _warn(
+            "image ignored because minio object could not be downloaded",
+            path=raw_path,
+            bucket=reference.bucket,
+            object_name=reference.object_name,
+            error=str(exc),
         )
-        response.raise_for_status()
-    except (OSError, httpx.HTTPError) as exc:
-        _warn("image ignored because upload failed", path=str(image_path), error=str(exc))
         return None
+    return temp_path
 
-    try:
-        result = response.json()
-    except ValueError:
-        _warn("image ignored because upload response is not json", path=str(image_path))
-        return None
 
-    image_key = (result.get("data") or {}).get("image_key")
-    if result.get("code") != 0 or not image_key:
-        _warn("image ignored because upload API returned error", path=str(image_path), response=result)
-        return None
-
-    _debug("image upload success", path=str(image_path), image_key=image_key)
-    return str(image_key)
+def _is_minio_reference(raw_path: str) -> bool:
+    parsed = urlparse(str(raw_path).strip().strip("\"'").replace("\\", "/"))
+    return parsed.scheme in {"minio", "s3"}
 
 
 def _resolve_local_image_path(raw_path: str) -> Path | None:

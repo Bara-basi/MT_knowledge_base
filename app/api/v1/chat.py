@@ -84,13 +84,21 @@ async def get_topic_context(
     )
     if not context:
         raise HTTPException(status_code=404, detail="conversation topic not found")
+    updated_topic = await update_conversation_topic_summary(
+        topic_id=request.topic_id,
+        user_id=request.user_id,
+        session_id=request.session_id,
+        summary=request.summary,
+    )
+    if not updated_topic:
+        raise HTTPException(status_code=404, detail="conversation topic not found")
     remember_topic_selection(
         user_id=request.user_id,
         session_id=request.session_id,
         topic_id=request.topic_id,
     )
     return ConversationTopicContextResponse(
-        topic=context["topic"],
+        topic=updated_topic["topic"],
         messages=context["messages"],
     )
 

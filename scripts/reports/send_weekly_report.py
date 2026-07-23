@@ -24,6 +24,12 @@ def main() -> None:
     parser.add_argument("--open-id", default=None, help="Deprecated alias for --union-id.")
     parser.add_argument("--session-id", default=None, help="Target Feishu chat/session id.")
     parser.add_argument(
+        "--department",
+        action="append",
+        default=None,
+        help="Only include this department; repeat for multiple departments. Braces are optional.",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Send once even when WEEKLY_REPORT_ENABLED=false.",
@@ -31,7 +37,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.loop:
-        asyncio.run(run_weekly_report_loop())
+        asyncio.run(run_weekly_report_loop(department_names=args.department))
         return
 
     result = asyncio.run(
@@ -39,6 +45,7 @@ def main() -> None:
             target_union_id=args.union_id,
             target_open_id=args.open_id,
             target_session_id=args.session_id,
+            department_names=args.department,
             force=args.force,
         )
     )
