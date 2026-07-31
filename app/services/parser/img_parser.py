@@ -4,12 +4,20 @@ import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import mimetypes
+import os
 import re
 import time
 from pathlib import Path
 from typing import Any
 
-from app.services.llm import LLMAPIError, LLMConfigError, LLMClient, get_llm_client
+from app.services.llm import (
+    LLMAPIError,
+    LLMConfigError,
+    LLMClient,
+    LLMTimeoutError,
+    build_non_thinking_extra_body,
+    get_llm_client,
+)
 
 
 IMAGE_ANALYSIS_MODEL = "kimi-k2.6"
@@ -21,6 +29,14 @@ IMAGE_TYPE_TABLE = "table"
 IMAGE_TYPE_FLOWCHART = "flowchart"
 DEFAULT_IMAGE_ANALYSIS_WORKERS = 3
 MAX_IMAGE_ANALYSIS_WORKERS = 5
+VISION_UPLOAD_MAX_ATTEMPTS = max(
+    1,
+    int(os.getenv("VISION_UPLOAD_MAX_ATTEMPTS", "3")),
+)
+VISION_UPLOAD_RETRY_BASE_SECONDS = max(
+    0.0,
+    float(os.getenv("VISION_UPLOAD_RETRY_BASE_SECONDS", "0.75")),
+)
 
 
 def enrich_image_descriptions(
@@ -103,7 +119,8 @@ def enrich_image_descriptions(
 
 
 def _log(message: str) -> None:
-    print(f"[img_parser] {message}", flush=True)
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[img_parser][{timestamp}] {message}", flush=True)
 
 
 def _log_all_satisfied_warning(items: list[dict[str, str]], tasks: list[dict[str, Any]]) -> None:
@@ -259,37 +276,298 @@ def _analyze_image(
     group_position: int,
     group_size: int,
 ) -> dict[str, Any]:
-    content: list[dict[str, Any]] = [
-        {
-            "type": "text",
-            "text": _build_prompt(context, group_position=group_position, group_size=group_size),
-        },
-        {
-            "type": "image_url",
-            "image_url": {"url": _image_to_data_url(Path(item["path"]))},
-        },
-    ]
-    # print(content[0].get("text"))
-    messages = [{"role": "user", "content": content}]
+    image_path = Path(item["path"])
+    prompt = _build_prompt(
+        context,
+        group_position=group_position,
+        group_size=group_size,
+    )
     try:
-        response = client.chat(
-            messages,
+        response = request_multimodal_text(
+            client,
+            prompt=prompt,
+            image_bytes=image_path.read_bytes(),
+            content_type=mimetypes.guess_type(image_path)[0] or "application/octet-stream",
             model=model,
-            temperature=0,
             max_tokens=1200,
-            extra_body={
-                "response_format": {"type": "json_object"},
-                "enable_thinking": False,
-            },
+            json_mode=True,
+            purpose=f"image analysis: {image_path.name}",
         )
-    except LLMAPIError:
-        response = client.chat(
-            messages,
+    except LLMTimeoutError:
+        # Retrying the same image without JSON mode does not address a network
+        # or provider input timeout and used to double the wall-clock delay.
+        raise
+    except LLMAPIError as exc:
+        if not _looks_like_json_mode_error(exc):
+            raise
+        _log(
+            "vision JSON mode unsupported; retrying as plain text: "
+            f"image={image_path.name}; error={type(exc).__name__}: {exc}"
+        )
+        response = request_multimodal_text(
+            client,
+            prompt=prompt,
+            image_bytes=image_path.read_bytes(),
+            content_type=mimetypes.guess_type(image_path)[0] or "application/octet-stream",
             model=model,
-            temperature=0,
             max_tokens=1200,
+            purpose=f"image analysis fallback: {image_path.name}",
         )
     return _parse_analysis(response)
+
+
+def request_multimodal_text(
+    client: LLMClient,
+    *,
+    prompt: str,
+    image_bytes: bytes,
+    content_type: str = "image/jpeg",
+    model: str | None = IMAGE_ANALYSIS_MODEL,
+    max_tokens: int = 1200,
+    read_timeout: float | None = None,
+    json_mode: bool = False,
+    purpose: str = "multimodal request",
+    image_transport: str = "auto",
+) -> str:
+    """Call the shared, non-streaming vision transport.
+
+    Moonshot requests use its temporary file API by default.  This avoids
+    embedding a large base64 image in the chat JSON body, a common source of
+    provider-side ``input timeout`` failures.  Other OpenAI-compatible
+    providers keep using a Data URL.
+    """
+
+    transport = _resolve_multimodal_transport(client, image_transport)
+    file_id: str | None = None
+    image_url: str
+    request_started = time.perf_counter()
+    if transport == "file":
+        upload_started = time.perf_counter()
+        _log(
+            "vision upload start: "
+            f"purpose={purpose}; image_kb={len(image_bytes) / 1024:.1f}; "
+            f"content_type={content_type}; max_attempts={VISION_UPLOAD_MAX_ATTEMPTS}"
+        )
+        for attempt in range(1, VISION_UPLOAD_MAX_ATTEMPTS + 1):
+            try:
+                file_id = client.upload_file(
+                    filename=f"vision-input{mimetypes.guess_extension(content_type) or '.bin'}",
+                    content=image_bytes,
+                    purpose="image",
+                    content_type=content_type,
+                    read_timeout=min(60.0, read_timeout or 60.0),
+                )
+                break
+            except (AttributeError, LLMAPIError, OSError) as exc:
+                retryable = _is_retryable_vision_upload_error(exc)
+                final_attempt = attempt >= VISION_UPLOAD_MAX_ATTEMPTS
+                _log(
+                    "vision upload failed: "
+                    f"purpose={purpose}; attempt={attempt}/{VISION_UPLOAD_MAX_ATTEMPTS}; "
+                    f"retryable={retryable}; "
+                    f"elapsed={time.perf_counter() - upload_started:.2f}s; "
+                    f"error_kind={_vision_error_kind(exc)}; "
+                    f"root_error={_root_error_summary(exc)}; "
+                    f"diagnostic={_vision_upload_diagnostic(exc)}; "
+                    f"error={type(exc).__name__}: {exc}"
+                )
+                if final_attempt or not retryable:
+                    raise
+                delay = VISION_UPLOAD_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+                _log(
+                    "vision upload retry scheduled: "
+                    f"purpose={purpose}; next_attempt={attempt + 1}; "
+                    f"delay={delay:.2f}s"
+                )
+                if delay > 0:
+                    time.sleep(delay)
+        if not file_id:
+            raise LLMAPIError(
+                "Vision upload returned no file ID after "
+                f"{VISION_UPLOAD_MAX_ATTEMPTS} attempts"
+            )
+        _log(
+            "vision upload complete: "
+            f"purpose={purpose}; elapsed={time.perf_counter() - upload_started:.2f}s"
+        )
+        image_url = f"ms://{file_id}"
+    else:
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        image_url = f"data:{content_type};base64,{encoded}"
+
+    content: list[dict[str, Any]] = [
+        {"type": "text", "text": prompt},
+        {
+            "type": "image_url",
+            "image_url": {"url": image_url},
+        },
+    ]
+    selected_model = model or getattr(getattr(client, "settings", None), "model", "")
+    base_url = str(getattr(getattr(client, "settings", None), "base_url", ""))
+    extra_body = build_non_thinking_extra_body(
+        model=selected_model,
+        base_url=base_url,
+    )
+    if json_mode:
+        extra_body["response_format"] = {"type": "json_object"}
+    _log(
+        "vision request start: "
+        f"purpose={purpose}; transport={transport}; image_kb={len(image_bytes) / 1024:.1f}; "
+        f"prompt_chars={len(prompt)}; max_output_tokens={max_tokens}; "
+        f"read_timeout={read_timeout}; json_mode={json_mode}; "
+        f"model={selected_model or '<default>'}; "
+        f"thinking_mode={'disabled' if 'thinking' in extra_body or extra_body.get('enable_thinking') is False else 'provider_default'}"
+    )
+    chat_started = time.perf_counter()
+    try:
+        response = client.chat(
+            [{"role": "user", "content": content}],
+            model=model,
+            temperature=0,
+            max_tokens=max_tokens,
+            extra_body=extra_body,
+            read_timeout=read_timeout,
+            stream=False,
+        )
+        _log(
+            "vision response received: "
+            f"purpose={purpose}; transport={transport}; "
+            f"model_elapsed={time.perf_counter() - chat_started:.2f}s; "
+            f"response_chars={len(response)}"
+        )
+    except (LLMAPIError, LLMConfigError, OSError, ValueError) as exc:
+        _log(
+            "vision request failed: "
+            f"purpose={purpose}; transport={transport}; "
+            f"elapsed={time.perf_counter() - request_started:.2f}s; "
+            f"error_kind={_vision_error_kind(exc)}; "
+            f"error={type(exc).__name__}: {exc}"
+        )
+        raise
+    finally:
+        if file_id:
+            cleanup_started = time.perf_counter()
+            try:
+                client.delete_file(file_id, read_timeout=10.0)
+            except (AttributeError, LLMAPIError, OSError) as exc:
+                _log(
+                    "vision file cleanup failed: "
+                    f"purpose={purpose}; error={type(exc).__name__}: {exc}"
+                )
+            else:
+                _log(
+                    "vision file cleanup complete: "
+                    f"purpose={purpose}; elapsed={time.perf_counter() - cleanup_started:.2f}s"
+                )
+    _log(
+        "vision request complete: "
+        f"purpose={purpose}; transport={transport}; "
+        f"elapsed={time.perf_counter() - request_started:.2f}s; "
+        f"response_chars={len(response)}"
+    )
+    return response
+
+
+def _resolve_multimodal_transport(client: LLMClient, configured: str) -> str:
+    normalized = str(configured or "auto").strip().lower()
+    if normalized not in {"auto", "file", "data_uri"}:
+        raise ValueError(f"Unsupported vision image transport: {configured}")
+    if normalized != "auto":
+        return normalized
+    settings = getattr(client, "settings", None)
+    base_url = str(getattr(settings, "base_url", "")).lower()
+    return "file" if "moonshot" in base_url and hasattr(client, "upload_file") else "data_uri"
+
+
+def _looks_like_json_mode_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "response_format",
+            "json_object",
+            "json mode",
+            "json schema",
+        )
+    )
+
+
+def _vision_error_kind(exc: BaseException) -> str:
+    message = str(exc).lower()
+    if isinstance(exc, LLMTimeoutError):
+        return "client_timeout"
+    if "input timeout" in message or "input processing timeout" in message:
+        return "provider_input_timeout"
+    if "429" in message or "rate limit" in message:
+        return "rate_limit"
+    if "response_format" in message or "json_object" in message:
+        return "response_format"
+    if "content is empty" in message or "finish_reason='length'" in message:
+        return "output_budget_exhausted"
+    if re.search(r"\b5\d\d\b", message):
+        return "provider_5xx"
+    return "api_error"
+
+
+def _is_retryable_vision_upload_error(exc: BaseException) -> bool:
+    if isinstance(exc, LLMTimeoutError):
+        return True
+    message = str(exc).lower()
+    if any(
+        marker in message
+        for marker in (
+            "10054",
+            "connection reset",
+            "connection aborted",
+            "connection refused",
+            "connection closed",
+            "remote protocol",
+            "server disconnected",
+            "failed to upload llm file",
+            "temporarily unavailable",
+            "timed out",
+            "timeout",
+            "rate limit",
+            "too many requests",
+        )
+    ):
+        return True
+    return bool(
+        re.search(
+            r"(?:returned|status(?:_code)?[=: ]+)\s*(?:429|5\d\d)\b",
+            message,
+        )
+    )
+
+
+def _root_error_summary(exc: BaseException) -> str:
+    root = exc
+    visited: set[int] = set()
+    while (
+        getattr(root, "__cause__", None) is not None
+        and id(root) not in visited
+    ):
+        visited.add(id(root))
+        root = root.__cause__  # type: ignore[assignment]
+    text = re.sub(r"\s+", " ", str(root)).strip()
+    return f"{type(root).__name__}:{text[:180]}"
+
+
+def _vision_upload_diagnostic(exc: BaseException) -> str:
+    message = f"{exc} {_root_error_summary(exc)}".lower()
+    if "10054" in message or "connection reset" in message:
+        return "peer_or_proxy_reset_connection"
+    if "server disconnected" in message or "remote protocol" in message:
+        return "provider_or_gateway_closed_connection"
+    if "429" in message or "rate limit" in message:
+        return "provider_rate_limit"
+    if re.search(r"\b5\d\d\b", message):
+        return "provider_5xx"
+    if "timeout" in message or "timed out" in message:
+        return "upload_timeout"
+    if "connection refused" in message:
+        return "endpoint_or_proxy_refused_connection"
+    return "nontransient_or_unknown_upload_error"
 
 
 def _build_prompt(context: dict[str, str], *, group_position: int, group_size: int) -> str:
@@ -385,7 +663,12 @@ def _parse_analysis(response: str) -> dict[str, Any]:
     cleaned = _extract_json_payload(response)
     try:
         parsed = json.loads(cleaned)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        _log(
+            "vision response JSON invalid; using plain-text fallback: "
+            f"response_chars={len(response)}; line={exc.lineno}; column={exc.colno}; "
+            f"error={exc.msg}"
+        )
         return {
             "image_type": IMAGE_TYPE_SCREENSHOT,
             "description": _strip_model_artifacts(response).strip(),

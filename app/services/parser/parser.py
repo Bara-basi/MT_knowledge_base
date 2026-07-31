@@ -31,20 +31,11 @@ def parse_document(
 
         items = parse_powerpoint_document(path, image_analysis_workers=image_analysis_workers)
     elif suffix == ".pdf":
-        if is_standard_pdf_source(source):
-            from app.services.parser.standard_pdf_parser import parse_standard_pdf_sections
-            from app.services.parser.standard_pdf_splitter import split_standard_pdf_document
-
-            sections = split_standard_pdf_document(
-                path,
-                image_analysis_workers=image_analysis_workers,
-                source_reference=source,
-            )
-            items = parse_standard_pdf_sections(sections)
-        else:
-            from app.services.parser.pdf_parser import parse_pdf_document
-
-            items = parse_pdf_document(path, image_analysis_workers=image_analysis_workers)
+        return _parse_pdf_sources(
+            source,
+            local_path=path,
+            image_analysis_workers=image_analysis_workers,
+        )
     else:
         raise ValueError(f"Unsupported document type: {suffix or 'unknown'}")
 
@@ -55,6 +46,50 @@ def parse_document(
         produced_processing_dir=processing_document_dir(path),
     )
     return items
+
+
+def _parse_pdf_sources(
+    source: str | Path,
+    *,
+    local_path: Path,
+    image_analysis_workers: int,
+) -> list[dict]:
+    from app.services.parser.unified_pdf_parser import (
+        parse_unified_pdf_document,
+        resolve_pdf_document_sources,
+    )
+
+    resolved_sources = resolve_pdf_document_sources(
+        source,
+        local_path=local_path,
+    )
+    all_items: list[dict] = []
+    for resolved_source in resolved_sources:
+        if _same_document_source(resolved_source, source):
+            resolved_path = local_path
+        else:
+            resolved_path = _local_parser_path(resolved_source)
+        items = parse_unified_pdf_document(
+            resolved_path,
+            image_analysis_workers=image_analysis_workers,
+            source_reference=resolved_source,
+        )
+        synchronize_processed_assets(
+            resolved_source,
+            produced_processing_dir=processing_document_dir(resolved_path),
+            update_registry=(
+                len(resolved_sources) == 1
+                and not is_generated_standard_pdf_section(resolved_source)
+            ),
+        )
+        all_items.extend(items)
+    return all_items
+
+
+def _same_document_source(left: str | Path, right: str | Path) -> bool:
+    return unquote(str(left).replace("\\", "/")).strip() == unquote(
+        str(right).replace("\\", "/")
+    ).strip()
 
 
 def _local_parser_path(file_path: str | Path) -> Path:
@@ -83,18 +118,18 @@ def _is_local_data_raw_path(path: Path) -> bool:
 
 
 def is_standard_pdf_source(value: str | Path) -> bool:
-    """Return whether a PDF needs the split-then-parse standard pipeline."""
+    """Return whether a PDF is an unsplit ASME parent volume.
+
+    Kept as a compatibility predicate for callers.  Directory names such as
+    ``产品标准`` no longer select a parser.
+    """
     normalized = str(value).strip().replace("\\", "/")
     decoded = unquote(normalized)
     parsed = urlparse(decoded)
     source_path = Path(parsed.path if parsed.scheme else decoded)
     if source_path.suffix.lower() != ".pdf" or is_generated_standard_pdf_section(decoded):
         return False
-    return (
-        "标准文档" in decoded
-        or "产品标准" in decoded
-        or source_path.name.upper().startswith("ASME")
-    )
+    return source_path.name.upper().startswith("ASME")
 
 
 def is_generated_standard_pdf_section(value: str | Path) -> bool:

@@ -43,7 +43,7 @@ temp/
 # Local knowledge-base data and generated artifacts
 data/
 
-n8n-files/
+
 
 # Docker/local service volumes
 docker-data/

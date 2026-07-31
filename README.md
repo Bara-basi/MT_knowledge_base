@@ -98,7 +98,7 @@ POSTGRES_PASSWORD=change-me
 POSTGRES_CHAT_TABLE=chat_messages
 CHAT_MESSAGE_ENCRYPTION_KEY=change-me-to-a-long-random-string
 
-MINIO_ACCESS_KEY_ID=minioadmin
+MINIO_ACCESS_KEY_ID=change-me
 MINIO_SECRET_ACCESS_KEY=change-me
 MINIO_INTERNAL_ENDPOINT=http://milvus-minio:9000
 MINIO_PUBLIC_ENDPOINT=https://your-domain.example/minio
@@ -406,5 +406,5 @@ CRON_TZ=Asia/Shanghai
 ```powershell
 Get-CimInstance Win32_Process |
   Where-Object { $_.CommandLine -like "*send_daily_report.py*" } |
-  Select-Object ProcessId, CommandLine
+  Select-Object ProcessId, CommandLined
 ```

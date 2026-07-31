@@ -28,7 +28,7 @@ from app.db.minio import (
 from app.core.config import settings
 from app.services.data_clean import clean_items
 from app.services.parser.paths import processing_document_dir, processing_subdir
-from app.services.parser.pdf_parser import (
+from app.services.parser.unified_pdf_parser import (
     PdfLine,
     _build_items as _build_pdf_items,
     _clean_pdf_lines,
@@ -221,6 +221,53 @@ def split_standard_pdf_document(
     _log(f"wrote assets manifest: {assets_manifest_path}")
     _log("wrote masked text PDFs")
     _log(f"finished splitting: {path.name} ({time.perf_counter() - started_at:.2f}s)")
+    return sections
+
+
+def split_standard_pdf_sections_only(
+    file_path: str | Path,
+    *,
+    title_page_max_chars: int = DEFAULT_TITLE_PAGE_MAX_CHARS,
+    source_reference: str | Path | None = None,
+    split_prefix: str | None = None,
+) -> list[StandardPdfSection]:
+    """Run only the legacy ASME segmentation rule.
+
+    Text, OCR, layout, table and image parsing are intentionally excluded.
+    Every produced small PDF is parsed later by ``unified_pdf_parser``.
+    """
+
+    started_at = time.perf_counter()
+    _ensure_dependencies()
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"PDF document not found: {path}")
+    if path.suffix.lower() != ".pdf":
+        raise ValueError(f"Only .pdf files are supported: {path}")
+
+    _log(f"start ASME split-only preprocessing: {path}")
+    title_pages = find_standard_title_pages(
+        path,
+        title_page_max_chars=title_page_max_chars,
+    )
+    sections = split_standard_pdf(path, title_pages)
+    sections = upload_standard_pdf_sections_to_minio(
+        path,
+        sections,
+        source_reference=source_reference,
+        split_prefix=split_prefix,
+    )
+    manifest_path = write_split_manifest(
+        path,
+        title_pages,
+        sections,
+        title_page_max_chars=title_page_max_chars,
+        source_reference=source_reference,
+    )
+    _log(
+        f"finished ASME split-only preprocessing: sections={len(sections)}, "
+        f"manifest={manifest_path} ({time.perf_counter() - started_at:.2f}s)"
+    )
     return sections
 
 

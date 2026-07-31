@@ -6,7 +6,10 @@ from pydantic import BaseModel, Field
 
 
 class QueryRequest(BaseModel):
-    question: str = Field(..., min_length=1, description="User question.")
+    # The question is forwarded to several workflow/LLM nodes.  Bound it at
+    # the public API boundary so one webhook request cannot exhaust the
+    # workflow context window or tie up a worker for the full n8n timeout.
+    question: str = Field(..., min_length=1, max_length=8_000, description="User question.")
     user_id: str | None = Field(None, description="Caller or end-user id.")
     session_id: str | None = Field(None, description="Conversation/session id.")
     conversation_id: str | None = Field(None, description="External conversation id.")

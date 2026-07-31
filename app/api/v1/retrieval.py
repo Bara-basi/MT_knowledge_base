@@ -46,7 +46,7 @@ def retrieve_filtered_flow_chunks(
     filter_expression = build_agent_metadata_filter(request)
     print(
         "[retrieval] filtered request "
-        f"query={request.query!r} file_path={request.file_path!r} "
+        f"query_len={len(request.query)} file_path={request.file_path!r} "
         f"chunk_type={request.chunk_type!r} path_prefix={request.path_prefix!r}",
         flush=True,
     )
@@ -135,7 +135,7 @@ def _milvus_string(value: str) -> str:
 def _retrieve_flow_chunks(request: FlowRetrievalRequest) -> FlowRetrievalResponse:
     print(
         "[retrieval] flow request "
-        f"query={request.query!r} limit={request.limit} "
+        f"query_len={len(request.query)} limit={request.limit} "
         f"document_name={request.document_name!r} "
         f"bm25_model_file={request.bm25_model_file!r} "
         f"recall_limit={request.recall_limit} rerank={request.rerank} "
@@ -164,10 +164,12 @@ def _retrieve_flow_chunks(request: FlowRetrievalRequest) -> FlowRetrievalRespons
 
     chunks = [
         _to_flow_chunk(result, debug=request.debug)
-        for result in _sort_flow_results(results)
+        # `RetrievalService.search()` returns cross-encoder order.  Preserve
+        # that relevance signal for workflow consumers.
+        for result in results
     ]
     print(
-        f"[retrieval] flow success query={request.query!r} count={len(chunks)}",
+        f"[retrieval] flow success query_len={len(request.query)} count={len(chunks)}",
         flush=True,
     )
     return FlowRetrievalResponse(
@@ -181,10 +183,6 @@ def _resolve_bm25_model_file(request: FlowRetrievalRequest) -> str | Path | None
     if request.bm25_model_file:
         return request.bm25_model_file
     return None
-
-
-def _sort_flow_results(results: list[RetrievalResult]) -> list[RetrievalResult]:
-    return sorted(results, key=lambda result: result.id)
 
 
 def _to_flow_chunk(

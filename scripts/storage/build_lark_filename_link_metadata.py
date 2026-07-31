@@ -1,9 +1,15 @@
 import json
-import os
 import pathlib
 import re
 import sys
 from urllib.parse import urlparse
+
+
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.storage.lark_script_credentials import get_lark_credentials  # noqa: E402
 
 
 BASE_URL = "https://open.feishu.cn/open-apis"
@@ -32,12 +38,6 @@ FEISHU_DOC_URL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Keep the same fallback credentials as download_lark_cropus_with_link.py.
-# Environment variables take precedence so this script can be reused safely.
-DEFAULT_APP_ID = "cli_aa895b208df9dcdd"
-DEFAULT_APP_SECRET = "AfESVeY5n9m7By2plKh97g05C7TtbCAZ"
-
-
 class FeishuAPIError(Exception):
     def __init__(self, data):
         super().__init__(data)
@@ -49,12 +49,7 @@ class FeishuAPIError(Exception):
 def get_access_token():
     import httpx
 
-    app_id = os.getenv("FEISHU_APP_ID") or os.getenv("LARK_APP_ID") or DEFAULT_APP_ID
-    app_secret = (
-        os.getenv("FEISHU_APP_SECRET")
-        or os.getenv("LARK_APP_SECRET")
-        or DEFAULT_APP_SECRET
-    )
+    app_id, app_secret = get_lark_credentials()
 
     resp = httpx.post(
         f"{BASE_URL}/auth/v3/tenant_access_token/internal",

@@ -1,0 +1,121 @@
+{
+  "name": "问答检索-prod",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "query"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        32,
+        0
+      ],
+      "id": "e5578e10-f005-48c0-b2a1-a46310f16359",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://api:8000/prod/api/v1/retrieval/flow",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "{\n  \"Content-Type\": \"application/json\"\n}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"query\": {{ JSON.stringify(String($json.query ?? '')) }},\n  \"limit\":15,\n  \"rerank\": true\n} ",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        208,
+        0
+      ],
+      "id": "40a62b41-f820-4ed3-b39f-814c9020347f",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\nconst chunks = Array.isArray(data.chunks) ? data.chunks : [];\n\nfunction cleanString(value) {\n  if (value === null || value === undefined) return '';\n  return String(value).trim();\n}\n\nfunction cleanNullableNumber(value) {\n  const number = Number(value);\n  return Number.isFinite(number) ? number : null;\n}\n\nfunction cleanAssetArray(value, nameKey, pathKey) {\n  if (!Array.isArray(value)) return [];\n\n  return value\n    .map((item, fallbackIndex) => {\n      if (!item || typeof item !== 'object' || Array.isArray(item)) return null;\n\n      const path = cleanString(item[pathKey]);\n      if (!path) return null;\n\n      const indexNumber = Number(item.index);\n      return {\n        index: Number.isFinite(indexNumber) ? indexNumber : fallbackIndex,\n        [nameKey]: cleanString(item[nameKey]) || path,\n        [pathKey]: path,\n      };\n    })\n    .filter(Boolean);\n}\n\nconst items = chunks\n  .map((chunk) => ({\n    chunk_id: cleanString(chunk.chunk_id),\n    content: cleanString(chunk.content),\n    content_text: cleanString(chunk.content),\n    chunk_index: cleanNullableNumber(chunk.chunk_index),\n    chunk_type: cleanString(chunk.chunk_type),\n    file_name: cleanString(chunk.file_name),\n    file_path: cleanString(chunk.file_path),\n    path: cleanString(chunk.path),\n    imgs: cleanAssetArray(chunk.imgs, 'img_name', 'img_path'),\n    links: cleanAssetArray(chunk.links, 'link_name', 'link_path'),\n  }))\n  .filter((item) => item.chunk_id && item.content_text);\n\nreturn items.map((item) => ({\n  json: item,\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        416,
+        0
+      ],
+      "id": "6c9077ff-987e-4168-8255-f0911ddfefac",
+      "name": "Code in JavaScript"
+    }
+  ],
+  "pinData": {
+    "When Executed by Another Workflow": [
+      {
+        "json": {
+          "query": "如何计算ASTM A312无缝管316L 8\" × Sch10s × 6m的FOB USD/KG价格、每支管子的FOB USD/PC价格以及这批货物的FOB总价？"
+        }
+      },
+      {
+        "json": {
+          "query": "在计算ASTM A312无缝管316L 8\" × Sch10s × 6m的重量时，有哪些关键考点需要特别注意？"
+        }
+      }
+    ]
+  },
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true
+  },
+  "versionId": "d4b73db7-3d2f-4b2c-81f0-af9dfff3da00",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "359a985ebc263642dd6cff82353ac69571c85d572e17ee23325b886b1e17bc67"
+  },
+  "id": "0N11uTxPrWDr7G9O",
+  "tags": [
+    {
+      "updatedAt": "2026-06-22T02:43:35.782Z",
+      "createdAt": "2026-06-22T02:43:35.782Z",
+      "id": "bDVHVRWrqSuSWzzI",
+      "name": "prod"
+    }
+  ]
+}

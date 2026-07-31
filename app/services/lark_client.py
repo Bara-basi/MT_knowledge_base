@@ -17,9 +17,6 @@ DOWNLOAD_TIMEOUT = 120
 MAX_EXPORT_WAIT_SECONDS = 180
 EXPORT_FAILED_GRACE_SECONDS = 30
 
-DEFAULT_APP_ID = "cli_aa895b208df9dcdd"
-DEFAULT_APP_SECRET = "AfESVeY5n9m7By2plKh97g05C7TtbCAZ"
-
 
 class FeishuAPIError(Exception):
     def __init__(self, data):
@@ -39,8 +36,13 @@ class FeishuHTTPError(Exception):
 
 
 def get_access_token() -> str:
-    app_id = settings.feishu_app_id or DEFAULT_APP_ID
-    app_secret = settings.feishu_app_secret or DEFAULT_APP_SECRET
+    app_id = settings.feishu_app_id
+    app_secret = settings.feishu_app_secret
+    if not app_id or not app_secret:
+        raise RuntimeError(
+            "Missing required Lark credentials in .env: "
+            "LARK_APP_ID, LARK_APP_SECRET"
+        )
     resp = requests.post(
         f"{BASE_URL}/auth/v3/tenant_access_token/internal",
         json={"app_id": app_id, "app_secret": app_secret},

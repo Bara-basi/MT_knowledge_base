@@ -85,12 +85,12 @@ class Settings:
     minio_access_key_id: str = _get_first_env(
         "MINIO_ACCESS_KEY_ID",
         "MINIO_ROOT_USER",
-        default="minioadmin",
+        default="",
     )
     minio_secret_access_key: str = _get_first_env(
         "MINIO_SECRET_ACCESS_KEY",
         "MINIO_ROOT_PASSWORD",
-        default="minioadmin",
+        default="",
     )
     minio_bucket: str = _get_first_env(
         "MINIO_BUCKET",
@@ -146,7 +146,12 @@ class Settings:
         0.0004,
     )
     rerank_score_cliff_delta: float = float(
-        os.getenv("RERANK_SCORE_CLIFF_DELTA", "1")
+        # Scores from bge-reranker-v2-m3 are not calibrated probabilities, but
+        # a 0.7 gap is a strong relevance boundary in the configured score
+        # scale.  Keep the runtime default aligned with the documented
+        # deployment configuration; 1.0 effectively disables tail trimming
+        # for most requests and lets low-relevance chunks reach the QA agent.
+        os.getenv("RERANK_SCORE_CLIFF_DELTA", "0.7")
     )
     retrieval_recall_multiplier: int = int(
         os.getenv("RETRIEVAL_RECALL_MULTIPLIER", "5")

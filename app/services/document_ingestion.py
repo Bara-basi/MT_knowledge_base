@@ -20,11 +20,13 @@ from app.services.embedding import (
 )
 from app.services.parser.parser import (
     is_generated_standard_pdf_section,
-    is_standard_pdf_source,
     parse_document,
 )
 from app.services.parser.paths import processing_document_dir
-from app.services.parser.standard_pdf_splitter import publish_standard_pdf_sections_from_manifest
+from app.services.parser.unified_pdf_parser import (
+    _is_asme_parent_pdf,
+    resolve_pdf_document_sources,
+)
 from app.services.vector_store import VectorStoreService, load_embedding_records
 
 
@@ -97,13 +99,42 @@ def prepare_documents(
     rebuild: bool = True,
     parse: bool = True,
 ) -> list[PreparedDocument]:
-    if is_standard_pdf_document(file_path):
-        return prepare_standard_pdf_sections(
+    if _source_suffix(file_path) == ".pdf":
+        resolved_already_parsed = False
+        resolved_sources = resolve_pdf_document_sources(
             file_path,
-            image_analysis_workers=image_analysis_workers,
-            rebuild=rebuild,
-            parse=parse,
+            split_if_missing=False,
         )
+        if (
+            len(resolved_sources) == 1
+            and str(resolved_sources[0]) == str(file_path)
+            and _is_asme_parent_pdf(file_path)
+        ):
+            if not parse:
+                raise FileNotFoundError(
+                    f"ASME split edition is required when parsing is disabled: {file_path}"
+                )
+            # parse_document performs split-only preprocessing when needed and
+            # parses every resulting small PDF through the unified pipeline.
+            parse_document(
+                file_path,
+                image_analysis_workers=image_analysis_workers,
+            )
+            resolved_already_parsed = True
+            resolved_sources = resolve_pdf_document_sources(
+                file_path,
+                split_if_missing=False,
+            )
+        if len(resolved_sources) != 1 or str(resolved_sources[0]) != str(file_path):
+            return [
+                prepare_document(
+                    resolved_source,
+                    image_analysis_workers=image_analysis_workers,
+                    rebuild=rebuild,
+                    parse=False if resolved_already_parsed else parse,
+                )
+                for resolved_source in resolved_sources
+            ]
     return [
         prepare_document(
             file_path,
@@ -121,10 +152,6 @@ def prepare_document(
     rebuild: bool = True,
     parse: bool = True,
 ) -> PreparedDocument:
-    if is_standard_pdf_document(file_path):
-        raise ValueError(
-            "Standard PDFs produce multiple prepared documents; use prepare_documents() instead."
-        )
     document_name = _source_stem(file_path)
     processing_dir = processing_document_dir(file_path)
     txt_file = processing_dir / "txt" / f"{document_name}.txt"
@@ -161,66 +188,14 @@ def prepare_standard_pdf_sections(
     rebuild: bool = True,
     parse: bool = True,
 ) -> list[PreparedDocument]:
-    processing_dir = processing_document_dir(file_path)
-    if parse and rebuild:
-        parse_document(file_path, image_analysis_workers=image_analysis_workers)
+    """Backward-compatible name routed to the unified PDF preparation path."""
 
-    section_txt_files = find_standard_section_txt_files(processing_dir)
-    if parse and not rebuild and not section_txt_files:
-        parse_document(file_path, image_analysis_workers=image_analysis_workers)
-        section_txt_files = find_standard_section_txt_files(processing_dir)
-    if not section_txt_files:
-        raise FileNotFoundError(f"No standard section txt files found under: {processing_dir}")
-    if any(standard_section_source_for_txt(path) is None for path in section_txt_files):
-        publish_standard_pdf_sections_from_manifest(
-            processing_dir / "manifest.json",
-            source_reference=file_path,
-        )
-
-    prepared_documents: list[PreparedDocument] = []
-    for txt_file in section_txt_files:
-        section_dir = txt_file.parent.parent
-        section_pdf = section_pdf_for_txt(txt_file)
-        source_file = standard_section_source_for_txt(txt_file)
-        if source_file is None:
-            raise ValueError(
-                "Standard section is missing its published source_uri after publication: "
-                f"{section_pdf}"
-            )
-        chunk_file = section_dir / "chunk" / f"{txt_file.stem}.chunks.json"
-        embedding_file = section_dir / "embedding" / f"{txt_file.stem}.embeddings.json"
-        force_upsert = False
-        if not rebuild and chunk_file.exists():
-            chunks = load_chunks(chunk_file)
-            if not _chunks_reference_source(chunks, source_file):
-                parsed_items = load_items_from_txt(txt_file)
-                chunks = split_items(parsed_items, source_file=source_file)
-                save_chunks(chunks, chunk_file)
-                force_upsert = True
-        else:
-            parsed_items = load_items_from_txt(txt_file)
-            chunks = split_items(parsed_items, source_file=source_file)
-            save_chunks(chunks, chunk_file)
-        if (
-            not rebuild
-            and embedding_file.exists()
-            and not _embedding_file_references_source(embedding_file, source_file)
-        ):
-            embedding_file.unlink()
-            force_upsert = True
-        if not rebuild and not embedding_file.exists():
-            force_upsert = True
-        prepared_documents.append(
-            PreparedDocument(
-                file_path=source_file,
-                txt_file=txt_file,
-                chunk_file=chunk_file,
-                embedding_file=embedding_file,
-                chunks=chunks,
-                force_upsert=force_upsert,
-            )
-        )
-    return prepared_documents
+    return prepare_documents(
+        file_path,
+        image_analysis_workers=image_analysis_workers,
+        rebuild=rebuild,
+        parse=parse,
+    )
 
 
 def find_standard_section_txt_files(processing_dir: Path) -> list[Path]:
@@ -322,12 +297,35 @@ def embedding_file_file_ids(embedding_file: Path) -> list[str]:
 
 def find_document_files(input_path: str | Path, *, recursive: bool) -> list[str]:
     objects = list_raw_document_objects(str(input_path or ""), recursive=recursive)
+    generated_section_prefixes = {
+        str(PurePosixPath(reference.object_name).parent).rstrip("/")
+        for reference in objects
+        if is_generated_standard_pdf_section(reference.object_name)
+        and is_supported_document_name(reference.object_name)
+    }
     return sorted(
         reference.uri
         for reference in objects
         if is_supported_document_name(reference.object_name)
-        and not is_generated_standard_pdf_section(reference.object_name)
+        and (
+            is_generated_standard_pdf_section(reference.object_name)
+            or not _asme_parent_has_split_edition(
+                reference.object_name,
+                generated_section_prefixes,
+            )
+        )
     )
+
+
+def _asme_parent_has_split_edition(
+    object_name: str,
+    generated_section_prefixes: set[str],
+) -> bool:
+    path = PurePosixPath(object_name)
+    if not _is_asme_parent_pdf(path.as_posix()):
+        return False
+    expected_prefix = (path.parent / f"{path.stem}(切分版)").as_posix()
+    return expected_prefix in generated_section_prefixes
 
 
 def is_supported_document_name(name: str) -> bool:
@@ -336,7 +334,7 @@ def is_supported_document_name(name: str) -> bool:
 
 
 def is_standard_pdf_document(path: str | Path) -> bool:
-    return is_standard_pdf_source(path)
+    return _is_asme_parent_pdf(path)
 
 
 def document_file_id(file_path: str | Path) -> str:

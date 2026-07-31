@@ -45,7 +45,7 @@ async def ask_knowledge_base(request: QueryRequest) -> QueryResponse:
     print(
         "[query] n8n request "
         f"url={settings.n8n_query_webhook_url!r} "
-        f"question={sanitized_question!r} "
+        f"question_len={len(sanitized_question)} "
         f"question_sanitized={sanitized_question != request.question!r} "
         f"user_id={request.user_id!r} "
         f"session_id={request.session_id!r} "
@@ -70,7 +70,7 @@ async def ask_knowledge_base(request: QueryRequest) -> QueryResponse:
             print(
                 "[query] n8n response "
                 f"status={response.status_code} "
-                f"body_preview={_response_text(response)!r}",
+                f"body_length={len(response.content)}",
                 flush=True,
             )
             response.raise_for_status()

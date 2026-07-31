@@ -657,6 +657,11 @@ def _looks_like_table_data(value: Any) -> bool:
 def _format_table_data_for_embedding(table_data: Any) -> str:
     if all(isinstance(row, dict) for row in table_data):
         headers = _ordered_table_headers(table_data)
+        table_data = [
+            row
+            for row in table_data
+            if not _is_repeated_dict_header_row(row, headers)
+        ]
         rows = [
             [_table_cell_for_embedding(row.get(header, "")) for header in headers]
             for row in table_data
@@ -668,7 +673,34 @@ def _format_table_data_for_embedding(table_data: Any) -> str:
         [_table_cell_for_embedding(cell) for cell in row]
         for row in rows
     ]
+    if normalized_rows:
+        header_signature = [_normalized_table_token(cell) for cell in normalized_rows[0]]
+        normalized_rows = [
+            normalized_rows[0],
+            *[
+                row
+                for row in normalized_rows[1:]
+                if [_normalized_table_token(cell) for cell in row] != header_signature
+            ],
+        ]
     return json.dumps(normalized_rows, ensure_ascii=False, separators=(",", ":"))
+
+
+def _is_repeated_dict_header_row(row: dict[str, Any], headers: list[str]) -> bool:
+    populated = 0
+    matched = 0
+    for header in headers:
+        value = row.get(header, "")
+        if not _has_value(value):
+            continue
+        populated += 1
+        if _normalized_table_token(value) == _normalized_table_token(header):
+            matched += 1
+    return populated > 0 and matched / populated >= 0.8
+
+
+def _normalized_table_token(value: Any) -> str:
+    return re.sub(r"[\s:：_\-—]+", "", str(value or "")).casefold()
 
 
 def _ordered_table_headers(rows: list[dict[str, Any]]) -> list[str]:

@@ -57,6 +57,43 @@ def test_short_text_chunks_are_folded_and_merged_under_parent_path() -> None:
     assert "第二阶段\n工业化推动技术快速迭代。" in chunks[0].content
 
 
+def test_consecutive_same_level_heading_fragments_are_not_overwritten() -> None:
+    chunks = split_items(
+        [
+            {"type": "paragraph", "style": "标题", "text": "中华人民共和国"},
+            {"type": "paragraph", "style": "标题", "text": "国家标准"},
+            {"type": "paragraph", "style": "标题", "text": "钢材断口检验法"},
+            {
+                "type": "paragraph",
+                "style": "正文",
+                "text": "本标准规定了钢材断口检验的试样制备和检验方法。",
+            },
+        ]
+    )
+
+    assert len(chunks) == 1
+    assert chunks[0].metadata["path"] == (
+        "中华人民共和国 国家标准 钢材断口检验法"
+    )
+    assert chunks[0].content == (
+        "本标准规定了钢材断口检验的试样制备和检验方法。"
+    )
+
+
+def test_nonconsecutive_same_level_heading_still_replaces_previous_section() -> None:
+    chunks = split_items(
+        [
+            {"type": "paragraph", "style": "标题", "text": "第一章"},
+            {"type": "paragraph", "style": "正文", "text": "第一章正文内容足够形成切块。"},
+            {"type": "paragraph", "style": "标题", "text": "第二章"},
+            {"type": "paragraph", "style": "正文", "text": "第二章正文内容足够形成切块。"},
+        ]
+    )
+
+    paths = [chunk.metadata["path"] for chunk in chunks]
+    assert paths == ["第一章", "第二章"]
+
+
 def test_json_chunk_path_is_rewritten_when_its_heading_is_folded() -> None:
     chunks = split_items(
         [
@@ -180,4 +217,20 @@ def test_table_embedding_text_uses_json_array_rows() -> None:
     assert EmbeddingService().build_embedding_text(chunk) == (
         '供应商 供应商\\玻璃衬里反应釜 '
         '[["制造商","总部地点"],["Pfaudler","美国"],["De Dietrich Process Systems","法国"]]'
+    )
+
+
+def test_table_embedding_drops_repeated_header_row_from_model_json() -> None:
+    content = (
+        '[{"序号":"序号","牌号":"牌号"},'
+        '{"序号":"1","牌号":"S30210"},'
+        '{"序号":"2","牌号":"S30403"}]'
+    )
+    chunk = Chunk(
+        content=content,
+        metadata={"file_name": "标准.pdf", "path": "表 2"},
+    )
+
+    assert EmbeddingService().build_embedding_text(chunk) == (
+        '标准 表 2 [["序号","牌号"],["1","S30210"],["2","S30403"]]'
     )

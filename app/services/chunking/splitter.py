@@ -111,6 +111,7 @@ def split_items(items: list[dict[str, str]], *, source_file: str | Path | None =
     state = ChunkState()
     heading_path: dict[int, str] = {}
     pending_table_title = ""
+    previous_heading_level: int | None = None
     document_metadata = _build_document_metadata(source_file)
 
     for item_index, item in enumerate(items):
@@ -124,14 +125,23 @@ def split_items(items: list[dict[str, str]], *, source_file: str | Path | None =
         if _is_table_title(item_type, style):
             _flush_chunk(chunks, state, document_metadata)
             pending_table_title = text
+            previous_heading_level = None
             continue
 
         if _is_heading(style):
             _flush_chunk(chunks, state, document_metadata)
-            _update_heading_path(heading_path, style, text)
+            level = _heading_level(style)
+            _update_heading_path(
+                heading_path,
+                style,
+                text,
+                append_same_level=(previous_heading_level == level),
+            )
+            previous_heading_level = level
             pending_table_title = ""
             continue
 
+        previous_heading_level = None
         if pending_table_title and item_type not in {"table", "image_table", "img_table"}:
             pending_table_title = ""
 
@@ -184,13 +194,35 @@ def _is_table_title(item_type: str, style: str) -> bool:
     return item_type == "table" and style == "表标题"
 
 
-def _update_heading_path(heading_path: dict[int, str], style: str, text: str) -> None:
+def _update_heading_path(
+    heading_path: dict[int, str],
+    style: str,
+    text: str,
+    *,
+    append_same_level: bool = False,
+) -> None:
     level = _heading_level(style)
-    heading_path[level] = text
+    previous = heading_path.get(level, "")
+    if append_same_level and previous:
+        heading_path[level] = _join_heading_fragments(previous, text)
+    else:
+        heading_path[level] = text
 
     for old_level in list(heading_path):
         if old_level > level:
             heading_path.pop(old_level)
+
+
+def _join_heading_fragments(previous: str, current: str) -> str:
+    left = previous.strip()
+    right = current.strip()
+    if not left:
+        return right
+    if not right or right == left or right in left:
+        return left
+    if left in right:
+        return right
+    return f"{left} {right}"
 
 
 def _heading_level(style: str) -> int:

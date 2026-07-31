@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+import json
+import time
 from typing import Any, Iterable
+from urllib.parse import quote
 
 import httpx
 
@@ -17,6 +20,10 @@ class LLMConfigError(RuntimeError):
 
 class LLMAPIError(RuntimeError):
     """Raised when the remote LLM API returns an error response."""
+
+
+class LLMTimeoutError(LLMAPIError):
+    """Raised when the remote LLM API exceeds the configured request timeout."""
 
 
 @dataclass(frozen=True)
@@ -99,6 +106,8 @@ class LLMClient:
         temperature: float = 0.2,
         max_tokens: int | None = None,
         extra_body: dict[str, Any] | None = None,
+        read_timeout: float | None = None,
+        stream: bool = False,
     ) -> str:
         selected_model = model or self.settings.model
         payload: dict[str, Any] = {
@@ -117,45 +126,232 @@ class LLMClient:
         if extra_body:
             payload.update(extra_body)
 
-        data = self._post("/chat/completions", payload)
+        if stream:
+            payload["stream"] = True
+            return self._stream_chat(payload, read_timeout=read_timeout)
+
+        data = self._post("/chat/completions", payload, read_timeout=read_timeout)
         choices = data.get("choices") or []
         if not choices:
             raise LLMAPIError(f"LLM response does not contain choices: {data}")
 
         message = choices[0].get("message") or {}
         content = message.get("content")
+        if isinstance(content, list):
+            content = "".join(
+                str(block.get("text") or "")
+                for block in content
+                if isinstance(block, dict) and block.get("type") in {"text", "output_text"}
+            )
         if not isinstance(content, str):
             raise LLMAPIError(f"LLM response content is not text: {data}")
+        stripped = content.strip()
+        if not stripped:
+            finish_reason = choices[0].get("finish_reason")
+            reasoning = message.get("reasoning_content")
+            reasoning_length = len(reasoning) if isinstance(reasoning, str) else 0
+            raise LLMAPIError(
+                "LLM response content is empty "
+                f"(finish_reason={finish_reason!r}, reasoning_length={reasoning_length})"
+            )
+        return stripped
 
-        return content.strip()
+    def _stream_chat(
+        self,
+        payload: dict[str, Any],
+        *,
+        read_timeout: float | None = None,
+    ) -> str:
+        """Consume an OpenAI-compatible SSE chat response incrementally."""
 
-    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        url = f"{self.settings.base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.settings.api_key}",
+            "Content-Type": "application/json",
+        }
+        chunks: list[str] = []
+        try:
+            with httpx.Client(
+                timeout=self._build_timeout(read_timeout=read_timeout)
+            ) as client:
+                with client.stream("POST", url, json=payload, headers=headers) as response:
+                    response.raise_for_status()
+                    for line in response.iter_lines():
+                        if not line or line.startswith(":"):
+                            continue
+                        if not line.startswith("data:"):
+                            continue
+                        event_text = line[5:].strip()
+                        if event_text == "[DONE]":
+                            break
+                        try:
+                            event = json.loads(event_text)
+                        except json.JSONDecodeError as exc:
+                            raise LLMAPIError(
+                                f"LLM stream returned invalid JSON event: {event_text[:200]}"
+                            ) from exc
+                        choices = event.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta") or {}
+                        content = delta.get("content")
+                        if isinstance(content, str):
+                            chunks.append(content)
+                        elif isinstance(content, list):
+                            chunks.extend(
+                                str(block.get("text") or "")
+                                for block in content
+                                if isinstance(block, dict)
+                                and block.get("type") in {"text", "output_text"}
+                            )
+        except httpx.TimeoutException as exc:
+            raise LLMTimeoutError(f"LLM streaming request timed out: {exc}") from exc
+        except httpx.HTTPStatusError as exc:
+            raise LLMAPIError(
+                f"LLM streaming API returned {exc.response.status_code}: "
+                f"{exc.response.text}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise LLMAPIError(f"Failed to stream LLM API: {exc}") from exc
+
+        content = "".join(chunks).strip()
+        if not content:
+            raise LLMAPIError("LLM streaming response content is empty")
+        return content
+
+    def upload_file(
+        self,
+        *,
+        filename: str,
+        content: bytes,
+        purpose: str,
+        content_type: str = "application/octet-stream",
+        read_timeout: float | None = None,
+    ) -> str:
+        """Upload a temporary file and return its provider file ID."""
+
+        url = f"{self.settings.base_url}/files"
+        headers = {"Authorization": f"Bearer {self.settings.api_key}"}
+        timeout = self._build_timeout(read_timeout=read_timeout)
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                response = client.post(
+                    url,
+                    headers=headers,
+                    data={"purpose": purpose},
+                    files={"file": (filename, content, content_type)},
+                )
+                response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise LLMTimeoutError(f"LLM file upload timed out: {exc}") from exc
+        except httpx.HTTPStatusError as exc:
+            raise LLMAPIError(
+                f"LLM file upload returned {exc.response.status_code}: {exc.response.text}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise LLMAPIError(f"Failed to upload LLM file: {exc}") from exc
+
+        payload = response.json()
+        file_id = payload.get("id") if isinstance(payload, dict) else None
+        if not isinstance(file_id, str) or not file_id.strip():
+            raise LLMAPIError(f"LLM file upload response has no file ID: {payload}")
+        return file_id.strip()
+
+    def delete_file(
+        self,
+        file_id: str,
+        *,
+        read_timeout: float | None = None,
+    ) -> None:
+        """Delete a temporary provider file."""
+
+        safe_file_id = quote(str(file_id), safe="")
+        url = f"{self.settings.base_url}/files/{safe_file_id}"
+        headers = {"Authorization": f"Bearer {self.settings.api_key}"}
+        timeout = self._build_timeout(read_timeout=read_timeout)
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                response = client.delete(url, headers=headers)
+                response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise LLMTimeoutError(f"LLM file deletion timed out: {exc}") from exc
+        except httpx.HTTPStatusError as exc:
+            raise LLMAPIError(
+                f"LLM file deletion returned {exc.response.status_code}: {exc.response.text}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise LLMAPIError(f"Failed to delete LLM file: {exc}") from exc
+
+    def _post(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        read_timeout: float | None = None,
+    ) -> dict[str, Any]:
         url = f"{self.settings.base_url}{path}"
         headers = {
             "Authorization": f"Bearer {self.settings.api_key}",
             "Content-Type": "application/json",
         }
 
+        started_at = time.perf_counter()
         try:
-            timeout = httpx.Timeout(
-                timeout=self.settings.timeout,
-                connect=self.settings.connect_timeout,
-                read=self.settings.read_timeout,
-                write=self.settings.write_timeout,
-                pool=self.settings.pool_timeout,
-            )
+            timeout = self._build_timeout(read_timeout=read_timeout)
             with httpx.Client(timeout=timeout) as client:
                 response = client.post(url, json=payload, headers=headers)
                 response.raise_for_status()
         except httpx.TimeoutException as exc:
-            raise LLMAPIError(f"LLM API request timed out: {exc}") from exc
+            raise LLMTimeoutError(
+                "LLM API request timed out "
+                f"(elapsed={time.perf_counter() - started_at:.2f}s, "
+                f"model={payload.get('model')!r}, endpoint={url}): {exc}"
+            ) from exc
         except httpx.HTTPStatusError as exc:
             response_text = exc.response.text
-            raise LLMAPIError(f"LLM API returned {exc.response.status_code}: {response_text}") from exc
+            request_id = _response_request_id(exc.response)
+            raise LLMAPIError(
+                f"LLM API returned {exc.response.status_code} "
+                f"(elapsed={time.perf_counter() - started_at:.2f}s, "
+                f"model={payload.get('model')!r}, request_id={request_id!r}): "
+                f"{response_text[:2000]}"
+            ) from exc
         except httpx.HTTPError as exc:
-            raise LLMAPIError(f"Failed to call LLM API: {exc}") from exc
+            raise LLMAPIError(
+                "Failed to call LLM API "
+                f"(elapsed={time.perf_counter() - started_at:.2f}s, "
+                f"model={payload.get('model')!r}, endpoint={url}): {exc}"
+            ) from exc
 
-        return response.json()
+        try:
+            data = response.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise LLMAPIError(
+                "LLM API returned a non-JSON HTTP response "
+                f"(status={response.status_code}, "
+                f"content_type={response.headers.get('content-type')!r}, "
+                f"request_id={_response_request_id(response)!r}, "
+                f"body={response.text[:1000]!r})"
+            ) from exc
+        if not isinstance(data, dict):
+            raise LLMAPIError(
+                "LLM API returned an unexpected JSON envelope "
+                f"(type={type(data).__name__}, request_id={_response_request_id(response)!r})"
+            )
+        return data
+
+    def _build_timeout(self, *, read_timeout: float | None = None) -> httpx.Timeout:
+        return httpx.Timeout(
+            timeout=self.settings.timeout,
+            connect=self.settings.connect_timeout,
+            read=(
+                self.settings.read_timeout
+                if read_timeout is None
+                else max(1.0, float(read_timeout))
+            ),
+            write=self.settings.write_timeout,
+            pool=self.settings.pool_timeout,
+        )
 
 
 def _normalize_temperature(model: str, *, base_url: str, temperature: float) -> float | None:
@@ -170,6 +366,29 @@ def _is_kimi_fixed_temperature_model(model: str, *, base_url: str) -> bool:
     return normalized_model == "kimi-k2.6" or (
         "moonshot" in normalized_base_url and normalized_model.startswith("kimi-k2")
     )
+
+
+def build_non_thinking_extra_body(*, model: str, base_url: str) -> dict[str, Any]:
+    """Return the provider-specific switch for disabling model reasoning."""
+
+    normalized_model = str(model or "").strip().lower()
+    normalized_base_url = str(base_url or "").strip().lower()
+    if "moonshot" in normalized_base_url and normalized_model in {
+        "kimi-k2.5",
+        "kimi-k2.6",
+    }:
+        # Moonshot's official K2.5/K2.6 API ignores the SiliconFlow-style
+        # ``enable_thinking`` flag and expects this object instead.
+        return {"thinking": {"type": "disabled"}}
+    return {"enable_thinking": False}
+
+
+def _response_request_id(response: httpx.Response) -> str:
+    for name in ("x-request-id", "request-id", "x-kimi-request-id", "trace-id"):
+        value = response.headers.get(name)
+        if value:
+            return value
+    return ""
 
 
 def get_llm_client() -> LLMClient:

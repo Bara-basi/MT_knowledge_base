@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-from app.api.v1.retrieval import (
-    _sort_flow_results,
-    _to_flow_chunk,
-    build_agent_metadata_filter,
-)
+from app.api.v1.retrieval import _to_flow_chunk, build_agent_metadata_filter
 from app.schemas.retrieval import FilteredFlowRetrievalRequest
 from app.services.rerank import RerankScore
 from app.services.retrieval import RetrievalResult, RetrievalService
@@ -91,20 +87,6 @@ def test_flow_chunk_includes_scores_only_when_debug_enabled() -> None:
 
     assert "rerank_score" not in normal_payload
     assert debug_payload["rerank_score"] == 0.88
-
-
-def test_flow_results_sort_by_chunk_id_ascending() -> None:
-    results = [
-        RetrievalResult(id="doc_b_chunk_000010", score=0.5, content="", metadata={}),
-        RetrievalResult(id="doc_a_chunk_000002", score=0.6, content="", metadata={}),
-        RetrievalResult(id="doc_a_chunk_000001", score=0.7, content="", metadata={}),
-    ]
-
-    assert [result.id for result in _sort_flow_results(results)] == [
-        "doc_a_chunk_000001",
-        "doc_a_chunk_000002",
-        "doc_b_chunk_000010",
-    ]
 
 
 def test_rerank_filter_uses_raw_scores_and_cuts_low_score_tail() -> None:

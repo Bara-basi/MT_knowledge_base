@@ -7,20 +7,21 @@ from pathlib import Path
 import pytest
 
 from app.db.minio import RawDocumentObject, build_minio_uri
-from app.services.chunking.splitter import save_chunks, split_items
 from app.services import document_ingestion
-from app.services.document_ingestion import prepare_document, prepare_documents
+from app.services.document_ingestion import prepare_documents
 from app.services.parser import parser as document_parser
-from app.services.parser import standard_pdf_parser, standard_pdf_splitter
-from app.services.parser.paths import processing_document_dir
+from app.services.parser import standard_pdf_splitter, unified_pdf_parser
 
 
-def test_standard_pdf_detection_covers_product_standard_paths_and_excludes_sections() -> None:
+def test_standard_pdf_detection_only_matches_unsplit_asme_parent() -> None:
     assert document_parser.is_standard_pdf_source(
         r"data\raw\产品标准\ASME-Sec-II-A-Vol1-2023.pdf"
     )
-    assert document_parser.is_standard_pdf_source(
+    assert not document_parser.is_standard_pdf_source(
         "minio://knowledge-raw-docs/%E4%BA%A7%E5%93%81%E6%A0%87%E5%87%86/other.pdf"
+    )
+    assert not document_parser.is_standard_pdf_source(
+        "minio://knowledge-raw-docs/产品标准/国标/GB-T-12771.pdf"
     )
     assert not document_parser.is_standard_pdf_source(
         "minio://knowledge-raw-docs/%E4%BA%A7%E5%93%81%E6%A0%87%E5%87%86/"
@@ -29,7 +30,7 @@ def test_standard_pdf_detection_covers_product_standard_paths_and_excludes_secti
     assert not document_parser.is_standard_pdf_source("data/raw/process_guide/demo.pdf")
 
 
-def test_document_discovery_keeps_parent_standard_and_excludes_generated_sections(
+def test_document_discovery_prefers_generated_sections_over_asme_parent(
     monkeypatch,
 ) -> None:
     parent = RawDocumentObject(
@@ -46,53 +47,64 @@ def test_document_discovery_keeps_parent_standard_and_excludes_generated_section
         lambda *_args, **_kwargs: [parent, section],
     )
 
-    assert document_ingestion.find_document_files("产品标准", recursive=True) == [parent.uri]
+    assert document_ingestion.find_document_files("产品标准", recursive=True) == [section.uri]
 
 
-def test_single_document_preparation_rejects_parent_standard_pdf() -> None:
-    with pytest.raises(ValueError, match="prepare_documents"):
-        prepare_document(
-            "minio://knowledge-raw-docs/产品标准/ASME-demo.pdf",
+def test_prepare_documents_requires_split_edition_when_parse_is_disabled(
+    monkeypatch,
+) -> None:
+    source = "minio://knowledge-raw-docs/产品标准/ASME-demo.pdf"
+    monkeypatch.setattr(
+        document_ingestion,
+        "resolve_pdf_document_sources",
+        lambda *_args, **_kwargs: [source],
+    )
+    with pytest.raises(FileNotFoundError, match="split edition"):
+        prepare_documents(
+            source,
             image_analysis_workers=1,
+            parse=False,
         )
 
 
-def test_parser_splits_before_passing_sections_to_standard_parser(tmp_path: Path, monkeypatch) -> None:
+def test_parser_resolves_asme_section_then_uses_only_unified_parser(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     local_pdf = tmp_path / "ASME-demo.pdf"
-    local_pdf.write_bytes(b"pdf")
+    local_pdf.write_bytes(b"parent")
+    local_section_pdf = tmp_path / "SA-1.pdf"
+    local_section_pdf.write_bytes(b"section")
     source = "minio://knowledge-raw-docs/产品标准/ASME-demo.pdf"
-    section = standard_pdf_splitter.StandardPdfSection(
-        index=1,
-        title="Demo",
-        standard_code="SA-1",
-        start_page=1,
-        end_page=2,
-        output_path=str(tmp_path / "SA-1.pdf"),
-        source_uri="minio://knowledge-raw-docs/产品标准/ASME-demo(切分版)/SA-1.pdf",
-    )
+    section_source = "minio://knowledge-raw-docs/产品标准/ASME-demo(切分版)/SA-1.pdf"
     calls: list[tuple[str, object]] = []
 
-    monkeypatch.setattr(document_parser, "_local_parser_path", lambda _source: local_pdf)
+    monkeypatch.setattr(
+        document_parser,
+        "_local_parser_path",
+        lambda value: local_pdf if str(value) == source else local_section_pdf,
+    )
+    monkeypatch.setattr(document_parser, "synchronize_processed_assets", lambda *_args, **_kwargs: "")
 
-    def fake_split(path, **kwargs):
-        calls.append(("split", (path, kwargs)))
-        return [section]
+    def fake_resolve(value, **kwargs):
+        calls.append(("resolve", (value, kwargs)))
+        return [section_source]
 
-    def fake_parse(sections):
-        calls.append(("parse", sections))
+    def fake_parse(path, **kwargs):
+        calls.append(("parse", (path, kwargs)))
         return [{"type": "paragraph", "style": "正文", "text": "parsed"}]
 
-    monkeypatch.setattr(standard_pdf_splitter, "split_standard_pdf_document", fake_split)
-    monkeypatch.setattr(standard_pdf_parser, "parse_standard_pdf_sections", fake_parse)
+    monkeypatch.setattr(unified_pdf_parser, "resolve_pdf_document_sources", fake_resolve)
+    monkeypatch.setattr(unified_pdf_parser, "parse_unified_pdf_document", fake_parse)
 
     items = document_parser.parse_document(source)
 
     assert items[0]["text"] == "parsed"
-    assert [name for name, _payload in calls] == ["split", "parse"]
-    split_path, split_kwargs = calls[0][1]
-    assert split_path == local_pdf
-    assert split_kwargs["source_reference"] == source
-    assert calls[1][1] == [section]
+    assert [name for name, _payload in calls] == ["resolve", "parse"]
+    assert calls[0][1][1]["local_path"] == local_pdf
+    parsed_path, parse_kwargs = calls[1][1]
+    assert parsed_path == local_section_pdf
+    assert parse_kwargs["source_reference"] == section_source
 
 
 def test_publish_existing_sections_persists_small_pdf_source_uris(
@@ -147,71 +159,51 @@ def test_publish_existing_sections_persists_small_pdf_source_uris(
     assert saved["sections"][0]["source_uri"] == expected_uri
 
 
-def test_prepare_standard_sections_rewrites_stale_chunk_source_to_published_small_pdf(
-    tmp_path: Path,
+def test_prepare_documents_delegates_existing_split_pdf_to_generic_preparer(
     monkeypatch,
 ) -> None:
-    monkeypatch.chdir(tmp_path)
     parent_pdf = Path("data/raw/产品标准/ASME-demo.pdf")
-    section_name = "SA-20 - Demo"
-    processing_dir = processing_document_dir(parent_pdf)
-    section_dir = processing_dir / section_name
-    txt_file = section_dir / "txt" / f"{section_name}.txt"
-    section_pdf = section_dir / "pdf" / f"{section_name}.pdf"
-    chunk_file = section_dir / "chunk" / f"{section_name}.chunks.json"
-    embedding_file = section_dir / "embedding" / f"{section_name}.embeddings.json"
-    txt_file.parent.mkdir(parents=True)
-    section_pdf.parent.mkdir(parents=True)
-    section_pdf.write_bytes(b"section")
-    txt_file.write_text(
-        "[paragraph] [标题] SA-20 Demo\n"
-        "[paragraph] [正文] This is enough standard text to create a source chunk.\n",
-        encoding="utf-8",
-    )
     source_uri = build_minio_uri(
         "knowledge-raw-docs",
-        "产品标准/ASME-demo(切分版)/SA-20 - Demo.pdf",
+        "产品标准/ASME-demo(切分版)/SA-20.pdf",
     )
-    (processing_dir / "manifest.json").write_text(
-        json.dumps(
-            {
-                "sections": [
-                    {
-                        "output_path": str(section_pdf),
-                        "source_uri": source_uri,
-                    }
-                ]
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    calls: list[tuple[object, dict]] = []
+    prepared = document_ingestion.PreparedDocument(
+        file_path=source_uri,
+        txt_file=Path("SA-20.txt"),
+        chunk_file=Path("SA-20.chunks.json"),
+        embedding_file=Path("SA-20.embeddings.json"),
+        chunks=[],
     )
-
-    stale_chunks = split_items(
-        [{"type": "paragraph", "style": "正文", "text": "stale parent source text"}],
-        source_file=parent_pdf,
+    monkeypatch.setattr(
+        document_ingestion,
+        "resolve_pdf_document_sources",
+        lambda *_args, **_kwargs: [source_uri],
     )
-    save_chunks(stale_chunks, chunk_file)
-    embedding_file.parent.mkdir(parents=True)
-    embedding_file.write_text(
-        json.dumps([{"metadata": {"file_path": str(parent_pdf)}}]),
-        encoding="utf-8",
+    monkeypatch.setattr(
+        document_ingestion,
+        "prepare_document",
+        lambda value, **kwargs: calls.append((value, kwargs)) or prepared,
     )
 
-    prepared = prepare_documents(
+    results = prepare_documents(
         parent_pdf,
         image_analysis_workers=1,
         rebuild=False,
         parse=False,
     )
 
-    assert len(prepared) == 1
-    assert prepared[0].file_path == source_uri
-    assert prepared[0].chunks
-    assert prepared[0].force_upsert
-    assert not embedding_file.exists()
-    assert all(chunk.metadata["file_path"] == source_uri for chunk in prepared[0].chunks)
-    assert all(chunk.metadata["file_name"] == f"{section_name}.pdf" for chunk in prepared[0].chunks)
+    assert results == [prepared]
+    assert calls == [
+        (
+            source_uri,
+            {
+                "image_analysis_workers": 1,
+                "rebuild": False,
+                "parse": False,
+            },
+        )
+    ]
 
 
 def test_prepare_standard_sections_rejects_unpublished_local_evidence_path(
@@ -220,23 +212,13 @@ def test_prepare_standard_sections_rejects_unpublished_local_evidence_path(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     parent_pdf = Path("data/raw/产品标准/ASME-demo.pdf")
-    processing_dir = processing_document_dir(parent_pdf)
-    txt_file = processing_dir / "SA-1" / "txt" / "SA-1.txt"
-    txt_file.parent.mkdir(parents=True)
-    txt_file.write_text("[paragraph] [正文] demo standard text", encoding="utf-8")
-    (processing_dir / "manifest.json").write_text(
-        json.dumps(
-            {"sections": [{"output_path": str(processing_dir / "SA-1" / "pdf" / "SA-1.pdf")}]}
-        ),
-        encoding="utf-8",
-    )
     monkeypatch.setattr(
         document_ingestion,
-        "publish_standard_pdf_sections_from_manifest",
-        lambda *_args, **_kwargs: [],
+        "resolve_pdf_document_sources",
+        lambda *_args, **_kwargs: [parent_pdf],
     )
 
-    with pytest.raises(ValueError, match="source_uri after publication"):
+    with pytest.raises(FileNotFoundError, match="split edition"):
         prepare_documents(
             parent_pdf,
             image_analysis_workers=1,

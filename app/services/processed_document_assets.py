@@ -26,7 +26,7 @@ from app.services.parser.paths import processing_document_dir
 
 
 PROCESSED_DOCUMENT_BUCKET_DEFAULT = "knowledge-processed-docs"
-ARCHIVED_SUBDIRECTORIES = frozenset({"txt", "img"})
+ARCHIVED_SUBDIRECTORIES = frozenset({"txt", "img", "json"})
 
 
 def processed_document_bucket() -> str:
@@ -55,7 +55,7 @@ def synchronize_processed_assets(
     produced_processing_dir: str | Path | None = None,
     update_registry: bool = True,
 ) -> str:
-    """Mirror ``txt`` and ``img`` output locally and in MinIO, then record it.
+    """Mirror ``txt``, ``img`` and parser JSON output to MinIO, then record it.
 
     Parser downloads can live under a transient MinIO cache.  Their generated
     files are first copied to the canonical local processing path derived from
