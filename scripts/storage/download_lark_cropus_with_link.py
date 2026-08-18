@@ -16,7 +16,7 @@ from scripts.storage.lark_script_credentials import get_lark_credentials  # noqa
 
 
 BASE_URL = "https://open.feishu.cn/open-apis"
-DEFAULT_WIKI_URL = "https://tmqhw1h9zt.feishu.cn/wiki/UGf8wQSiyiFboakqne0cBrMRnLd"
+DEFAULT_WIKI_URL = "https://tmqhw1h9zt.feishu.cn/wiki/GoZ7w3tQAiqTKhkGfXncGsHsnPe"
 DOWNLOAD_DIR = pathlib.Path("./tmp/lark-downloads/wiki-corpus")
 
 REQUEST_TIMEOUT = 30

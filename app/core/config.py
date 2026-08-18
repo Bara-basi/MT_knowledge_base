@@ -63,6 +63,10 @@ class Settings:
     postgres_password: str = os.getenv("POSTGRES_PASSWORD", "")
     database_url: str = os.getenv("DATABASE_URL", "")
     postgres_chat_table: str = os.getenv("POSTGRES_CHAT_TABLE", "chat_messages")
+    postgres_external_chat_table: str = os.getenv(
+        "POSTGRES_EXTERNAL_CHAT_TABLE",
+        "chat_messages_external",
+    )
     postgres_conversation_topics_table: str = os.getenv(
         "POSTGRES_CONVERSATION_TOPICS_TABLE",
         "conversation_topics",

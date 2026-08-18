@@ -96,6 +96,7 @@ POSTGRES_DB=mtsco_knowledge_base
 POSTGRES_USER=mtsco
 POSTGRES_PASSWORD=change-me
 POSTGRES_CHAT_TABLE=chat_messages
+POSTGRES_EXTERNAL_CHAT_TABLE=chat_messages_external
 CHAT_MESSAGE_ENCRYPTION_KEY=change-me-to-a-long-random-string
 
 MINIO_ACCESS_KEY_ID=change-me
@@ -121,6 +122,93 @@ N8N_API_BASE_URL=http://n8n:5678
 N8N_ENCRYPTION_KEY=change-me-to-a-long-random-string
 
 NEO4J_PASSWORD=change-me
+```
+
+## 外部问答 API
+
+面向调用方的完整请求、响应、错误码和接入示例见 [外部知识库与报价评分 API 接口文档](docs/EXTERNAL_API.md)。
+
+生产入口为 `POST /prod/api/v1/external/query`。它复用现有 n8n 问答与 `conversation_topics` 主题路由，但消息只写入 `chat_messages_external`，不会进入飞书使用的 `chat_messages`。
+
+请求示例：
+
+```bash
+curl -X POST 'https://your-domain.example/prod/api/v1/external/query' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "question": "公司的报价审批流程是什么？",
+    "user_id": "employee-1001",
+    "service_id": "crm",
+    "session_id": "ticket-20260817-001",
+    "use_lark_document": false,
+    "format_type": "markdown"
+  }'
+```
+
+响应中的 `answer` 是 Markdown 原文字符串。知识来源会以 `---` 分隔并列在回答底部，不包含飞书卡片的折叠面板、停止按钮或反馈按钮。`use_lark_document=true` 时优先返回已映射的飞书文档地址；为 `false` 时返回后端文档下载地址。
+
+`format_type` 可选 `markdown` 或 `json`，默认 `markdown`。使用 `json` 时，后端会要求 n8n 最终 Agent 只输出合法 JSON，并把解析后的 JSON 对象放入响应的 `answer` 字段；若模型返回的内容无法解析，接口返回 `502`，不会把伪 JSON 当成功结果返回。
+
+```json
+{
+  "question": "公司的报价审批流程是什么？",
+  "answer": "回答正文。[1]\n\n---\n### 知识来源\n1. [报价制度.docx](https://your-domain.example/prod/api/v1/documents/download?path=...)",
+  "user_id": "employee-1001",
+  "service_id": "crm",
+  "session_id": "ticket-20260817-001",
+  "topic_id": "00000000-0000-0000-0000-000000000001",
+  "answer_format": "markdown",
+  "status": "success"
+}
+```
+
+初始化或升级 PostgreSQL 表结构：
+
+```bash
+python scripts/db/init_postgre.py
+```
+
+外部 `user_id` 和 `session_id` 不以原文落库。后端会将它们与 `service_id` 一起生成稳定的 SHA-256 命名空间 ID，使不同项目组即使提交相同 ID 也不会共享多轮上下文。调用方应在同一 `service_id` 下持续复用同一 `session_id` 来保持多轮对话。
+
+### 报价评分工具
+
+入口为 `POST /prod/api/v1/external/quote-score`，请求类型是 `multipart/form-data`。`question` 可以直接包含待评分的文本；当报价内容是 Excel 时，通过可选 `file` 字段上传 `.xlsx` 或 `.xls`。文件最大 10 MB，最多解析 2,000 行、100 列，解析结果不会写入聊天表，只作为本次评分的结构化任务输入。
+
+```bash
+curl -X POST 'https://your-domain.example/prod/api/v1/external/quote-score' \
+  -F 'question=请对上传的报价文件进行评分' \
+  -F 'user_id=employee-1001' \
+  -F 'service_id=crm' \
+  -F 'session_id=quote-training-001' \
+  -F 'use_lark_document=false' \
+  -F 'file=@./DAY 1 报价练习题.xlsx'
+```
+
+评分接口始终返回严格 JSON。所有维度和总分均从 100 分开始，后端根据逐条扣分项重算，`报价及时性` 当前固定为 100 分且不产生扣分项：
+
+```json
+{
+  "总分": 93,
+  "满分": 100,
+  "评分维度": {
+    "询价完整度": 100,
+    "询价供应商准确度": 100,
+    "询价命名规范度": 100,
+    "计算准确度": 98,
+    "报价完整度": 95,
+    "报价及时性": 100
+  },
+  "扣分项": [
+    {"评分维度": "计算准确度", "扣分原因": "公式错误", "扣分": -2},
+    {"评分维度": "报价完整度", "扣分原因": "缺少产品列", "扣分": -5}
+  ],
+  "user_id": "employee-1001",
+  "service_id": "crm",
+  "session_id": "quote-training-001",
+  "file_name": "DAY 1 报价练习题.xlsx",
+  "format_type": "json",
+  "status": "success"
+}
 ```
 
 生成随机密钥：

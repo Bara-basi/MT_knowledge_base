@@ -8,9 +8,11 @@ from uuid import UUID
 from app.core.config import settings
 from app.db.postgres import (
     assign_latest_chat_message_topic,
+    chat_message_table_for_identity,
     create_conversation_topic,
     ensure_chat_messages_table,
     ensure_conversation_topics_table,
+    ensure_external_chat_messages_table,
     get_conversation_topic,
     list_chat_messages_by_topic,
     list_recent_conversation_topics,
@@ -40,6 +42,15 @@ def _require_valid_topic_text(field_name: str, value: str | None) -> None:
         raise ValueError(
             f"conversation topic {field_name} looks corrupted; send UTF-8 JSON text"
         )
+
+
+def _ensure_chat_table_for_user(user_id: str) -> str:
+    table_name = chat_message_table_for_identity(user_id)
+    if table_name == settings.postgres_external_chat_table:
+        ensure_external_chat_messages_table(table_name)
+    else:
+        ensure_chat_messages_table()
+    return table_name
 
 
 async def create_conversation_topic_record(
@@ -209,7 +220,7 @@ def _update_conversation_topic_summary_sync(
     metadata: dict[str, Any] | None,
 ) -> dict[str, Any]:
     ensure_conversation_topics_table()
-    ensure_chat_messages_table()
+    chat_table_name = _ensure_chat_table_for_user(user_id)
     _require_valid_topic_text("topic", topic)
     _require_valid_topic_text("summary", summary)
     existing_topic = get_conversation_topic(
@@ -238,6 +249,7 @@ def _update_conversation_topic_summary_sync(
             session_id=session_id,
             conversation_id=conversation_id,
             topic_id=topic_id,
+            table_name=chat_table_name,
         )
 
     return {
@@ -274,7 +286,7 @@ def _get_conversation_topic_context_sync(
     message_limit: int,
 ) -> dict[str, Any]:
     ensure_conversation_topics_table()
-    ensure_chat_messages_table()
+    chat_table_name = _ensure_chat_table_for_user(user_id)
     topic = get_conversation_topic(
         topic_id=topic_id,
         user_id=user_id,
@@ -287,6 +299,7 @@ def _get_conversation_topic_context_sync(
         user_id=user_id,
         session_id=session_id,
         limit=message_limit,
+        table_name=chat_table_name,
     )
     return {
         "topic": _decrypt_topic_row(topic),

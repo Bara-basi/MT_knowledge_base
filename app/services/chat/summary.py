@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID
 
 from app.db.postgres import (
+    chat_message_table_for_identity,
     get_conversation_topic,
     list_chat_messages_by_topic,
     update_conversation_topic,
@@ -57,6 +58,7 @@ def refresh_topic_summary(
         user_id=user_id,
         session_id=session_id,
         limit=SUMMARY_MESSAGE_LIMIT,
+        table_name=chat_message_table_for_identity(user_id),
     )
     if not messages:
         return None

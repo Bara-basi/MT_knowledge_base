@@ -32,6 +32,7 @@ from app.db.postgres import (  # noqa: E402
     check_postgres_health,
     ensure_chat_messages_table,
     ensure_conversation_topics_table,
+    ensure_external_chat_messages_table,
     insert_chat_message,
 )
 
@@ -69,6 +70,7 @@ def main() -> None:
     else:
         result = {
             "chat_messages": ensure_chat_messages_table(table_name=args.table_name),
+            "chat_messages_external": ensure_external_chat_messages_table(),
             "conversation_topics": ensure_conversation_topics_table(),
         }
         if args.insert_sample:

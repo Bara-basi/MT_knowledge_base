@@ -14,6 +14,10 @@ from app.core.config import settings
 
 
 CHAT_MESSAGES_TABLE_COMMENT = "MTSCO knowledge base encrypted chat messages"
+EXTERNAL_CHAT_MESSAGES_TABLE_COMMENT = (
+    "MTSCO knowledge base encrypted external API chat messages"
+)
+EXTERNAL_CHAT_ID_PREFIX = "external:v1:"
 CONVERSATION_TOPICS_TABLE = "conversation_topics"
 CONVERSATION_TOPICS_TABLE_COMMENT = "Virtual conversation topics for Feishu chat sessions"
 CHAT_TEXT_ENCRYPTION_PREFIX = "fernet:v1:"
@@ -178,6 +182,173 @@ def ensure_chat_messages_table(table_name: str | None = None) -> dict[str, Any]:
         "table_name": table_name,
         "columns": columns,
     }
+
+
+def ensure_external_chat_messages_table(
+    table_name: str | None = None,
+) -> dict[str, Any]:
+    """Create the privacy-minimized message table used only by external APIs."""
+
+    table_name = table_name or settings.postgres_external_chat_table
+    if table_name == settings.postgres_chat_table:
+        raise ValueError("external chat table must differ from the Feishu chat table")
+    table = sql.Identifier(table_name)
+
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+            cur.execute(
+                sql.SQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS {table} (
+                        message_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        service_id VARCHAR(128) NOT NULL,
+                        user_id VARCHAR(128) NOT NULL,
+                        session_id VARCHAR(128) NOT NULL,
+                        conversation_id VARCHAR(128) NOT NULL,
+                        topic_id UUID,
+                        create_time TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        question TEXT NOT NULL,
+                        answer TEXT NOT NULL DEFAULT ''
+                    )
+                    """
+                ).format(table=table)
+            )
+            required_columns = (
+                ("message_id", "UUID DEFAULT gen_random_uuid()"),
+                ("service_id", "VARCHAR(128)"),
+                ("user_id", "VARCHAR(128)"),
+                ("session_id", "VARCHAR(128)"),
+                ("conversation_id", "VARCHAR(128)"),
+                ("topic_id", "UUID"),
+                ("create_time", "TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP"),
+                ("question", "TEXT"),
+                ("answer", "TEXT DEFAULT ''"),
+            )
+            for column_name, column_type in required_columns:
+                cur.execute(
+                    sql.SQL(
+                        "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {type}"
+                    ).format(
+                        table=table,
+                        column=sql.Identifier(column_name),
+                        type=sql.SQL(column_type),
+                    )
+                )
+
+            # The external table intentionally must not accumulate Feishu profile data.
+            for column_name in (
+                "user_name",
+                "feishu_user_id",
+                "feishu_open_id",
+                "department_ids",
+                "department_names",
+                "job_title",
+                "employee_type",
+                "user_profile_updated_at",
+            ):
+                cur.execute(
+                    sql.SQL("ALTER TABLE {table} DROP COLUMN IF EXISTS {column}").format(
+                        table=table,
+                        column=sql.Identifier(column_name),
+                    )
+                )
+
+            cur.execute(
+                sql.SQL("UPDATE {table} SET message_id = gen_random_uuid() WHERE message_id IS NULL").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL("UPDATE {table} SET answer = '' WHERE answer IS NULL").format(table=table)
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ALTER COLUMN message_id SET NOT NULL").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ALTER COLUMN answer SET DEFAULT ''").format(table=table)
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ALTER COLUMN answer SET NOT NULL").format(table=table)
+            )
+            for column_name in (
+                "service_id",
+                "user_id",
+                "session_id",
+                "conversation_id",
+                "question",
+            ):
+                cur.execute(
+                    sql.SQL("ALTER TABLE {table} ALTER COLUMN {column} SET NOT NULL").format(
+                        table=table,
+                        column=sql.Identifier(column_name),
+                    )
+                )
+            cur.execute(
+                sql.SQL("COMMENT ON TABLE {table} IS {comment}").format(
+                    table=table,
+                    comment=sql.Literal(EXTERNAL_CHAT_MESSAGES_TABLE_COMMENT),
+                )
+            )
+            cur.execute(
+                sql.SQL(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS {index}
+                    ON {table} (message_id)
+                    """
+                ).format(
+                    index=sql.Identifier(f"{table_name}_message_id_uidx"),
+                    table=table,
+                )
+            )
+            cur.execute(
+                sql.SQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS {index}
+                    ON {table} (service_id, user_id, session_id, create_time DESC)
+                    """
+                ).format(
+                    index=sql.Identifier(f"{table_name}_service_session_recent_idx"),
+                    table=table,
+                )
+            )
+            cur.execute(
+                sql.SQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS {index}
+                    ON {table} (topic_id, create_time DESC)
+                    WHERE topic_id IS NOT NULL
+                    """
+                ).format(
+                    index=sql.Identifier(f"{table_name}_topic_recent_idx"),
+                    table=table,
+                )
+            )
+            cur.execute(
+                """
+                SELECT column_name, data_type, is_nullable, column_default
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = %s
+                ORDER BY ordinal_position
+                """,
+                (table_name,),
+            )
+            columns = cur.fetchall()
+
+    return {"table_name": table_name, "columns": columns}
+
+
+def is_external_chat_identity(user_id: str | None) -> bool:
+    return str(user_id or "").startswith(EXTERNAL_CHAT_ID_PREFIX)
+
+
+def chat_message_table_for_identity(user_id: str | None) -> str:
+    if is_external_chat_identity(user_id):
+        return settings.postgres_external_chat_table
+    return settings.postgres_chat_table
 
 
 def ensure_chat_user_profile_columns(table_name: str | None = None) -> dict[str, Any]:
@@ -816,6 +987,91 @@ def insert_chat_message(
     return dict(row or {})
 
 
+def create_external_chat_message(
+    *,
+    service_id: str,
+    user_id: str,
+    session_id: str,
+    conversation_id: str,
+    question: str,
+    table_name: str | None = None,
+) -> dict[str, Any]:
+    """Create one pending external-API chat turn and return its stable id."""
+
+    table_name = table_name or settings.postgres_external_chat_table
+    table = sql.Identifier(table_name)
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    INSERT INTO {table} (
+                        service_id,
+                        user_id,
+                        session_id,
+                        conversation_id,
+                        question
+                    )
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING
+                        message_id,
+                        service_id,
+                        user_id,
+                        session_id,
+                        conversation_id,
+                        topic_id,
+                        create_time,
+                        question,
+                        answer
+                    """
+                ).format(table=table),
+                (service_id, user_id, session_id, conversation_id, question),
+            )
+            row = cur.fetchone()
+    return dict(row or {})
+
+
+def update_external_chat_answer(
+    *,
+    message_id: UUID | str,
+    service_id: str,
+    answer: str,
+    topic_id: UUID | str | None = None,
+    table_name: str | None = None,
+) -> dict[str, Any]:
+    """Complete the exact external chat turn created for this request."""
+
+    table_name = table_name or settings.postgres_external_chat_table
+    table = sql.Identifier(table_name)
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    """
+                    UPDATE {table}
+                    SET answer = %s,
+                        topic_id = COALESCE(%s::uuid, topic_id)
+                    WHERE message_id = %s
+                      AND service_id = %s
+                      AND answer = ''
+                    RETURNING
+                        message_id,
+                        service_id,
+                        user_id,
+                        session_id,
+                        conversation_id,
+                        topic_id,
+                        create_time,
+                        question,
+                        answer
+                    """
+                ).format(table=table),
+                (answer, topic_id, message_id, service_id),
+            )
+            row = cur.fetchone()
+    return dict(row or {})
+
+
 def create_chat_message(
     *,
     user_id: str,
@@ -926,6 +1182,11 @@ def assign_latest_chat_message_topic(
     table_name = table_name or settings.postgres_chat_table
     table = sql.Identifier(table_name)
 
+    user_name_projection = (
+        sql.SQL("NULL::TEXT AS user_name")
+        if table_name == settings.postgres_external_chat_table
+        else sql.Identifier("user_name")
+    )
     with postgres_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -944,7 +1205,7 @@ def assign_latest_chat_message_topic(
                     )
                     RETURNING
                         user_id,
-                        user_name,
+                        {user_name_projection},
                         session_id,
                         conversation_id,
                         topic_id,
@@ -952,7 +1213,7 @@ def assign_latest_chat_message_topic(
                         question,
                         answer
                     """
-                ).format(table=table),
+                ).format(table=table, user_name_projection=user_name_projection),
                 (topic_id, user_id, session_id, conversation_id),
             )
             row = cur.fetchone()
@@ -974,6 +1235,11 @@ def list_chat_messages_by_topic(
     table = sql.Identifier(table_name)
     limit = max(1, min(int(limit), 100))
 
+    user_name_projection = (
+        sql.SQL("NULL::TEXT AS user_name")
+        if table_name == settings.postgres_external_chat_table
+        else sql.Identifier("user_name")
+    )
     with postgres_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -981,7 +1247,7 @@ def list_chat_messages_by_topic(
                     """
                     SELECT
                         user_id,
-                        user_name,
+                        {user_name_projection},
                         session_id,
                         conversation_id,
                         topic_id,
@@ -995,7 +1261,7 @@ def list_chat_messages_by_topic(
                     ORDER BY create_time DESC, ctid DESC
                     LIMIT %s
                     """
-                ).format(table=table),
+                ).format(table=table, user_name_projection=user_name_projection),
                 (topic_id, user_id, session_id, limit),
             )
             rows = cur.fetchall()

@@ -17,6 +17,20 @@ class QueryRequest(BaseModel):
         default_factory=dict,
         description="Additional business context passed through to n8n.",
     )
+    service_id: str | None = None
+    use_lark_document: bool = False
+    format_type: Literal["markdown", "json"] = "markdown"
+    additional_system_prompt: str = Field(
+        "",
+        max_length=20_000,
+        description="Server-controlled extra task instructions for the final QA agent.",
+    )
+    task_input: str = Field(
+        "",
+        max_length=150_000,
+        description="Structured input used only by an additional knowledge-base task.",
+    )
+    source: Literal["fastapi", "external"] = "fastapi"
 
 
 class N8nQueryRequest(BaseModel):
@@ -28,7 +42,12 @@ class N8nQueryRequest(BaseModel):
     current_topic: str = "无近期对话"
     current_summary: str = "无近期对话"
     history_topics: list[dict[str, Any]] = Field(default_factory=list)
-    source: Literal["fastapi"] = "fastapi"
+    service_id: str | None = None
+    use_lark_document: bool = False
+    format_type: Literal["markdown", "json"] = "markdown"
+    additional_system_prompt: str = ""
+    task_input: str = ""
+    source: Literal["fastapi", "external"] = "fastapi"
 
 
 class QueryResponse(BaseModel):
