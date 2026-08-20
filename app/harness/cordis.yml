@@ -1,0 +1,92 @@
+# Headless, read-only Harness composition for the knowledge base API.
+# It intentionally excludes dsh-tool-bash, jobs, write/edit tools and web fetch.
+- id: sdk-jsonrpc-server
+  name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
+  config:
+    maxTokensAsSuccess: true
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      deepseek:
+        displayName: DeepSeek Official
+        apiKeyEnv: DEEPSEEK_API_KEY
+        api: openai-completions
+        baseURL: https://api.deepseek.com
+        models:
+          - id: deepseek-v4-flash
+            name: DeepSeek V4 Flash
+            contextWindow: 131072
+            maxTokens: 8192
+- id: subprocess
+  name: '@deepseek-ai/dsh-subprocess-local'
+- id: agent-spine
+  name: '@deepseek-ai/dsh-agent-spine-demo'
+  config:
+    persona: !!js process.env.DSH_SYSTEM_PROMPT
+    workspaceContext: false
+    skills:
+      enabled: false
+    toolBash: false
+    toolJobs: false
+- id: sessions
+  name: '@deepseek-ai/dsh-session-persistence-jsonl'
+  config:
+    root: !!js process.env.DSH_SESSION_ROOT ?? './data/harness_sessions'
+    compression: none
+- id: fs-local
+  name: '@deepseek-ai/dsh-fs-local'
+  config:
+    cwd: !!js process.env.DSH_CWD ?? './data/processing'
+- id: fs-observation-policy
+  name: '@deepseek-ai/dsh-fs-observation-policy'
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: true
+- id: web
+  name: '@deepseek-ai/dsh-web'
+- id: web-search-deepseek
+  name: '@deepseek-ai/dsh-web-search-deepseek'
+  config:
+    apiKeyEnv: DEEPSEEK_API_KEY
+    baseURL: https://api.deepseek.com/anthropic/v1
+    maxTokens: 4096
+    maxUses: 5
+- id: web-fetch-http
+  name: '@deepseek-ai/dsh-web-fetch-http'
+  config:
+    timeoutMs: 60000
+    maxResponseBytes: 10000000
+    maxBodyChars: 200000
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    # Local validation intentionally permits both search and direct page
+    # retrieval.  Production can disable fetch after tool behaviour is vetted.
+    fetch: true
+    searchMaxResults: 10
+    searchTimeoutMs: 60000
+- id: mcp-kb
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: kb
+    transport: stdio
+    command: !!js process.env.KB_PYTHON ?? 'python'
+    args:
+      - !!js process.env.KB_MCP_SERVER
+    env:
+      KB_API_BASE: !!js process.env.KB_API_BASE
+      KB_USER_ID: !!js process.env.KB_USER_ID
+      PYTHONUTF8: '1'
+    failOnStartupError: true
+- id: token-meter
+  name: '@deepseek-ai/dsh-token-meter'
+- id: compaction-basic
+  name: '@deepseek-ai/dsh-compaction-basic'
+  config:
+    thresholdRatio: 0.8
+    retainRatio: 0.16
+    maxTokens: 8192

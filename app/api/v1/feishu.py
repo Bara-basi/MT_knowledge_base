@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import inspect
 import json
 import logging
 import mimetypes
@@ -9,7 +10,7 @@ import re
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
@@ -34,6 +35,7 @@ from app.db.postgres import (
 )
 from app.schemas.query import QueryRequest
 from app.services.chat_records import create_chat_record, record_chat_answer
+from app.services.harness import resolve_internal_session
 from app.services.llm import LLMAPIError, LLMConfigError, LLMClient, LLMSettings
 from app.services.privacy import decrypt_chat_text, encrypt_chat_text
 
@@ -129,6 +131,13 @@ class _FeishuFeedbackState:
     update_lock: asyncio.Lock
     cancel_id: str | None = None
     canceled_text: str | None = None
+    harness_mode: bool = False
+    progress_lines: list[str] = field(default_factory=list)
+    harness_tool_counts: dict[str, int] = field(default_factory=dict)
+    harness_group_label: str | None = None
+    harness_group_count: int = 0
+    harness_group_line_index: int | None = None
+    harness_active_tool_label: str | None = None
 
 
 @dataclass
@@ -352,6 +361,13 @@ async def _answer_feishu_message(
     )
 
     n8n_started_after = time.time()
+    # A test double or legacy override without this callback is not the
+    # Harness path.  Keeping this explicit also prevents stale n8n feedback
+    # workers from being suppressed before the new query function is active.
+    use_harness_feedback = (
+        settings.harness_enabled
+        and "on_progress" in inspect.signature(ask_knowledge_base).parameters
+    )
     cancel_id = _register_feishu_answer_cancel_state(
         question=question,
         chat_id=chat_id,
@@ -365,6 +381,7 @@ async def _answer_feishu_message(
         dedupe_key=dedupe_key,
         n8n_started_after=n8n_started_after,
         cancel_id=cancel_id,
+        use_harness=use_harness_feedback,
     )
     sender_name = await _resolve_feishu_sender_name(
         sender_id=sender_id,
@@ -374,13 +391,19 @@ async def _answer_feishu_message(
         message_id=message_id,
         dedupe_key=dedupe_key,
     )
+    # Feishu's chat window id is permanent; use a generated logical session
+    # so an idle archive starts a fresh Harness context for the next question.
+    internal_session_id = resolve_internal_session(
+        user_id=sender_id,
+        source_session_id=chat_id,
+    )
 
     try:
         await create_chat_record(
             user_id=sender_id,
             user_name=sender_name,
-            session_id=chat_id,
-            conversation_id=chat_id,
+            session_id=internal_session_id,
+            conversation_id=internal_session_id,
             question=question,
         )
         _debug(
@@ -400,6 +423,53 @@ async def _answer_feishu_message(
         )
 
     try:
+        progress_loop = asyncio.get_running_loop()
+        last_harness_progress = ""
+        progress_closed = False
+        progress_tasks: set[asyncio.Task[None]] = set()
+
+        async def close_harness_progress() -> None:
+            """Cancel queued card updates before writing a terminal card."""
+            nonlocal progress_closed
+            progress_closed = True
+            pending = list(progress_tasks)
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        def on_harness_progress(update: Any) -> None:
+            """Bridge Harness' worker-thread events to the Feishu status card."""
+            nonlocal last_harness_progress
+            normalized = _harness_progress_key(update)
+            if progress_closed or not normalized or normalized == last_harness_progress:
+                return
+            last_harness_progress = normalized
+
+            async def publish() -> None:
+                if progress_closed:
+                    return
+                handle = await _resolve_initial_feishu_feedback(
+                    feedback_handle_task,
+                    wait=True,
+                )
+                if (
+                    not progress_closed
+                    and handle
+                    and not _is_feishu_answer_cancelled(cancel_id)
+                ):
+                    await _append_harness_progress(handle.state, update)
+
+            def schedule_publish() -> None:
+                if progress_closed:
+                    return
+                task = asyncio.create_task(publish())
+                progress_tasks.add(task)
+                task.add_done_callback(progress_tasks.discard)
+
+            progress_loop.call_soon_threadsafe(schedule_publish)
+
         _debug(
             "query start",
             event_id=event_id,
@@ -408,12 +478,13 @@ async def _answer_feishu_message(
             n8n_url=settings.n8n_query_webhook_url,
             timeout=settings.n8n_query_timeout,
         )
-        response = await ask_knowledge_base(
-            QueryRequest(
+        query_request = QueryRequest(
                 question=question,
                 user_id=sender_id,
+                # Harness resolves this stable Feishu source id to the active
+                # generated session; chat persistence uses internal_session_id.
                 session_id=chat_id,
-                conversation_id=chat_id,
+                conversation_id=internal_session_id,
                 metadata={
                     "source": "feishu",
                     "event_id": event_id,
@@ -422,7 +493,15 @@ async def _answer_feishu_message(
                     "chat_type": chat_type,
                 },
             )
-        )
+        # Keep old test doubles and third-party overrides compatible while the
+        # production function receives real Harness progress events.
+        if "on_progress" in inspect.signature(ask_knowledge_base).parameters:
+            response = await ask_knowledge_base(
+                query_request,
+                on_progress=on_harness_progress,
+            )
+        else:
+            response = await ask_knowledge_base(query_request)
         _debug(
             "query success",
             event_id=event_id,
@@ -439,6 +518,7 @@ async def _answer_feishu_message(
                 dedupe_key=dedupe_key,
                 answer_preview=_preview(response.answer),
             )
+            await close_harness_progress()
             feedback_handle = await _resolve_initial_feishu_feedback(
                 feedback_handle_task,
                 wait=True,
@@ -456,6 +536,7 @@ async def _answer_feishu_message(
                 dedupe_key=dedupe_key,
                 cancel_id=cancel_id,
             )
+            await close_harness_progress()
             feedback_handle = await _resolve_initial_feishu_feedback(
                 feedback_handle_task,
                 wait=False,
@@ -468,8 +549,8 @@ async def _answer_feishu_message(
             await record_chat_answer(
                 user_id=sender_id,
                 user_name=sender_name,
-                session_id=chat_id,
-                conversation_id=chat_id,
+                session_id=internal_session_id,
+                conversation_id=internal_session_id,
                 question=question,
                 answer=response.answer,
                 topic_id=response.topic_id,
@@ -538,6 +619,7 @@ async def _answer_feishu_message(
         _discard_feishu_answer_cancel_state(cancel_id)
         return
 
+    await close_harness_progress()
     feedback_handle = await _resolve_initial_feishu_feedback(feedback_handle_task, wait=False)
     await _stop_feishu_feedback_loop(feedback_handle)
 
@@ -597,6 +679,7 @@ def _schedule_initial_feishu_feedback(
     dedupe_key: str | None,
     n8n_started_after: float,
     cancel_id: str | None = None,
+    use_harness: bool = False,
 ) -> asyncio.Task[_FeishuFeedbackHandle | None] | None:
     if not message_id and not chat_id:
         _debug(
@@ -616,6 +699,7 @@ def _schedule_initial_feishu_feedback(
             dedupe_key=dedupe_key,
             n8n_started_after=n8n_started_after,
             cancel_id=cancel_id,
+            use_harness=use_harness,
         )
     )
     task.add_done_callback(_log_initial_feishu_feedback_task_failure)
@@ -664,12 +748,14 @@ async def _send_initial_feishu_feedback(
     dedupe_key: str | None,
     n8n_started_after: float,
     cancel_id: str | None = None,
+    use_harness: bool = False,
 ) -> _FeishuFeedbackHandle | None:
     initial_feedback = await _send_initial_feedback_card_with_greeting(
         question=question,
         chat_id=chat_id,
         message_id=message_id,
         cancel_id=cancel_id,
+        use_harness=use_harness,
     )
     if initial_feedback is None:
         _debug(
@@ -700,6 +786,12 @@ async def _send_initial_feishu_feedback(
         status_text=status_text,
         update_lock=asyncio.Lock(),
         cancel_id=cancel_id,
+        harness_mode=use_harness,
+        progress_lines=(
+            ["<font color='grey'>⏳ 正在连接知识库助手…</font>"]
+            if use_harness
+            else []
+        ),
     )
     feedback_task = _create_feishu_feedback_task(
         state=feedback_state,
@@ -707,13 +799,18 @@ async def _send_initial_feishu_feedback(
         event_id=event_id,
         dedupe_key=dedupe_key,
         n8n_started_after=n8n_started_after,
+        use_harness=use_harness,
     )
-    comfort_task = asyncio.create_task(
-        _run_feishu_comfort_feedback_loop(
-            state=feedback_state,
-            stop_event=stop_event,
-            event_id=event_id,
-            dedupe_key=dedupe_key,
+    comfort_task = (
+        asyncio.create_task(_wait_for_feishu_feedback_stop(stop_event))
+        if use_harness
+        else asyncio.create_task(
+            _run_feishu_comfort_feedback_loop(
+                state=feedback_state,
+                stop_event=stop_event,
+                event_id=event_id,
+                dedupe_key=dedupe_key,
+            )
         )
     )
     _debug(
@@ -739,8 +836,9 @@ async def _send_initial_feedback_card_with_greeting(
     chat_id: str | None,
     message_id: str | None,
     cancel_id: str | None = None,
+    use_harness: bool = False,
 ) -> tuple[str | None, str, str] | None:
-    initial_parts = await _build_initial_feedback_parts(question)
+    initial_parts = await _build_initial_feedback_parts(question, use_harness=use_harness)
     if initial_parts is None:
         return None
     prefix_text, status_text = initial_parts
@@ -794,7 +892,15 @@ async def _build_initial_feedback_text(question: str) -> str | None:
     return _compose_feedback_card_text(*parts)
 
 
-async def _build_initial_feedback_parts(question: str) -> tuple[str, str] | None:
+async def _build_initial_feedback_parts(
+    question: str,
+    *,
+    use_harness: bool = False,
+) -> tuple[str, str] | None:
+    if use_harness:
+        # Harness supplies the live progress; do not invoke the legacy small
+        # model simply to generate a greeting.
+        return "", "🤔 正在连接知识库助手..."
     feedback_text = _get_initial_feedback_text()
     greeting_text = await _generate_immediate_feedback_greeting(question)
     if greeting_text is None:
@@ -1002,7 +1108,10 @@ def _create_feishu_feedback_task(
     event_id: str | None,
     dedupe_key: str | None,
     n8n_started_after: float,
+    use_harness: bool = False,
 ) -> asyncio.Task[None]:
+    if use_harness:
+        return asyncio.create_task(_wait_for_feishu_feedback_stop(stop_event))
     if _n8n_progress_polling_configured():
         return asyncio.create_task(
             _run_n8n_progress_feedback_loop(
@@ -1203,12 +1312,145 @@ async def _update_feishu_feedback_status(
     return await _update_feishu_feedback_card(state)
 
 
+_HARNESS_TOOL_LABELS = {
+    "kb_hybrid_search": "混合检索",
+    "kb_graph_search": "知识图谱检索",
+    "memory_search": "历史记忆检索",
+    "web_search": "联网搜索",
+    "web_fetch": "网页抓取",
+    "grep": "文档关键词检索",
+    "glob": "文档定位",
+    "read": "文档读取",
+    "parse": "文档解析",
+}
+
+
+def _harness_progress_key(update: Any) -> str:
+    return "|".join(
+        str(getattr(update, name, "") or "")
+        for name in ("kind", "tool_name", "text", "arguments")
+    )[:2_000]
+
+
+async def _append_harness_progress(state: _FeishuFeedbackState, update: Any) -> bool:
+    """Append one coloured, compact Harness event to the status timeline."""
+    kind = str(getattr(update, "kind", "") or "")
+    tool_name = str(getattr(update, "tool_name", "") or "")
+    label = _harness_tool_label(tool_name)
+    if kind == "tool_start":
+        can_merge = (
+            state.harness_group_label == label
+            and state.harness_group_line_index == len(state.progress_lines) - 1
+        )
+        if can_merge:
+            state.harness_group_count += 1
+        else:
+            state.harness_group_label = label
+            state.harness_group_count = 1
+            state.harness_group_line_index = len(state.progress_lines)
+        state.harness_active_tool_label = label
+        count = state.harness_group_count
+        line = f"<font color='grey'>• 正在{label}（第 {count} 次）{_harness_argument_hint(getattr(update, 'arguments', None))}</font>"
+        if can_merge:
+            state.progress_lines[-1] = line
+            return await _update_feishu_feedback_card(state)
+    elif kind == "tool_end":
+        if state.harness_active_tool_label == label and state.harness_group_line_index is not None:
+            line = (
+                f"<font color='green'>✓ 已调用 {state.harness_group_count} 次{label}"
+                f"{_harness_result_hint(tool_name, getattr(update, 'result', None))}</font>"
+            )
+            state.progress_lines[state.harness_group_line_index] = line
+            state.harness_active_tool_label = None
+            return await _update_feishu_feedback_card(state)
+        line = f"<font color='green'>✓ 已完成{label}{_harness_result_hint(tool_name, getattr(update, 'result', None))}</font>"
+    elif kind == "text":
+        text = str(getattr(update, "text", "") or "").strip()
+        text = _clean_harness_feedback_text(text)
+        if not text:
+            return False
+        line = f"<font color='blue'>💬 {text[:500]}</font>"
+    elif kind == "status":
+        text = str(getattr(update, "text", "") or "").strip()
+        if not text:
+            return False
+        line = f"<font color='grey'>• {text}</font>"
+    else:
+        return False
+
+    # The connection line is only a short initial affordance, not history.
+    if state.progress_lines and "正在连接知识库助手" in state.progress_lines[0]:
+        state.progress_lines.pop(0)
+    if state.progress_lines and state.progress_lines[-1] == line:
+        return False
+    state.progress_lines.append(line)
+    # Preserve a compact, readable card even on tool-heavy requests.
+    overflow = max(0, len(state.progress_lines) - 12)
+    if overflow:
+        del state.progress_lines[:overflow]
+        if state.harness_group_line_index is not None:
+            state.harness_group_line_index -= overflow
+            if state.harness_group_line_index < 0:
+                state.harness_group_line_index = None
+                state.harness_group_label = None
+                state.harness_active_tool_label = None
+    return await _update_feishu_feedback_card(state)
+
+
+def _clean_harness_feedback_text(text: str) -> str:
+    """Process output is text, never model-supplied card markup."""
+    cleaned = re.sub(r"</?[^>]+>", "", text)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _harness_tool_label(name: str) -> str:
+    normalized = name.lower()
+    for key, label in _HARNESS_TOOL_LABELS.items():
+        if key in normalized:
+            return label
+    return "工具调用"
+
+
+def _harness_argument_hint(arguments: Any) -> str:
+    if not isinstance(arguments, dict):
+        return ""
+    query = str(arguments.get("query") or arguments.get("keyword") or arguments.get("url") or "").strip()
+    return f"：{query[:80]}" if query else ""
+
+
+def _harness_result_hint(tool_name: str, result: Any) -> str:
+    """Extract useful counts from common MCP/Web result shapes without leaking content."""
+    payload = result
+    if isinstance(payload, dict):
+        content = payload.get("content")
+        if isinstance(content, list) and content and isinstance(content[0], dict):
+            payload = content[0].get("text", payload)
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return ""
+    if isinstance(payload, dict):
+        for key, label in (("count", "条内容"), ("chunks", "个片段"), ("sources", "个来源"), ("results", "条结果")):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return f"（{len(value)}{label}）"
+            if isinstance(value, int):
+                return f"（{value}{label}）"
+    return ""
+
+
 async def _update_feishu_feedback_card(state: _FeishuFeedbackState) -> bool:
     async with state.update_lock:
         canceled_text = state.canceled_text
+        markdown_text = (
+            "\n".join(state.progress_lines)
+            if state.harness_mode and state.progress_lines
+            else _compose_feedback_card_text(state.prefix_text, state.status_text)
+        )
         return await _try_update_feishu_markdown_message(
             state.message_id,
-            _compose_feedback_card_text(state.prefix_text, state.status_text),
+            markdown_text,
             log_content=False,
             stop_cancel_id=None if canceled_text else state.cancel_id,
             canceled_text=canceled_text,
@@ -1365,6 +1607,11 @@ async def _list_recent_n8n_executions(
         f"{base_url}/api/v1/executions",
         params=params,
     )
+
+
+async def _wait_for_feishu_feedback_stop(stop_event: asyncio.Event) -> None:
+    """Keep a Harness feedback handle alive without legacy status writers."""
+    await stop_event.wait()
     response.raise_for_status()
     payload = response.json()
     items = payload.get("data") if isinstance(payload, dict) else payload
@@ -2808,7 +3055,10 @@ async def _update_feishu_markdown_message(
     _debug("markdown update api request", **fields)
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            trust_env=settings.feishu_trust_env,
+        ) as client:
             response = await client.patch(
                 url,
                 headers={"Authorization": f"Bearer {token}"},

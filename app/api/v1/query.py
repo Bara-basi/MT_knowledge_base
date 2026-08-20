@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Any
+from typing import Any, Callable
 from uuid import UUID
 
 import httpx
@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.core.config import settings
 from app.schemas.query import N8nQueryRequest, QueryRequest, QueryResponse
+from app.services.harness import ask_harness
 from app.services.chat import list_recent_conversation_topic_records
 from app.services.chat.topic_selection import consume_topic_selection
 
@@ -29,8 +30,28 @@ async def query_knowledge_base(request: QueryRequest) -> QueryResponse:
     return await ask_knowledge_base(request)
 
 
-async def ask_knowledge_base(request: QueryRequest) -> QueryResponse:
-    """Forward a user question to the n8n QA agent and normalize its answer."""
+async def ask_knowledge_base(
+    request: QueryRequest,
+    *,
+    on_progress: Callable[[Any], None] | None = None,
+) -> QueryResponse:
+    """Run the Harness QA agent; legacy n8n code below remains for rollback only."""
+
+    if settings.harness_enabled:
+        answer, internal_session_id = await ask_harness(
+            question=request.question,
+            user_id=request.user_id,
+            source_session_id=request.session_id,
+            on_progress=on_progress,
+        )
+        return QueryResponse(
+            question=request.question,
+            answer=answer,
+            # The former topic id belongs to n8n virtual-topic routing.  The
+            # generated internal session is intentionally not exposed as UUID
+            # topic metadata to callers.
+            topic_id=None,
+        )
 
     sanitized_question = sanitize_question_for_n8n(request.question)
     n8n_request = request.model_copy(update={"question": sanitized_question})

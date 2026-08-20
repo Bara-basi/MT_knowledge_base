@@ -233,6 +233,26 @@ class Settings:
     n8n_query_workflow_id: str = os.getenv("N8N_QUERY_WORKFLOW_ID", "KZKRj0Y1QW2xTS0J")
     n8n_retrieval_workflow_id: str = os.getenv("N8N_RETRIEVAL_WORKFLOW_ID", "0N11uTxPrWDr7G9O")
 
+    # Harness is intentionally configured separately from the legacy n8n
+    # workflow.  The API process can run it locally during migration, while a
+    # later deployment may point HARNESS_GATEWAY_URL at a dedicated service.
+    # Explicit opt-in prevents an existing n8n deployment from receiving 503s
+    # before the pinned Harness runtime has been installed on its Linux host.
+    harness_enabled: bool = _env_bool("HARNESS_ENABLED", False)
+    harness_gateway_url: str = os.getenv("HARNESS_GATEWAY_URL", "").rstrip("/")
+    harness_model: str = os.getenv("HARNESS_MODEL", "deepseek-v4-flash")
+    harness_provider: str = os.getenv("HARNESS_PROVIDER", "deepseek")
+    harness_timeout: float = float(os.getenv("HARNESS_TIMEOUT", "600"))
+    harness_idle_seconds: int = int(os.getenv("HARNESS_IDLE_SECONDS", "25200"))
+    harness_session_root: str = os.getenv("HARNESS_SESSION_ROOT", "data/harness_sessions")
+    # The bundled Harness installation patch resumes JSONL sessions natively.
+    # Set false only as an emergency rollback to inject the application
+    # transcript into a create-only third-party runtime.
+    harness_native_jsonl_resume: bool = _env_bool("HARNESS_NATIVE_JSONL_RESUME", True)
+    harness_workdir: str = os.getenv("HARNESS_WORKDIR", "data/processing")
+    harness_memory_bucket: str = os.getenv("HARNESS_MEMORY_BUCKET", "knowledge-chat-memory")
+    harness_scheduler_interval_seconds: int = int(os.getenv("HARNESS_SCHEDULER_INTERVAL_SECONDS", "300"))
+
     feishu_app_id: str = _get_first_env("FEISHU_APP_ID", "LARK_APP_ID")
     feishu_app_secret: str = _get_first_env("FEISHU_APP_SECRET", "LARK_APP_SECRET")
     feishu_verification_token: str = _get_first_env(
@@ -241,6 +261,7 @@ class Settings:
     )
     feishu_base_url: str = os.getenv("FEISHU_BASE_URL", "https://open.feishu.cn").rstrip("/")
     feishu_timeout: float = float(os.getenv("FEISHU_TIMEOUT", "30"))
+    feishu_trust_env: bool = _env_bool("FEISHU_TRUST_ENV", False)
     feishu_feedback_form_url: str = os.getenv(
         "FEISHU_FEEDBACK_FORM_URL",
         "https://tmqhw1h9zt.feishu.cn/wiki/LbjCwUPA6iUbF5k2SFbcowT8nne",

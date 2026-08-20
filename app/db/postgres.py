@@ -22,6 +22,8 @@ CONVERSATION_TOPICS_TABLE = "conversation_topics"
 CONVERSATION_TOPICS_TABLE_COMMENT = "Virtual conversation topics for Feishu chat sessions"
 CHAT_TEXT_ENCRYPTION_PREFIX = "fernet:v1:"
 FEISHU_ANSWER_FEEDBACK_TABLE = "feishu_answer_feedback_states"
+HARNESS_SESSIONS_TABLE = "harness_sessions"
+HARNESS_MEMORIES_TABLE = "harness_memories"
 
 
 def get_postgres_connection() -> Connection[Any]:
@@ -1372,6 +1374,178 @@ def delete_expired_feishu_answer_feedback_states(*, older_than_seconds: float) -
                 (older_than_seconds,),
             )
             return cur.rowcount or 0
+
+
+def ensure_harness_tables() -> None:
+    """Create the small control-plane tables used by the Harness adapter.
+
+    The Feishu chat id is deliberately stored as a source key, never used as
+    the Harness session id: Feishu has one permanent chat window per user.
+    """
+
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {HARNESS_SESSIONS_TABLE} (
+                    internal_session_id UUID PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    source_session_id TEXT NOT NULL,
+                    harness_session_id TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_activity_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    archived_at TIMESTAMPTZ,
+                    archive_error TEXT
+                )
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {HARNESS_MEMORIES_TABLE} (
+                    memory_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id TEXT NOT NULL,
+                    internal_session_id UUID NOT NULL REFERENCES {HARNESS_SESSIONS_TABLE}(internal_session_id),
+                    topic TEXT NOT NULL,
+                    keywords JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    object_uri TEXT NOT NULL UNIQUE,
+                    started_at TIMESTAMPTZ,
+                    ended_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    status TEXT NOT NULL DEFAULT 'ready'
+                )
+                """
+            )
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS harness_sessions_idle_idx ON {HARNESS_SESSIONS_TABLE} (status, last_activity_at)"
+            )
+            cur.execute(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS harness_sessions_one_active_idx ON {HARNESS_SESSIONS_TABLE} (user_id, source_session_id) WHERE status = 'active'"
+            )
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS harness_memories_user_idx ON {HARNESS_MEMORIES_TABLE} (user_id, created_at DESC)"
+            )
+
+
+def get_or_create_harness_session(*, user_id: str, source_session_id: str) -> dict[str, Any]:
+    ensure_harness_tables()
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT * FROM {HARNESS_SESSIONS_TABLE}
+                WHERE user_id = %s AND source_session_id = %s AND status = 'active'
+                FOR UPDATE
+                """,
+                (user_id, source_session_id),
+            )
+            row = cur.fetchone()
+            if row:
+                cur.execute(
+                    f"UPDATE {HARNESS_SESSIONS_TABLE} SET last_activity_at = CURRENT_TIMESTAMP WHERE internal_session_id = %s RETURNING *",
+                    (row["internal_session_id"],),
+                )
+                return dict(cur.fetchone() or row)
+            internal_id = uuid4()
+            harness_id = f"mtsco-{internal_id}"
+            cur.execute(
+                f"""
+                INSERT INTO {HARNESS_SESSIONS_TABLE}
+                (internal_session_id, user_id, source_session_id, harness_session_id)
+                VALUES (%s, %s, %s, %s) RETURNING *
+                """,
+                (internal_id, user_id, source_session_id, harness_id),
+            )
+            return dict(cur.fetchone() or {})
+
+
+def list_harness_chat_turns(*, internal_session_id: UUID | str, limit: int = 32) -> list[dict[str, Any]]:
+    """Return completed Feishu turns for one generated Harness session.
+
+    These application records are the durable transcript.  They are written
+    independently of the Harness runtime and remain reliable when a JSON-RPC
+    child process exits before its JSONL writer has flushed every event.
+    """
+
+    ensure_chat_messages_table()
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT question, answer, create_time
+                FROM chat_messages
+                WHERE session_id = %s AND COALESCE(answer, '') <> ''
+                ORDER BY create_time DESC
+                LIMIT %s
+                """,
+                (str(internal_session_id), max(1, min(limit, 100))),
+            )
+            return [dict(row) for row in reversed(cur.fetchall())]
+
+
+def list_expired_harness_sessions(*, idle_seconds: int, limit: int = 100) -> list[dict[str, Any]]:
+    ensure_harness_tables()
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT * FROM {HARNESS_SESSIONS_TABLE}
+                WHERE status = 'active'
+                  AND last_activity_at < CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
+                ORDER BY last_activity_at
+                LIMIT %s FOR UPDATE SKIP LOCKED
+                """,
+                (idle_seconds, limit),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+            for row in rows:
+                cur.execute(
+                    f"UPDATE {HARNESS_SESSIONS_TABLE} SET status = 'archiving' WHERE internal_session_id = %s",
+                    (row["internal_session_id"],),
+                )
+            return rows
+
+
+def complete_harness_archive(*, internal_session_id: UUID | str, error: str = "") -> None:
+    ensure_harness_tables()
+    status = "active" if error else "archived"
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""UPDATE {HARNESS_SESSIONS_TABLE}
+                SET status = %s, archived_at = CASE WHEN %s = '' THEN CURRENT_TIMESTAMP ELSE NULL END,
+                    archive_error = NULLIF(%s, '')
+                WHERE internal_session_id = %s""",
+                (status, error, error, internal_session_id),
+            )
+
+
+def insert_harness_memory(*, user_id: str, internal_session_id: UUID | str, topic: str, keywords: list[str], object_uri: str) -> None:
+    ensure_harness_tables()
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""INSERT INTO {HARNESS_MEMORIES_TABLE}
+                (user_id, internal_session_id, topic, keywords, object_uri)
+                VALUES (%s, %s, %s, %s, %s) ON CONFLICT (object_uri) DO NOTHING""",
+                (user_id, internal_session_id, topic, Jsonb(keywords), object_uri),
+            )
+
+
+def list_harness_memories(*, user_id: str, query: str = "", limit: int = 8) -> list[dict[str, Any]]:
+    """Return only the requesting user's memory catalogue (never cross-user)."""
+    ensure_harness_tables()
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT memory_id, topic, keywords, object_uri, created_at
+                FROM {HARNESS_MEMORIES_TABLE}
+                WHERE user_id = %s AND status = 'ready'
+                  AND (%s = '' OR topic ILIKE '%%' || %s || '%%')
+                ORDER BY created_at DESC LIMIT %s""",
+                (user_id, query.strip(), query.strip(), max(1, min(limit, 20))),
+            )
+            return [dict(row) for row in cur.fetchall()]
 
 
 def check_postgres_health() -> dict[str, Any]:

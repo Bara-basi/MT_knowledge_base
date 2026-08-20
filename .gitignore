@@ -55,3 +55,13 @@ volumes/
 !data/prompt/**
 
 test.json
+
+node_modules/
+
+.pnpm-store/
+
+demo_harness/.sessions/
+
+# Local editable-development checkout.  Server installation keeps this source
+# outside the project repository at DHS_REPO instead.
+deepseek-harness/
