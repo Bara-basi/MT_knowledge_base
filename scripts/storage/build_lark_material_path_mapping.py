@@ -1,8 +1,8 @@
-"""Build Feishu Wiki path-to-link mappings for material libraries.
+"""Build a Feishu Wiki marketing-material catalogue in PostgreSQL.
 
 This script reads the ``wiki`` mapping in a source JSON file, walks every
-configured Wiki node recursively, and writes one JSONL file per source.  It
-does not export or download any Feishu document content.
+configured Wiki node recursively, and upserts the paths and links into the
+marketing-material catalogue. It does not export or download document content.
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
-import re
 import sys
 from collections.abc import Iterator
 from urllib.parse import urlparse
@@ -23,11 +22,16 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.storage.lark_script_credentials import get_lark_credentials  # noqa: E402
+from app.services.marketing_asset_catalog import (  # noqa: E402
+    TABLE_NAME,
+    ensure_marketing_asset_catalog,
+    prepare_asset_row,
+    upsert_marketing_assets,
+)
 
 
 BASE_URL = "https://open.feishu.cn/open-apis"
 DEFAULT_SOURCE = PROJECT_ROOT / "data" / "src" / "material.json"
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "metadata" / "local2lark_mapping"
 REQUEST_TIMEOUT = 30
 
 
@@ -131,11 +135,6 @@ def walk_nodes(
         yield from walk_nodes(access_token, child, source_url, path_parts, visited)
 
 
-def safe_filename(name: str) -> str:
-    name = re.sub(r'[\\/:*?"<>|]+', "_", name.strip())
-    return name.strip(" .") or "untitled"
-
-
 def load_wiki_sources(source_path: pathlib.Path) -> dict[str, dict[str, str]]:
     with source_path.open(encoding="utf-8") as handle:
         data = json.load(handle)
@@ -151,9 +150,9 @@ def load_wiki_sources(source_path: pathlib.Path) -> dict[str, dict[str, str]]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build Feishu material path/link JSONL mappings.")
+    parser = argparse.ArgumentParser(description="Build the Feishu marketing-material PostgreSQL catalogue.")
     parser.add_argument("--source", type=pathlib.Path, default=DEFAULT_SOURCE, help="Source JSON containing a wiki mapping.")
-    parser.add_argument("--output-dir", type=pathlib.Path, default=DEFAULT_OUTPUT_DIR, help="Directory for generated JSONL files.")
+    parser.add_argument("--table-name", default=TABLE_NAME, help=f"Target PostgreSQL table. Default: {TABLE_NAME}.")
     return parser.parse_args()
 
 
@@ -161,27 +160,35 @@ def main() -> int:
     args = parse_args()
     sources = load_wiki_sources(args.source)
     access_token = get_access_token()
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    ensure_marketing_asset_catalog(args.table_name)
     failures: list[str] = []
+    total_count = 0
 
     for library_name, roots in sources.items():
-        output_path = args.output_dir / f"{safe_filename(library_name)}.jsonl"
-        count = 0
-        with output_path.open("w", encoding="utf-8", newline="\n") as handle:
-            for configured_name, link in roots.items():
-                try:
-                    root_node = get_node(access_token, extract_wiki_token(link))
-                    for record in walk_nodes(access_token, root_node, link, (), set()):
-                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-                        count += 1
-                except Exception as exc:  # Continue so accessible roots are still catalogued.
-                    failures.append(f"{library_name}/{configured_name}: {exc}")
-                    print(f"FAILED {library_name}/{configured_name}: {exc}", file=sys.stderr)
-        print(f"Wrote {count} records: {output_path}")
+        rows: list[dict[str, str]] = []
+        for configured_name, link in roots.items():
+            try:
+                root_node = get_node(access_token, extract_wiki_token(link))
+                for record in walk_nodes(access_token, root_node, link, (), set()):
+                    rows.append(
+                        prepare_asset_row(
+                            library_name=library_name,
+                            path=record["path"],
+                            feishu_link=record["feishu_link"],
+                            source_file=str(args.source),
+                        )
+                    )
+            except Exception as exc:  # Continue so accessible roots are still catalogued.
+                failures.append(f"{library_name}/{configured_name}: {exc}")
+                print(f"FAILED {library_name}/{configured_name}: {exc}", file=sys.stderr)
+        count = upsert_marketing_assets(rows, table_name=args.table_name)
+        total_count += count
+        print(f"Upserted {count} records for {library_name} into {args.table_name}")
 
     if failures:
         print(f"Completed with {len(failures)} failed root(s).", file=sys.stderr)
         return 1
+    print(f"Completed: upserted {total_count} marketing-material records into {args.table_name}.")
     return 0
 
 

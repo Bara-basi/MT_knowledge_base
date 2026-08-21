@@ -1234,7 +1234,8 @@ async def _update_feishu_feedback_status(
 _HARNESS_TOOL_LABELS = {
     "kb_hybrid_search": "混合检索",
     "kb_graph_search": "知识图谱检索",
-    "memory_search": "历史记忆检索",
+    "conversation_summary": "会话摘要获取",
+    "conversation_excerpt_search": "历史对话片段检索",
     "web_search": "联网搜索",
     "web_fetch": "网页抓取",
     "grep": "文档关键词检索",

@@ -27,6 +27,10 @@ from app.services.agent_documents import (
     prepare_agent_context_assets,
     prepare_agent_vision_payload,
 )
+from app.services.marketing_asset_catalog import (
+    format_harness_results,
+    search_marketing_assets,
+)
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -45,11 +49,45 @@ class AgentContextAssetsRequest(BaseModel):
     image_paths: list[str] = Field(default_factory=list, max_length=MAX_AGENT_CONTEXT_IMAGES)
 
 
+class MarketingAssetSearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=500, description="Marketing asset name or path keywords.")
+    limit: int = Field(10, ge=1, le=20, description="Maximum matching marketing assets.")
+    source: str = Field(
+        "api",
+        min_length=1,
+        max_length=64,
+        description="Use harness to receive a compact model-readable result; other values receive the standard response.",
+    )
+
+
 @router.get("/minio/categories")
 def list_minio_categories() -> dict[str, object]:
     return {
         "categories": RAW_DOCUMENT_CATEGORIES,
         "prefixes": sorted(RAW_DOCUMENT_CATEGORIES.values()),
+    }
+
+
+@router.post("/marketing-assets/search")
+def search_marketing_asset_catalog(request: MarketingAssetSearchRequest) -> dict[str, object]:
+    """Find marketing materials by catalogue path without retrieving document content."""
+    try:
+        matches = search_marketing_assets(request.query, limit=request.limit)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Marketing asset search failed: {exc}") from exc
+
+    if request.source == "harness":
+        return {
+            "query": request.query,
+            "source": "harness",
+            "count": len(matches),
+            "text": format_harness_results(request.query, matches),
+        }
+    return {
+        "query": request.query,
+            "source": request.source,
+        "count": len(matches),
+        "matches": [match.to_dict() for match in matches],
     }
 
 

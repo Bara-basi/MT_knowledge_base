@@ -1408,6 +1408,7 @@ def ensure_harness_tables() -> None:
                     internal_session_id UUID NOT NULL REFERENCES {HARNESS_SESSIONS_TABLE}(internal_session_id),
                     topic TEXT NOT NULL,
                     keywords JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    summary TEXT NOT NULL DEFAULT '',
                     object_uri TEXT NOT NULL UNIQUE,
                     started_at TIMESTAMPTZ,
                     ended_at TIMESTAMPTZ,
@@ -1415,6 +1416,9 @@ def ensure_harness_tables() -> None:
                     status TEXT NOT NULL DEFAULT 'ready'
                 )
                 """
+            )
+            cur.execute(
+                f"ALTER TABLE {HARNESS_MEMORIES_TABLE} ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''"
             )
             cur.execute(
                 f"CREATE INDEX IF NOT EXISTS harness_sessions_idle_idx ON {HARNESS_SESSIONS_TABLE} (status, last_activity_at)"
@@ -1520,30 +1524,56 @@ def complete_harness_archive(*, internal_session_id: UUID | str, error: str = ""
             )
 
 
-def insert_harness_memory(*, user_id: str, internal_session_id: UUID | str, topic: str, keywords: list[str], object_uri: str) -> None:
+def insert_harness_memory(
+    *,
+    user_id: str,
+    internal_session_id: UUID | str,
+    topic: str,
+    keywords: list[str],
+    object_uri: str,
+    summary: str,
+    started_at: datetime | None = None,
+    ended_at: datetime | None = None,
+) -> None:
     ensure_harness_tables()
     with postgres_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 f"""INSERT INTO {HARNESS_MEMORIES_TABLE}
-                (user_id, internal_session_id, topic, keywords, object_uri)
-                VALUES (%s, %s, %s, %s, %s) ON CONFLICT (object_uri) DO NOTHING""",
-                (user_id, internal_session_id, topic, Jsonb(keywords), object_uri),
+                (user_id, internal_session_id, topic, keywords, summary, object_uri, started_at, ended_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (object_uri) DO NOTHING""",
+                (user_id, internal_session_id, topic, Jsonb(keywords), summary, object_uri, started_at, ended_at),
             )
 
 
-def list_harness_memories(*, user_id: str, query: str = "", limit: int = 8) -> list[dict[str, Any]]:
+def list_harness_memories(
+    *,
+    user_id: str,
+    query: str = "",
+    limit: int = 8,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+) -> list[dict[str, Any]]:
     """Return only the requesting user's memory catalogue (never cross-user)."""
     ensure_harness_tables()
     with postgres_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                f"""SELECT memory_id, topic, keywords, object_uri, created_at
+                f"""SELECT memory_id, internal_session_id, topic, keywords, summary, object_uri, started_at, ended_at, created_at
                 FROM {HARNESS_MEMORIES_TABLE}
                 WHERE user_id = %s AND status = 'ready'
                   AND (%s = '' OR topic ILIKE '%%' || %s || '%%')
+                  AND (%s::timestamptz IS NULL OR COALESCE(ended_at, created_at) >= %s::timestamptz)
+                  AND (%s::timestamptz IS NULL OR COALESCE(started_at, created_at) < %s::timestamptz)
                 ORDER BY created_at DESC LIMIT %s""",
-                (user_id, query.strip(), query.strip(), max(1, min(limit, 20))),
+                (
+                    user_id,
+                    query.strip(),
+                    query.strip(),
+                    start_at, start_at,
+                    end_at, end_at,
+                    max(1, min(limit, 20)),
+                ),
             )
             return [dict(row) for row in cur.fetchall()]
 

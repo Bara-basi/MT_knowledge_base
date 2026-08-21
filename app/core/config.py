@@ -230,6 +230,12 @@ class Settings:
     harness_native_jsonl_resume: bool = _env_bool("HARNESS_NATIVE_JSONL_RESUME", True)
     harness_workdir: str = os.getenv("HARNESS_WORKDIR", "data/processing")
     harness_memory_bucket: str = os.getenv("HARNESS_MEMORY_BUCKET", "knowledge-chat-memory")
+    harness_memory_summary_model: str = os.getenv(
+        "HARNESS_MEMORY_SUMMARY_MODEL", os.getenv("HARNESS_MODEL", "deepseek-v4-flash")
+    )
+    harness_memory_summary_max_tokens: int = int(
+        os.getenv("HARNESS_MEMORY_SUMMARY_MAX_TOKENS", "1200")
+    )
     harness_scheduler_interval_seconds: int = int(os.getenv("HARNESS_SCHEDULER_INTERVAL_SECONDS", "300"))
 
     feishu_app_id: str = _get_first_env("FEISHU_APP_ID", "LARK_APP_ID")
