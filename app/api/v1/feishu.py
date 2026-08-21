@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-import inspect
 import json
 import logging
 import mimetypes
@@ -162,40 +161,6 @@ class _FeishuAnswerFeedbackState:
 
 _feishu_answer_cancel_states: dict[str, _FeishuAnswerCancelState] = {}
 _feishu_answer_feedback_states: dict[str, _FeishuAnswerFeedbackState] = {}
-
-_n8n_progress_texts = {
-    "understanding": "🤔 正在理解问题...",
-    "retrieving": "🔍 正在检索知识库...",
-    "reranking": "📚 正在整理资料...",
-    "generating": "✍️ 正在组织答案...",
-}
-_n8n_progress_stage_order = ("understanding", "retrieving", "reranking", "generating")
-_n8n_optimistic_progress_thresholds = (
-    (10.0, "generating"),
-    (5.0, "reranking"),
-    (1.5, "retrieving"),
-)
-
-# n8n execution data is only reliable after a node appears in runData.
-# Node names are only labels in n8n and can be duplicated or renamed, so progress
-# detection is intentionally based on authoritative node ids from the workflow.
-_n8n_completed_node_stage_ids = {
-    "understanding": {
-        "e0e954af-c14c-47d1-917a-bdbc69eba580",
-    },
-    "retrieving": {
-        "bdb2ff5c-c9b8-40f1-b623-dc8b912c0600",
-    },
-    "reranking": {
-        "53fb4814-a531-4422-b6ba-f38c3db5a9a4",
-        "18cbcf26-ca22-443f-aa09-3c4173e60983",
-        "a509efe4-649b-4cf7-b32a-5ad35a45a60a",
-        "8a620c5f-620a-481a-96f1-880f595ebb74",
-    },
-    "generating": {
-        "6113024b-7803-4ce2-930a-c893ff1ff7fd",
-    },
-}
 
 @router.post("/events")
 async def handle_feishu_events(
@@ -360,14 +325,7 @@ async def _answer_feishu_message(
         question_len=len(question),
     )
 
-    n8n_started_after = time.time()
-    # A test double or legacy override without this callback is not the
-    # Harness path.  Keeping this explicit also prevents stale n8n feedback
-    # workers from being suppressed before the new query function is active.
-    use_harness_feedback = (
-        settings.harness_enabled
-        and "on_progress" in inspect.signature(ask_knowledge_base).parameters
-    )
+    use_harness_feedback = True
     cancel_id = _register_feishu_answer_cancel_state(
         question=question,
         chat_id=chat_id,
@@ -379,7 +337,6 @@ async def _answer_feishu_message(
         message_id=message_id,
         event_id=event_id,
         dedupe_key=dedupe_key,
-        n8n_started_after=n8n_started_after,
         cancel_id=cancel_id,
         use_harness=use_harness_feedback,
     )
@@ -471,12 +428,11 @@ async def _answer_feishu_message(
             progress_loop.call_soon_threadsafe(schedule_publish)
 
         _debug(
-            "query start",
+            "Harness query start",
             event_id=event_id,
             message_id=message_id,
             dedupe_key=dedupe_key,
-            n8n_url=settings.n8n_query_webhook_url,
-            timeout=settings.n8n_query_timeout,
+            timeout=settings.harness_timeout,
         )
         query_request = QueryRequest(
                 question=question,
@@ -493,15 +449,10 @@ async def _answer_feishu_message(
                     "chat_type": chat_type,
                 },
             )
-        # Keep old test doubles and third-party overrides compatible while the
-        # production function receives real Harness progress events.
-        if "on_progress" in inspect.signature(ask_knowledge_base).parameters:
-            response = await ask_knowledge_base(
-                query_request,
-                on_progress=on_harness_progress,
-            )
-        else:
-            response = await ask_knowledge_base(query_request)
+        response = await ask_knowledge_base(
+            query_request,
+            on_progress=on_harness_progress,
+        )
         _debug(
             "query success",
             event_id=event_id,
@@ -677,7 +628,6 @@ def _schedule_initial_feishu_feedback(
     message_id: str | None,
     event_id: str | None,
     dedupe_key: str | None,
-    n8n_started_after: float,
     cancel_id: str | None = None,
     use_harness: bool = False,
 ) -> asyncio.Task[_FeishuFeedbackHandle | None] | None:
@@ -697,7 +647,6 @@ def _schedule_initial_feishu_feedback(
             message_id=message_id,
             event_id=event_id,
             dedupe_key=dedupe_key,
-            n8n_started_after=n8n_started_after,
             cancel_id=cancel_id,
             use_harness=use_harness,
         )
@@ -746,7 +695,6 @@ async def _send_initial_feishu_feedback(
     message_id: str | None,
     event_id: str | None,
     dedupe_key: str | None,
-    n8n_started_after: float,
     cancel_id: str | None = None,
     use_harness: bool = False,
 ) -> _FeishuFeedbackHandle | None:
@@ -798,21 +746,9 @@ async def _send_initial_feishu_feedback(
         stop_event=stop_event,
         event_id=event_id,
         dedupe_key=dedupe_key,
-        n8n_started_after=n8n_started_after,
         use_harness=use_harness,
     )
-    comfort_task = (
-        asyncio.create_task(_wait_for_feishu_feedback_stop(stop_event))
-        if use_harness
-        else asyncio.create_task(
-            _run_feishu_comfort_feedback_loop(
-                state=feedback_state,
-                stop_event=stop_event,
-                event_id=event_id,
-                dedupe_key=dedupe_key,
-            )
-        )
-    )
+    comfort_task = asyncio.create_task(_wait_for_feishu_feedback_stop(stop_event))
     _debug(
         "feedback card started",
         event_id=event_id,
@@ -1076,8 +1012,7 @@ def _is_transient_feedback_answer(answer: str) -> bool:
     if not normalized_answer:
         return False
 
-    status_texts = set(_n8n_progress_texts.values())
-    status_texts.update(_load_feedback_texts())
+    status_texts = set(_load_feedback_texts())
     status_texts.add(_get_failed_feedback_text())
     status_texts.update(
         {
@@ -1107,30 +1042,14 @@ def _create_feishu_feedback_task(
     stop_event: asyncio.Event,
     event_id: str | None,
     dedupe_key: str | None,
-    n8n_started_after: float,
     use_harness: bool = False,
 ) -> asyncio.Task[None]:
-    if use_harness:
-        return asyncio.create_task(_wait_for_feishu_feedback_stop(stop_event))
-    if _n8n_progress_polling_configured():
-        return asyncio.create_task(
-            _run_n8n_progress_feedback_loop(
-                state=state,
-                stop_event=stop_event,
-                event_id=event_id,
-                dedupe_key=dedupe_key,
-                started_after=n8n_started_after,
-            )
-        )
+    return asyncio.create_task(_wait_for_feishu_feedback_stop(stop_event))
 
-    return asyncio.create_task(
-        _run_feishu_feedback_loop(
-            state=state,
-            stop_event=stop_event,
-            event_id=event_id,
-            dedupe_key=dedupe_key,
-        )
-    )
+
+async def _wait_for_feishu_feedback_stop(stop_event: asyncio.Event) -> None:
+    """Keep the Harness progress-card handle alive until finalization."""
+    await stop_event.wait()
 
 
 async def _run_feishu_comfort_feedback_loop(
@@ -1455,299 +1374,6 @@ async def _update_feishu_feedback_card(state: _FeishuFeedbackState) -> bool:
             stop_cancel_id=None if canceled_text else state.cancel_id,
             canceled_text=canceled_text,
         )
-
-
-def _n8n_progress_polling_configured() -> bool:
-    return (
-        settings.n8n_progress_enabled
-        and bool(settings.n8n_api_key)
-        and bool(_get_n8n_api_base_url())
-    )
-
-
-def _get_n8n_api_base_url() -> str:
-    if settings.n8n_api_base_url:
-        return settings.n8n_api_base_url
-
-    webhook_url = settings.n8n_query_webhook_url
-    marker = "/webhook"
-    marker_index = webhook_url.find(marker)
-    if marker_index > 0:
-        return webhook_url[:marker_index].rstrip("/")
-    return ""
-
-
-async def _run_n8n_progress_feedback_loop(
-    *,
-    state: _FeishuFeedbackState,
-    stop_event: asyncio.Event,
-    event_id: str | None,
-    dedupe_key: str | None,
-    started_after: float,
-) -> None:
-    last_stage = "understanding"
-    last_text = _n8n_progress_texts[last_stage]
-    poll_interval = max(settings.n8n_progress_poll_interval, 0.2)
-    loop_started_at = time.monotonic()
-
-    try:
-        while not stop_event.is_set():
-            stage = await _poll_n8n_progress_stage(started_after=started_after)
-            optimistic_stage = _optimistic_n8n_progress_stage(
-                elapsed_seconds=time.monotonic() - loop_started_at,
-            )
-            next_stage = _latest_n8n_progress_stage(stage, optimistic_stage)
-            if stop_event.is_set():
-                break
-            if next_stage and _n8n_stage_index(next_stage) > _n8n_stage_index(last_stage):
-                last_stage = next_stage
-                text = _n8n_progress_texts[next_stage]
-                if text != last_text:
-                    last_text = text
-                    await _update_feishu_feedback_status(state, text)
-
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=poll_interval)
-                break
-            except asyncio.TimeoutError:
-                pass
-    except Exception as exc:  # noqa: BLE001 - progress feedback should never block answers.
-        _warn(
-            "n8n progress polling failed; falling back to legacy feedback loop",
-            event_id=event_id,
-            dedupe_key=dedupe_key,
-            error=str(exc),
-        )
-        await _run_feishu_feedback_loop(
-            state=state,
-            stop_event=stop_event,
-            event_id=event_id,
-            dedupe_key=dedupe_key,
-        )
-
-
-async def _poll_n8n_progress_stage(*, started_after: float) -> str | None:
-    base_url = _get_n8n_api_base_url()
-    if not base_url:
-        return None
-
-    workflow_ids = [
-        workflow_id
-        for workflow_id in (
-            settings.n8n_query_workflow_id,
-            settings.n8n_retrieval_workflow_id,
-        )
-        if workflow_id
-    ]
-    if not workflow_ids:
-        return None
-
-    timeout = httpx.Timeout(
-        timeout=min(max(settings.n8n_progress_poll_interval, 1.0), 10.0),
-        connect=min(settings.n8n_query_connect_timeout, 5.0),
-    )
-    headers = {"X-N8N-API-KEY": settings.n8n_api_key}
-
-    async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
-        executions: list[dict[str, Any]] = []
-        for workflow_id in workflow_ids:
-            for status in (None, "running", "success", "error"):
-                executions.extend(
-                    await _list_recent_n8n_executions(
-                        client=client,
-                        base_url=base_url,
-                        workflow_id=workflow_id,
-                        started_after=started_after,
-                        status=status,
-                    )
-                )
-
-        executions_by_id = {
-            str(execution.get("id")): execution
-            for execution in executions
-            if execution.get("id")
-        }
-
-        stage: str | None = None
-        for execution in sorted(
-            executions_by_id.values(),
-            key=lambda item: _parse_n8n_time(item.get("startedAt")) or 0.0,
-        ):
-            execution_id = execution.get("id")
-            if not execution_id:
-                continue
-
-            detail = await _get_n8n_execution_detail(
-                client=client,
-                base_url=base_url,
-                execution_id=str(execution_id),
-            )
-            detail_stage = _extract_n8n_progress_stage(detail)
-            if detail_stage and (
-                stage is None or _n8n_stage_index(detail_stage) > _n8n_stage_index(stage)
-            ):
-                stage = detail_stage
-
-        return stage
-
-
-async def _list_recent_n8n_executions(
-    *,
-    client: httpx.AsyncClient,
-    base_url: str,
-    workflow_id: str,
-    started_after: float,
-    status: str | None = None,
-) -> list[dict[str, Any]]:
-    params: dict[str, Any] = {"workflowId": workflow_id, "limit": 10, "includeData": "false"}
-    if status:
-        params["status"] = status
-
-    response = await client.get(
-        f"{base_url}/api/v1/executions",
-        params=params,
-    )
-
-
-async def _wait_for_feishu_feedback_stop(stop_event: asyncio.Event) -> None:
-    """Keep a Harness feedback handle alive without legacy status writers."""
-    await stop_event.wait()
-    response.raise_for_status()
-    payload = response.json()
-    items = payload.get("data") if isinstance(payload, dict) else payload
-    if not isinstance(items, list):
-        return []
-
-    threshold = started_after - max(settings.n8n_progress_lookback_seconds, 0)
-    recent_items: list[dict[str, Any]] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        started_at = _parse_n8n_time(item.get("startedAt"))
-        if started_at is None or started_at >= threshold:
-            recent_items.append(item)
-    return recent_items
-
-
-async def _get_n8n_execution_detail(
-    *,
-    client: httpx.AsyncClient,
-    base_url: str,
-    execution_id: str,
-) -> dict[str, Any]:
-    response = await client.get(
-        f"{base_url}/api/v1/executions/{execution_id}",
-        params={"includeData": "true"},
-    )
-    response.raise_for_status()
-    payload = response.json()
-    return payload if isinstance(payload, dict) else {}
-
-
-def _extract_n8n_progress_stage(execution: dict[str, Any]) -> str | None:
-    stage: str | None = None
-    for node_id, node_name, _started_at in _iter_n8n_executed_nodes(execution):
-        node_stage = _stage_for_n8n_node(node_id=node_id, node_name=node_name)
-        if node_stage and (
-            stage is None or _n8n_stage_index(node_stage) > _n8n_stage_index(stage)
-        ):
-            stage = node_stage
-    return stage
-
-
-def _iter_n8n_executed_nodes(
-    execution: dict[str, Any],
-) -> list[tuple[str | None, str, float | None]]:
-    data = execution.get("data") if isinstance(execution.get("data"), dict) else {}
-    result_data = data.get("resultData") if isinstance(data.get("resultData"), dict) else {}
-    run_data = result_data.get("runData") if isinstance(result_data.get("runData"), dict) else {}
-    if not run_data:
-        return []
-
-    nodes = _extract_n8n_workflow_nodes(execution)
-    nodes_by_name = {
-        str(node.get("name")): node
-        for node in nodes
-        if isinstance(node, dict) and node.get("name")
-    }
-
-    executed_nodes: list[tuple[str | None, str, float | None]] = []
-    for node_name, runs in run_data.items():
-        if not isinstance(node_name, str):
-            continue
-        node = nodes_by_name.get(node_name) or {}
-        started_at = _first_n8n_node_start_time(runs)
-        executed_nodes.append((node.get("id"), node_name, started_at))
-
-    return sorted(executed_nodes, key=lambda item: item[2] or 0.0)
-
-
-def _extract_n8n_workflow_nodes(execution: dict[str, Any]) -> list[dict[str, Any]]:
-    execution_data = execution.get("data") if isinstance(execution.get("data"), dict) else {}
-    candidates = [
-        execution.get("workflowData"),
-        execution_data.get("workflowData"),
-    ]
-    for candidate in candidates:
-        if isinstance(candidate, dict) and isinstance(candidate.get("nodes"), list):
-            return [node for node in candidate["nodes"] if isinstance(node, dict)]
-    return []
-
-
-def _first_n8n_node_start_time(runs: Any) -> float | None:
-    if not isinstance(runs, list):
-        return None
-    starts = [
-        _parse_n8n_time(run.get("startTime"))
-        for run in runs
-        if isinstance(run, dict)
-    ]
-    starts = [value for value in starts if value is not None]
-    return min(starts) if starts else None
-
-
-def _stage_for_n8n_node(*, node_id: Any, node_name: str) -> str | None:
-    node_id_text = str(node_id) if node_id else ""
-    for stage in _n8n_progress_stage_order:
-        if node_id_text and node_id_text in _n8n_completed_node_stage_ids[stage]:
-            return stage
-    return None
-
-
-def _optimistic_n8n_progress_stage(*, elapsed_seconds: float) -> str | None:
-    for threshold, stage in _n8n_optimistic_progress_thresholds:
-        if elapsed_seconds >= threshold:
-            return stage
-    return None
-
-
-def _latest_n8n_progress_stage(*stages: str | None) -> str | None:
-    latest_stage: str | None = None
-    for stage in stages:
-        if stage and (
-            latest_stage is None or _n8n_stage_index(stage) > _n8n_stage_index(latest_stage)
-        ):
-            latest_stage = stage
-    return latest_stage
-
-
-def _n8n_stage_index(stage: str | None) -> int:
-    if stage in _n8n_progress_stage_order:
-        return _n8n_progress_stage_order.index(stage)
-    return -1
-
-
-def _parse_n8n_time(value: Any) -> float | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    normalized = value.strip().replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.timestamp()
 
 
 async def _run_feishu_feedback_loop(

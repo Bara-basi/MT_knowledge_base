@@ -90,15 +90,15 @@ def parse_json_answer(answer: str) -> dict[str, Any] | list[Any]:
             value = candidate
             break
         if value is None:
-            raise ValueError("n8n answer is not valid JSON")
+            raise ValueError("agent answer is not valid JSON")
 
     if isinstance(value, str):
         try:
             value = json.loads(value)
         except json.JSONDecodeError as exc:
-            raise ValueError("n8n answer JSON contains a non-JSON string") from exc
+            raise ValueError("agent answer JSON contains a non-JSON string") from exc
     if not isinstance(value, (dict, list)):
-        raise ValueError("n8n JSON answer must be an object or array")
+        raise ValueError("agent JSON answer must be an object or array")
     return value
 
 

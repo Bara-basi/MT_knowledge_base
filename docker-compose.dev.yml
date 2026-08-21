@@ -13,54 +13,6 @@ services:
     environment:
       MILVUS_COLLECTION_NAME: ${MILVUS_COLLECTION_NAME:-mtsco_knowledge_chunks_dev}
       MINIO_ENDPOINT: ${MINIO_INTERNAL_ENDPOINT:-http://host.docker.internal:9000}
-      N8N_API_BASE_URL: ${DEV_N8N_API_BASE_URL:-http://host.docker.internal:5678}
-      N8N_API_KEY: ${DEV_N8N_API_KEY:-}
-      N8N_QUERY_WEBHOOK_URL: ${N8N_QUERY_WEBHOOK_URL:-http://host.docker.internal:5678/webhook/fastapi-test}
-      N8N_QUERY_WORKFLOW_ID: ${N8N_QUERY_WORKFLOW_ID:-KZKRj0Y1QW2xTS0J}
-      N8N_RETRIEVAL_WORKFLOW_ID: ${N8N_RETRIEVAL_WORKFLOW_ID:-0N11uTxPrWDr7G9O}
-
-  n8n:
-    image: docker.n8n.io/n8nio/n8n:latest
-    profiles:
-      - local-n8n
-    restart: unless-stopped
-    ports:
-      - "${N8N_HOST_PORT:-15678}:5678"
-    environment:
-      N8N_HOST: ${N8N_HOST}
-      N8N_PORT: 5678
-      N8N_PROTOCOL: http
-      NODE_ENV: production
-      WEBHOOK_URL: ${N8N_WEBHOOK_URL}
-      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
-      TZ: ${GENERIC_TIMEZONE}
-      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
-      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
-      N8N_SECURE_COOKIE: "false"
-      N8N_PYTHON_ENABLED: "false"
-      EXECUTIONS_DATA_SAVE_ON_PROGRESS: ${EXECUTIONS_DATA_SAVE_ON_PROGRESS:-true}
-      API_BASE_URL: http://api:8000
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_CHAT_TABLE: ${POSTGRES_CHAT_TABLE}
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      MINIO_ENDPOINT: ${MINIO_INTERNAL_ENDPOINT:-http://host.docker.internal:9000}
-      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-http://localhost:9000}
-      MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY_ID}
-      MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_ACCESS_KEY}
-      MINIO_BUCKET: ${APP_MINIO_BUCKET}
-      MINIO_SECURE: ${MINIO_SECURE:-false}
-    volumes:
-      - n8n_data:/home/node/.n8n
-      - ./n8n-files:/files
-    networks:
-      - ai-net
-    depends_on:
-      api:
-        condition: service_healthy
 
   milvus-minio:
     image: minio/minio:RELEASE.2024-05-28T17-19-04Z
@@ -101,5 +53,4 @@ services:
       - "${POSTGRES_HOST_PORT:-15432}:5432"
 
 volumes:
-  n8n_data:
   milvus_minio:

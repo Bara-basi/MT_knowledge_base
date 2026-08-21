@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="MTSCO Knowledge Base API",
     version="0.1.0",
-    description="Internal knowledge base backend exposed for n8n workflows.",
+    description="Internal knowledge base backend powered by DeepSeek Harness.",
 )
 
 

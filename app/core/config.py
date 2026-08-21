@@ -217,27 +217,6 @@ class Settings:
         True,
     )
 
-    n8n_query_webhook_url: str = os.getenv(
-        "N8N_QUERY_WEBHOOK_URL",
-        "http://n8n:5678/webhook/fastapi-test",
-    )
-    n8n_query_timeout: float = float(os.getenv("N8N_QUERY_TIMEOUT", "600"))
-    n8n_query_connect_timeout: float = float(os.getenv("N8N_QUERY_CONNECT_TIMEOUT", "10"))
-    n8n_api_base_url: str = os.getenv("N8N_API_BASE_URL", "").rstrip("/")
-    n8n_api_key: str = os.getenv("N8N_API_KEY", "")
-    n8n_progress_enabled: bool = _env_bool("N8N_PROGRESS_ENABLED", True)
-    n8n_progress_poll_interval: float = float(os.getenv("N8N_PROGRESS_POLL_INTERVAL", "0.5"))
-    n8n_progress_lookback_seconds: float = float(
-        os.getenv("N8N_PROGRESS_LOOKBACK_SECONDS", "5")
-    )
-    n8n_query_workflow_id: str = os.getenv("N8N_QUERY_WORKFLOW_ID", "KZKRj0Y1QW2xTS0J")
-    n8n_retrieval_workflow_id: str = os.getenv("N8N_RETRIEVAL_WORKFLOW_ID", "0N11uTxPrWDr7G9O")
-
-    # Harness is intentionally configured separately from the legacy n8n
-    # workflow.  The API process can run it locally during migration, while a
-    # later deployment may point HARNESS_GATEWAY_URL at a dedicated service.
-    # Explicit opt-in prevents an existing n8n deployment from receiving 503s
-    # before the pinned Harness runtime has been installed on its Linux host.
     harness_enabled: bool = _env_bool("HARNESS_ENABLED", False)
     harness_gateway_url: str = os.getenv("HARNESS_GATEWAY_URL", "").rstrip("/")
     harness_model: str = os.getenv("HARNESS_MODEL", "deepseek-v4-flash")

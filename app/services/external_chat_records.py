@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from hashlib import sha256
-import logging
 from typing import Any
 from uuid import UUID
 
@@ -10,14 +9,10 @@ from app.db.postgres import (
     EXTERNAL_CHAT_ID_PREFIX,
     create_external_chat_message,
     ensure_external_chat_messages_table,
-    touch_conversation_topic_activity,
     update_external_chat_answer,
 )
-from app.services.chat_records import _schedule_topic_summary_refresh
 from app.services.privacy import encrypt_chat_text
 
-
-logger = logging.getLogger(__name__)
 
 
 def canonical_external_identity(*, service_id: str, value: str, kind: str) -> str:
@@ -120,19 +115,4 @@ def _record_external_chat_answer_sync(
     )
     if not row:
         raise RuntimeError("external chat record was not found or was already completed")
-    if topic_id:
-        try:
-            topic = touch_conversation_topic_activity(
-                topic_id=topic_id,
-                user_id=user_id,
-                session_id=session_id,
-            )
-            _schedule_topic_summary_refresh(
-                topic_id=topic_id,
-                user_id=user_id,
-                session_id=session_id,
-                message_count=int(topic.get("message_count") or 0) if topic else None,
-            )
-        except Exception as exc:  # noqa: BLE001 - the answer is already safely stored.
-            logger.warning("Failed to update external topic activity: %s", exc)
     return row

@@ -1,6 +1,6 @@
 # MTSCO Knowledge Base
 
-MTSCO 企业内部知识库后端项目，当前主要通过 Docker Compose 部署生产环境，包含 FastAPI、Milvus、PostgreSQL、MinIO、n8n 等服务。本文档记录本次服务器部署过程中沉淀下来的关键经验和从零部署步骤。
+MTSCO 企业内部知识库后端项目，当前主要通过 Docker Compose 部署生产环境，包含 FastAPI、Milvus、PostgreSQL、MinIO、Neo4j 等服务。本文档记录本次服务器部署过程中沉淀下来的关键经验和从零部署步骤。
 
 ## 服务器配置教程
 
@@ -128,7 +128,7 @@ NEO4J_PASSWORD=change-me
 
 面向调用方的完整请求、响应、错误码和接入示例见 [外部知识库与报价评分 API 接口文档](docs/EXTERNAL_API.md)。
 
-生产入口为 `POST /prod/api/v1/external/query`。它复用现有 n8n 问答与 `conversation_topics` 主题路由，但消息只写入 `chat_messages_external`，不会进入飞书使用的 `chat_messages`。
+生产入口为 `POST /prod/api/v1/external/query`。它使用与飞书入口相同的 Harness 问答能力，但消息只写入 `chat_messages_external`，不会进入飞书使用的 `chat_messages`。
 
 请求示例：
 
@@ -147,7 +147,7 @@ curl -X POST 'https://your-domain.example/prod/api/v1/external/query' \
 
 响应中的 `answer` 是 Markdown 原文字符串。知识来源会以 `---` 分隔并列在回答底部，不包含飞书卡片的折叠面板、停止按钮或反馈按钮。`use_lark_document=true` 时优先返回已映射的飞书文档地址；为 `false` 时返回后端文档下载地址。
 
-`format_type` 可选 `markdown` 或 `json`，默认 `markdown`。使用 `json` 时，后端会要求 n8n 最终 Agent 只输出合法 JSON，并把解析后的 JSON 对象放入响应的 `answer` 字段；若模型返回的内容无法解析，接口返回 `502`，不会把伪 JSON 当成功结果返回。
+`format_type` 可选 `markdown` 或 `json`，默认 `markdown`。使用 `json` 时，后端会要求 Harness 最终 Agent 只输出合法 JSON，并把解析后的 JSON 对象放入响应的 `answer` 字段；若模型返回的内容无法解析，接口返回 `502`，不会把伪 JSON 当成功结果返回。
 
 ```json
 {
@@ -263,10 +263,10 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
 docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile init run --rm minio-init
 ```
 
-启动 API 和 n8n：
+启动 API：
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d api n8n
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d api
 ```
 
 检查 API：
@@ -285,7 +285,6 @@ curl http://127.0.0.1:8000/health
 
 - FastAPI 文档：`http://服务器IP:8000/docs`
 - 
-- n8n：`http://服务器IP:5678`
 - MinIO 控制台：`http://服务器IP:9001`
 - Milvus：`http://服务器IP:19530`
 若访问不畅通，请到服务器安全组中添加对应端口，不同厂商提供的入口有所不同，请自行检索。
@@ -346,7 +345,6 @@ uv pip install -e .
 MILVUS_URI=http://milvus-standalone:19530
 POSTGRES_HOST=postgres
 MINIO_ENDPOINT=http://milvus-minio:9000
-N8N_API_BASE_URL=http://n8n:5678
 ```
 
 宿主机 `.venv` 跑脚本时应改为：
@@ -356,7 +354,6 @@ MILVUS_URI=http://127.0.0.1:19530
 POSTGRES_HOST=127.0.0.1
 POSTGRES_PORT=5432
 MINIO_ENDPOINT=http://127.0.0.1:9000
-N8N_API_BASE_URL=http://127.0.0.1:5678
 ```
 
 更推荐保留两套环境文件：
@@ -424,7 +421,6 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml restart api
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f api
-docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f n8n
 docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f milvus-standalone
 ```
 
@@ -436,13 +432,12 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f milvus-s
 - `USE_LOCAL_EMBEDDING_MODEL=false`
 - `USE_LOCAL_RERANK_MODEL=false`
 - `SILICONFLOW_API_KEY` 已配置
-- PostgreSQL、MinIO、n8n、Neo4j 密码已替换
+- PostgreSQL、MinIO、Neo4j 密码已替换
 - `docker compose ps` 中核心服务健康
 - `curl http://127.0.0.1:8000/health` 正常
 - MinIO bucket 已初始化
 - Milvus collection 已创建
 - 知识库数据已导入或确认可检索
-- n8n workflow 已导入并启用
 - 飞书回调公网地址可访问
 - 重要 volume 和 `data/` 已规划备份
 
@@ -452,7 +447,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f milvus-s
 2. Linux 上 `COMPOSE_FILE=docker-compose.yml;docker-compose.prod.yml` 不生效，应使用 `:`。
 3. 宿主机 `.venv` 跑 scripts 时，不能使用 `postgres`、`milvus-standalone` 这类容器内 DNS 地址。
 4. `.env` 不能提交到 GitHub/GitLab，生产密钥必须留在服务器。
-5. 执行 `docker compose down -v` 会删除 Docker volumes，可能清空 PostgreSQL、Milvus、MinIO、n8n 数据。
+5. 执行 `docker compose down -v` 会删除 Docker volumes，可能清空 PostgreSQL、Milvus、MinIO 数据。
 6. 重建 embedding 会调用外部 API，需要关注费用、限速和耗时。
 
 # 常见维护问题

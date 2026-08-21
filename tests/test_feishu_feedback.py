@@ -181,7 +181,7 @@ def test_answer_feishu_message_resolves_sender_name_from_contact_api(monkeypatch
     async def fake_record_chat_answer(**kwargs) -> None:
         captured_records.append({"kind": "answer", **kwargs})
 
-    async def fake_ask_knowledge_base(_request):
+    async def fake_ask_knowledge_base(_request, **_kwargs):
         return QueryResponse(question="question", answer="final answer")
 
     async def fake_resolve_feedback(*_args, **_kwargs):
@@ -284,7 +284,7 @@ def test_feishu_feedback_card_updates_until_final_answer(monkeypatch) -> None:
         updates.append((message_id, markdown_text))
         return True
 
-    async def fake_ask_knowledge_base(_request):
+    async def fake_ask_knowledge_base(_request, **_kwargs):
         await asyncio.sleep(0.16)
         return QueryResponse(question="question", answer="final answer")
 
@@ -298,7 +298,6 @@ def test_feishu_feedback_card_updates_until_final_answer(monkeypatch) -> None:
         return ""
 
     monkeypatch.setattr(feishu, "_feedback_interval_seconds", 0.05)
-    monkeypatch.setattr(feishu, "_n8n_progress_polling_configured", lambda: False)
     monkeypatch.setattr(feishu, "_load_feedback_texts", lambda: ["step 1", "step 2", "step 3"])
     monkeypatch.setattr(feishu, "_generate_immediate_feedback_greeting", fake_greeting)
     monkeypatch.setattr(feishu, "_try_send_feishu_markdown_message", fake_send_message)
@@ -319,9 +318,7 @@ def test_feishu_feedback_card_updates_until_final_answer(monkeypatch) -> None:
         )
     )
 
-    assert sent_messages == [("chat-id", "incoming-message-id", "step 1")]
-    assert ("feedback-message-id", "step 2") in updates
-    assert ("feedback-message-id", "step 3") in updates
+    assert sent_messages == [("chat-id", "incoming-message-id", "🤔 正在连接知识库助手...")]
     assert updates[-1] == ("feedback-message-id", "final answer")
 
 
@@ -342,7 +339,7 @@ def test_feishu_answer_does_not_schedule_evaluation_after_reply(monkeypatch) -> 
         events.append(f"update:{markdown_text}")
         return True
 
-    async def fake_ask_knowledge_base(_request):
+    async def fake_ask_knowledge_base(_request, **_kwargs):
         events.append("query")
         return QueryResponse(question="question", answer="final answer")
 
@@ -357,7 +354,6 @@ def test_feishu_answer_does_not_schedule_evaluation_after_reply(monkeypatch) -> 
 
     monkeypatch.setattr(feishu, "_load_feedback_texts", lambda: ["step 1"])
     monkeypatch.setattr(feishu, "_generate_immediate_feedback_greeting", fake_greeting)
-    monkeypatch.setattr(feishu, "_n8n_progress_polling_configured", lambda: False)
     monkeypatch.setattr(feishu, "_try_send_feishu_markdown_message", fake_send_message)
     monkeypatch.setattr(feishu, "_try_update_feishu_markdown_message", fake_update_message)
     monkeypatch.setattr(feishu, "ask_knowledge_base", fake_ask_knowledge_base)
@@ -497,7 +493,7 @@ def test_feishu_initial_feedback_does_not_block_query(monkeypatch) -> None:
         events.append(f"update:{markdown_text}")
         return True
 
-    async def fake_ask_knowledge_base(_request):
+    async def fake_ask_knowledge_base(_request, **_kwargs):
         events.append("query")
         await asyncio.sleep(0.15)
         return QueryResponse(question="question", answer="final answer")
@@ -514,7 +510,6 @@ def test_feishu_initial_feedback_does_not_block_query(monkeypatch) -> None:
 
     monkeypatch.setattr(feishu, "_load_feedback_texts", lambda: ["step 1"])
     monkeypatch.setattr(feishu, "_generate_immediate_feedback_greeting", fake_greeting)
-    monkeypatch.setattr(feishu, "_n8n_progress_polling_configured", lambda: False)
     monkeypatch.setattr(feishu, "_try_send_feishu_markdown_message", fake_send_message)
     monkeypatch.setattr(feishu, "_try_update_feishu_markdown_message", fake_update_message)
     monkeypatch.setattr(feishu, "ask_knowledge_base", fake_ask_knowledge_base)
@@ -534,7 +529,7 @@ def test_feishu_initial_feedback_does_not_block_query(monkeypatch) -> None:
     )
 
     assert events[0] == "query"
-    assert "send:收到，我先处理一下。\n\nstep 1" in events
+    assert "send:🤔 正在连接知识库助手..." in events
     assert events[-1] == "update:final answer"
 
 
@@ -555,7 +550,7 @@ def test_feishu_comfort_feedback_keeps_status_while_answer_is_slow(monkeypatch) 
         events.append(f"update:{markdown_text}")
         return True
 
-    async def fake_ask_knowledge_base(_request):
+    async def fake_ask_knowledge_base(_request, **_kwargs):
         events.append("query")
         await asyncio.sleep(0.14)
         return QueryResponse(question="question", answer="final answer")
@@ -582,7 +577,6 @@ def test_feishu_comfort_feedback_keeps_status_while_answer_is_slow(monkeypatch) 
 
     monkeypatch.setattr(feishu, "_feedback_interval_seconds", 10)
     monkeypatch.setattr(feishu, "_comfort_feedback_interval_seconds", 0.05)
-    monkeypatch.setattr(feishu, "_n8n_progress_polling_configured", lambda: False)
     monkeypatch.setattr(feishu, "_load_feedback_texts", lambda: ["🤔 正在理解问题..."])
     monkeypatch.setattr(feishu, "_generate_immediate_feedback_greeting", fake_greeting)
     monkeypatch.setattr(feishu, "_generate_comfort_feedback_text", fake_comfort_feedback_text)
@@ -604,14 +598,7 @@ def test_feishu_comfort_feedback_keeps_status_while_answer_is_slow(monkeypatch) 
         )
     )
 
-    assert "send:收到，我先帮你看看。\n\n🤔 正在理解问题..." in events
-    comfort_updates = [
-        event
-        for event in events
-        if event
-        == "update:这个问题我还在对照资料，马上整理给你。\n\n🤔 正在理解问题..."
-    ]
-    assert comfort_updates
+    assert "send:🤔 正在连接知识库助手..." in events
     assert events[-1] == "update:final answer"
 
 
@@ -632,7 +619,7 @@ def test_feishu_null_greeting_does_not_send_feedback_or_block_query(monkeypatch)
         events.append(f"update:{markdown_text}")
         return True
 
-    async def fake_ask_knowledge_base(_request):
+    async def fake_ask_knowledge_base(_request, **_kwargs):
         events.append("query")
         return QueryResponse(question="你好", answer="你好，有什么可以帮你？")
 
@@ -648,7 +635,6 @@ def test_feishu_null_greeting_does_not_send_feedback_or_block_query(monkeypatch)
 
     monkeypatch.setattr(feishu, "_load_feedback_texts", lambda: ["step 1"])
     monkeypatch.setattr(feishu, "_generate_immediate_feedback_greeting", fake_greeting)
-    monkeypatch.setattr(feishu, "_n8n_progress_polling_configured", lambda: False)
     monkeypatch.setattr(feishu, "_try_send_feishu_markdown_message", fake_send_message)
     monkeypatch.setattr(feishu, "_try_update_feishu_markdown_message", fake_update_message)
     monkeypatch.setattr(feishu, "ask_knowledge_base", fake_ask_knowledge_base)
@@ -691,7 +677,7 @@ def test_feishu_transient_progress_answer_keeps_initial_feedback(monkeypatch) ->
         events.append(f"update:{markdown_text}")
         return True
 
-    async def fake_ask_knowledge_base(_request):
+    async def fake_ask_knowledge_base(_request, **_kwargs):
         events.append("query")
         return QueryResponse(question="question", answer="正在整理资料...")
 
@@ -707,7 +693,6 @@ def test_feishu_transient_progress_answer_keeps_initial_feedback(monkeypatch) ->
 
     monkeypatch.setattr(feishu, "_load_feedback_texts", lambda: ["正在整理资料..."])
     monkeypatch.setattr(feishu, "_generate_immediate_feedback_greeting", fake_greeting)
-    monkeypatch.setattr(feishu, "_n8n_progress_polling_configured", lambda: False)
     monkeypatch.setattr(feishu, "_try_send_feishu_markdown_message", fake_send_message)
     monkeypatch.setattr(feishu, "_try_update_feishu_markdown_message", fake_update_message)
     monkeypatch.setattr(feishu, "ask_knowledge_base", fake_ask_knowledge_base)
@@ -727,8 +712,7 @@ def test_feishu_transient_progress_answer_keeps_initial_feedback(monkeypatch) ->
     )
 
     assert events[0] == "query"
-    assert "send:收到，我先帮你查一下。\n\n正在整理资料..." in events
-    assert "update:正在整理资料..." not in events
+    assert "send:🤔 正在连接知识库助手..." in events
 
 
 def test_immediate_feedback_uses_deepseek_enable_thinking_off(monkeypatch) -> None:
@@ -1362,224 +1346,6 @@ def test_format_markdown_link_url_keeps_existing_lark_url() -> None:
     assert feishu._format_markdown_link_url(raw_url) == raw_url
 
 
-def test_n8n_progress_stage_recognizes_workflow_trigger_by_id() -> None:
-    execution = {
-        "workflowData": {
-            "nodes": [
-                {
-                    "id": "e0e954af-c14c-47d1-917a-bdbc69eba580",
-                    "name": "renamed trigger node",
-                }
-            ]
-        },
-        "data": {
-            "resultData": {
-                "runData": {
-                    "renamed trigger node": [
-                        {"startTime": "2026-06-15T01:00:00.000Z"}
-                    ]
-                }
-            }
-        },
-    }
-
-    assert feishu._extract_n8n_progress_stage(execution) == "understanding"
-
-
-def test_n8n_progress_stage_advances_after_switch_finishes() -> None:
-    execution = {
-        "workflowData": {
-            "nodes": [
-                {
-                    "id": "bdb2ff5c-c9b8-40f1-b623-dc8b912c0600",
-                    "name": "renamed switch node",
-                }
-            ]
-        },
-        "data": {
-            "resultData": {
-                "runData": {
-                    "renamed switch node": [
-                        {"startTime": "2026-06-15T01:00:00.000Z"}
-                    ]
-                }
-            }
-        },
-    }
-
-    assert feishu._extract_n8n_progress_stage(execution) == "retrieving"
-
-
-def test_n8n_progress_stage_advances_after_retrieval_node_finishes() -> None:
-    execution = {
-        "workflowData": {
-            "nodes": [
-                {
-                    "id": "53fb4814-a531-4422-b6ba-f38c3db5a9a4",
-                    "name": "renamed retrieval node",
-                }
-            ]
-        },
-        "data": {
-            "resultData": {
-                "runData": {
-                    "renamed retrieval node": [
-                        {"startTime": "2026-06-15T01:00:00.000Z"}
-                    ]
-                }
-            }
-        },
-    }
-
-    assert feishu._extract_n8n_progress_stage(execution) == "reranking"
-
-
-def test_n8n_progress_stage_advances_after_context_formatting_finishes() -> None:
-    execution = {
-        "workflowData": {
-            "nodes": [
-                {
-                    "id": "6113024b-7803-4ce2-930a-c893ff1ff7fd",
-                    "name": "renamed context formatter",
-                }
-            ]
-        },
-        "data": {
-            "resultData": {
-                "runData": {
-                    "renamed context formatter": [
-                        {"startTime": "2026-06-15T01:00:00.000Z"}
-                    ]
-                }
-            }
-        },
-    }
-
-    assert feishu._extract_n8n_progress_stage(execution) == "generating"
-
-
-def test_n8n_progress_stage_ignores_fast_chat_node() -> None:
-    execution = {
-        "data": {
-            "resultData": {
-                "runData": {
-                    "无关闲聊": [
-                        {"startTime": "2026-06-15T01:00:00.000Z"}
-                    ]
-                }
-            }
-        },
-    }
-
-    assert feishu._extract_n8n_progress_stage(execution) is None
-
-
-def test_n8n_progress_stage_ignores_rewrite_node_id() -> None:
-    execution = {
-        "workflowData": {
-            "nodes": [
-                {
-                    "id": "54aad033-e2d6-4b2a-aa73-027f9fc839ce",
-                    "name": "renamed rewrite node",
-                }
-            ]
-        },
-        "data": {
-            "resultData": {
-                "runData": {
-                    "renamed rewrite node": [
-                        {"startTime": "2026-06-15T01:00:00.000Z"}
-                    ]
-                }
-            }
-        },
-    }
-
-    assert feishu._extract_n8n_progress_stage(execution) is None
-
-
-def test_n8n_progress_stage_ignores_retrieval_child_workflow_nodes() -> None:
-    execution = {
-        "workflowData": {
-            "nodes": [
-                {
-                    "id": "db342e62-4de8-486a-9443-ddfafc679b77",
-                    "name": "renamed child code node",
-                }
-            ]
-        },
-        "data": {
-            "resultData": {
-                "runData": {
-                    "renamed child code node": [
-                        {"startTime": "2026-06-15T01:00:00.000Z"}
-                    ]
-                }
-            }
-        },
-    }
-
-    assert feishu._extract_n8n_progress_stage(execution) is None
-
-
-def test_optimistic_n8n_progress_stage_advances_by_elapsed_time() -> None:
-    assert feishu._optimistic_n8n_progress_stage(elapsed_seconds=1.0) is None
-    assert feishu._optimistic_n8n_progress_stage(elapsed_seconds=1.5) == "retrieving"
-    assert feishu._optimistic_n8n_progress_stage(elapsed_seconds=5.0) == "reranking"
-    assert feishu._optimistic_n8n_progress_stage(elapsed_seconds=10.0) == "generating"
-
-
-def test_latest_n8n_progress_stage_prefers_later_stage() -> None:
-    assert feishu._latest_n8n_progress_stage("understanding", "reranking") == "reranking"
-    assert feishu._latest_n8n_progress_stage("generating", "retrieving") == "generating"
-    assert feishu._latest_n8n_progress_stage(None, "retrieving") == "retrieving"
-
-
-def test_n8n_progress_stage_returns_latest_mapped_stage() -> None:
-    execution = {
-        "workflowData": {
-            "nodes": [
-                {
-                    "id": "e0e954af-c14c-47d1-917a-bdbc69eba580",
-                    "name": "renamed trigger node",
-                },
-                {
-                    "id": "bdb2ff5c-c9b8-40f1-b623-dc8b912c0600",
-                    "name": "renamed switch node",
-                },
-                {
-                    "id": "53fb4814-a531-4422-b6ba-f38c3db5a9a4",
-                    "name": "renamed retrieval entry",
-                },
-                {
-                    "id": "6113024b-7803-4ce2-930a-c893ff1ff7fd",
-                    "name": "renamed context formatter",
-                },
-            ]
-        },
-        "data": {
-            "resultData": {
-                "runData": {
-                    "renamed trigger node": [
-                        {"startTime": "2026-06-15T01:00:00.000Z"}
-                    ],
-                    "renamed switch node": [
-                        {"startTime": "2026-06-15T01:00:01.000Z"}
-                    ],
-                    "renamed retrieval entry": [
-                        {"startTime": "2026-06-15T01:00:02.000Z"}
-                    ],
-                    "renamed context formatter": [
-                        {"startTime": "2026-06-15T01:00:04.000Z"}
-                    ],
-                }
-            }
-        },
-    }
-
-    assert feishu._extract_n8n_progress_stage(execution) == "generating"
-
-
 def test_feishu_waiting_card_adds_stop_button() -> None:
     content = asyncio.run(
         feishu._build_feishu_card_content(
@@ -1871,7 +1637,7 @@ def test_feishu_cancel_action_suppresses_final_answer(monkeypatch) -> None:
         updates.append((message_id, markdown_text, canceled_text))
         return True
 
-    async def fake_ask_knowledge_base(_request):
+    async def fake_ask_knowledge_base(_request, **_kwargs):
         query_started.set()
         await asyncio.sleep(30)
         return QueryResponse(question="question", answer="final answer")
@@ -1908,7 +1674,6 @@ def test_feishu_cancel_action_suppresses_final_answer(monkeypatch) -> None:
 
     monkeypatch.setattr(feishu, "_load_feedback_texts", lambda: ["step 1"])
     monkeypatch.setattr(feishu, "_generate_immediate_feedback_greeting", fake_greeting)
-    monkeypatch.setattr(feishu, "_n8n_progress_polling_configured", lambda: False)
     monkeypatch.setattr(feishu, "_try_send_feishu_markdown_message", fake_send_message)
     monkeypatch.setattr(feishu, "_try_update_feishu_markdown_message", fake_update_message)
     monkeypatch.setattr(feishu, "ask_knowledge_base", fake_ask_knowledge_base)

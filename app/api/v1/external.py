@@ -56,7 +56,7 @@ async def query_external_knowledge_base(
         except ValueError as exc:
             raise HTTPException(
                 status_code=502,
-                detail=f"n8n returned invalid JSON: {exc}",
+                detail=f"Harness returned invalid JSON: {exc}",
             ) from exc
     else:
         answer = format_external_markdown_answer(
@@ -134,7 +134,7 @@ async def score_external_quote(
     except ValueError as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"n8n returned an invalid quote score: {exc}",
+            detail=f"Harness returned an invalid quote score: {exc}",
         ) from exc
 
     return QuoteScoreResponse(

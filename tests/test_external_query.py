@@ -8,8 +8,6 @@ from app.api.v1 import external
 from app.schemas.external import ExternalQueryRequest
 from app.schemas.query import QueryResponse
 from app.services import external_answer_formatting as formatting
-from app.services.chat import topics
-from app.services.privacy import encrypt_chat_text
 from app.services.external_chat_records import canonical_external_ids
 
 
@@ -82,21 +80,20 @@ def test_external_markdown_prefers_lark_mapping(monkeypatch) -> None:
     assert "[制度.docx](https://example.feishu.cn/docx/abc)" in rendered
 
 
-def test_external_query_uses_isolated_n8n_identity_and_storage(monkeypatch) -> None:
+def test_external_query_uses_isolated_harness_identity_and_storage(monkeypatch) -> None:
     captured: dict = {}
     message_id = UUID("00000000-0000-0000-0000-000000000010")
-    topic_id = "00000000-0000-0000-0000-000000000020"
 
     async def fake_create(**kwargs):
         captured["create"] = kwargs
         return {"message_id": message_id}
 
     async def fake_ask(request):
-        captured["n8n"] = request
+        captured["agent"] = request
         return QueryResponse(
             question=request.question,
             answer="答案。<reference>data/raw/制度.docx</reference>",
-            topic_id=topic_id,
+            topic_id=None,
         )
 
     async def fake_record(**kwargs):
@@ -126,76 +123,11 @@ def test_external_query_uses_isolated_n8n_identity_and_storage(monkeypatch) -> N
     assert "---\n### 知识来源" in response.answer
     assert captured["create"]["user_id"].startswith("external:v1:u:")
     assert captured["create"]["session_id"].startswith("external:v1:s:")
-    assert captured["n8n"].source == "external"
-    assert captured["n8n"].metadata == {
+    assert captured["agent"].source == "external"
+    assert captured["agent"].metadata == {
         "source": "external",
         "service_id": "crm",
         "format_type": "markdown",
     }
     assert captured["record"]["message_id"] == message_id
-    assert captured["record"]["topic_id"] == topic_id
-
-
-def test_external_topic_context_reads_only_external_message_table(monkeypatch) -> None:
-    user_id = canonical_external_ids(
-        service_id="crm",
-        user_id="user-1",
-        session_id="session-1",
-    )["user_id"]
-    session_id = canonical_external_ids(
-        service_id="crm",
-        user_id="user-1",
-        session_id="session-1",
-    )["session_id"]
-    captured: dict = {}
-
-    monkeypatch.setattr(topics, "ensure_conversation_topics_table", lambda: None)
-    monkeypatch.setattr(
-        topics,
-        "ensure_external_chat_messages_table",
-        lambda table_name: captured.setdefault("ensured_table", table_name),
-    )
-    monkeypatch.setattr(
-        topics,
-        "ensure_chat_messages_table",
-        lambda: (_ for _ in ()).throw(AssertionError("Feishu table must not be used")),
-    )
-    monkeypatch.setattr(
-        topics,
-        "get_conversation_topic",
-        lambda **kwargs: {
-            "topic_id": kwargs["topic_id"],
-            "user_id": kwargs["user_id"],
-            "session_id": kwargs["session_id"],
-            "topic": encrypt_chat_text("外部主题"),
-            "summary": encrypt_chat_text("外部总结"),
-        },
-    )
-
-    def fake_list_messages(**kwargs):
-        captured["list"] = kwargs
-        return [
-            {
-                "user_id": user_id,
-                "user_name": None,
-                "session_id": session_id,
-                "conversation_id": session_id,
-                "topic_id": kwargs["topic_id"],
-                "create_time": None,
-                "question": encrypt_chat_text("外部问题"),
-                "answer": encrypt_chat_text("外部回答"),
-            }
-        ]
-
-    monkeypatch.setattr(topics, "list_chat_messages_by_topic", fake_list_messages)
-
-    context = topics._get_conversation_topic_context_sync(
-        topic_id="00000000-0000-0000-0000-000000000020",
-        user_id=user_id,
-        session_id=session_id,
-        message_limit=6,
-    )
-
-    assert captured["ensured_table"] == "chat_messages_external"
-    assert captured["list"]["table_name"] == "chat_messages_external"
-    assert context["messages"][0]["question"] == "外部问题"
+    assert captured["record"]["topic_id"] is None
