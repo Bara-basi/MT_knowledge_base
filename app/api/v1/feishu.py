@@ -52,6 +52,10 @@ _markdown_link_pattern = re.compile(r"(?<!!)\[([^\]\n]+)\]\(([^)\n]+)\)")
 _markdown_link_title_pattern = re.compile(r"^(?P<url>.+?)\s+\"(?P<title>[^\"]*)\"\s*$")
 _latex_block_pattern = re.compile(r"\\\[(?P<expr>.+?)\\\]", re.DOTALL)
 _latex_paren_pattern = re.compile(r"\\\((?P<expr>.+?)\\\)", re.DOTALL)
+_latex_display_dollar_pattern = re.compile(
+    r"(?<!\\)(?P<delimiter>\${2,4})(?P<expr>.+?)(?<!\\)(?P=delimiter)",
+    re.DOTALL,
+)
 _latex_dollar_pattern = re.compile(r"(?<!\\)\$(?P<expr>[^$\n]+?)(?<!\\)\$")
 _latex_standalone_bracket_block_pattern = re.compile(
     r"(?m)^[ \t]*\[[ \t]*\r?\n(?P<expr>.*?)[ \t]*\r?\n[ \t]*\][ \t]*$",
@@ -133,10 +137,8 @@ class _FeishuFeedbackState:
     harness_mode: bool = False
     progress_lines: list[str] = field(default_factory=list)
     harness_tool_counts: dict[str, int] = field(default_factory=dict)
-    harness_group_label: str | None = None
-    harness_group_count: int = 0
     harness_group_line_index: int | None = None
-    harness_active_tool_label: str | None = None
+    harness_active_tool_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -1236,6 +1238,8 @@ _HARNESS_TOOL_LABELS = {
     "kb_graph_search": "知识图谱检索",
     "conversation_summary": "会话摘要获取",
     "conversation_excerpt_search": "历史对话片段检索",
+    "image_search": "图片检索",
+    "image_query": "图片检索",
     "web_search": "联网搜索",
     "web_fetch": "网页抓取",
     "grep": "文档关键词检索",
@@ -1253,48 +1257,53 @@ def _harness_progress_key(update: Any) -> str:
 
 
 async def _append_harness_progress(state: _FeishuFeedbackState, update: Any) -> bool:
-    """Append one coloured, compact Harness event to the status timeline."""
+    """Render compact, neutral progress feedback for a Harness request."""
     kind = str(getattr(update, "kind", "") or "")
     tool_name = str(getattr(update, "tool_name", "") or "")
     label = _harness_tool_label(tool_name)
+    # Transient startup copy is only an affordance.  The first real tool call
+    # replaces it, while retaining any useful explanatory text from the agent.
+    if kind in {"tool_start", "tool_end"} and state.progress_lines and "正在连接知识库助手" in state.progress_lines[0]:
+        state.progress_lines.pop(0)
+        if state.harness_group_line_index is not None:
+            state.harness_group_line_index -= 1
+    if (
+        kind == "tool_start"
+        and state.harness_group_line_index is None
+        and not state.harness_tool_counts
+        and not state.harness_active_tool_counts
+    ):
+        state.progress_lines[:] = [
+            line for line in state.progress_lines if "正在准备检索" not in line
+        ]
     if kind == "tool_start":
-        can_merge = (
-            state.harness_group_label == label
-            and state.harness_group_line_index == len(state.progress_lines) - 1
-        )
-        if can_merge:
-            state.harness_group_count += 1
-        else:
-            state.harness_group_label = label
-            state.harness_group_count = 1
-            state.harness_group_line_index = len(state.progress_lines)
-        state.harness_active_tool_label = label
-        count = state.harness_group_count
-        line = f"<font color='grey'>• 正在{label}（第 {count} 次）{_harness_argument_hint(getattr(update, 'arguments', None))}</font>"
-        if can_merge:
-            state.progress_lines[-1] = line
-            return await _update_feishu_feedback_card(state)
+        state.harness_active_tool_counts[label] = state.harness_active_tool_counts.get(label, 0) + 1
+        line = _format_harness_tool_wave_line(state)
+        _replace_harness_tool_wave_line(state, line)
+        return await _update_feishu_feedback_card(state)
     elif kind == "tool_end":
-        if state.harness_active_tool_label == label and state.harness_group_line_index is not None:
-            line = (
-                f"<font color='green'>✓ 已调用 {state.harness_group_count} 次{label}"
-                f"{_harness_result_hint(tool_name, getattr(update, 'result', None))}</font>"
-            )
-            state.progress_lines[state.harness_group_line_index] = line
-            state.harness_active_tool_label = None
-            return await _update_feishu_feedback_card(state)
-        line = f"<font color='green'>✓ 已完成{label}{_harness_result_hint(tool_name, getattr(update, 'result', None))}</font>"
+        active_count = state.harness_active_tool_counts.get(label, 0)
+        if active_count > 1:
+            state.harness_active_tool_counts[label] = active_count - 1
+        else:
+            state.harness_active_tool_counts.pop(label, None)
+        state.harness_tool_counts[label] = state.harness_tool_counts.get(label, 0) + 1
+        _replace_harness_tool_wave_line(state, _format_harness_tool_wave_line(state))
+        return await _update_feishu_feedback_card(state)
     elif kind == "text":
+        _close_harness_tool_wave(state)
         text = str(getattr(update, "text", "") or "").strip()
         text = _clean_harness_feedback_text(text)
         if not text:
             return False
-        line = f"<font color='blue'>💬 {text[:500]}</font>"
+        line = f"💬 {text[:300]}"
     elif kind == "status":
+        _close_harness_tool_wave(state)
         text = str(getattr(update, "text", "") or "").strip()
+        text = _clean_harness_feedback_text(text)
         if not text:
             return False
-        line = f"<font color='grey'>• {text}</font>"
+        line = f"✦ {text}"
     else:
         return False
 
@@ -1312,14 +1321,59 @@ async def _append_harness_progress(state: _FeishuFeedbackState, update: Any) -> 
             state.harness_group_line_index -= overflow
             if state.harness_group_line_index < 0:
                 state.harness_group_line_index = None
-                state.harness_group_label = None
-                state.harness_active_tool_label = None
+                state.harness_active_tool_counts.clear()
     return await _update_feishu_feedback_card(state)
 
 
+def _replace_harness_tool_wave_line(state: _FeishuFeedbackState, line: str) -> None:
+    """Keep every tool wave in one card line instead of streaming noisy events."""
+
+    index = state.harness_group_line_index
+    if index is not None and 0 <= index < len(state.progress_lines):
+        state.progress_lines[index] = line
+        return
+    state.harness_group_line_index = len(state.progress_lines)
+    state.progress_lines.append(line)
+
+
+def _format_harness_tool_wave_line(state: _FeishuFeedbackState) -> str:
+    completed = _format_harness_tool_counts(state.harness_tool_counts)
+    active = _format_harness_tool_counts(state.harness_active_tool_counts)
+    if active and completed:
+        text = f"已完成：{completed}；正在执行：{active}"
+        icon = "⌕"
+    elif active:
+        text = f"正在执行：{active}"
+        icon = "⌕"
+    else:
+        text = f"已完成：{completed}" if completed else "正在准备工具调用"
+        icon = "✓"
+    return f"<font color='grey'>{icon} {text}</font>"
+
+
+def _format_harness_tool_counts(counts: dict[str, int]) -> str:
+    return "、".join(f"{label} {count} 次" for label, count in counts.items() if count > 0)
+
+
+def _close_harness_tool_wave(state: _FeishuFeedbackState) -> None:
+    """Finish the current wave before writing a non-tool progress message."""
+
+    if state.harness_group_line_index is None:
+        return
+    _replace_harness_tool_wave_line(state, _format_harness_tool_wave_line(state))
+    state.harness_group_line_index = None
+    state.harness_tool_counts.clear()
+    state.harness_active_tool_counts.clear()
+
+
 def _clean_harness_feedback_text(text: str) -> str:
-    """Process output is text, never model-supplied card markup."""
+    """Normalize process text into neutral, readable card copy."""
+
     cleaned = re.sub(r"</?[^>]+>", "", text)
+    # Harness may emit Markdown-escaped emphasis.  Feishu's card renderer can
+    # show those backslashes literally, so flatten presentation-only syntax.
+    cleaned = re.sub(r"\\([\\`*_{}\[\]()#+\-.!|])", r"\1", cleaned)
+    cleaned = re.sub(r"(`+|\*{1,3}|_{1,3}|~{2})", "", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
@@ -3124,6 +3178,7 @@ def _render_latex_for_feishu(markdown: str) -> str:
 
 def _render_latex_in_plain_markdown(text: str) -> str:
     rendered = _latex_block_pattern.sub(_replace_latex_block_match, text)
+    rendered = _latex_display_dollar_pattern.sub(_replace_latex_block_match, rendered)
     rendered = _latex_standalone_bracket_block_pattern.sub(_replace_latex_match, rendered)
     for pattern in (_latex_paren_pattern, _latex_dollar_pattern, _latex_bare_bracket_pattern):
         rendered = pattern.sub(_replace_latex_match, rendered)

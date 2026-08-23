@@ -1004,6 +1004,15 @@ def test_feishu_card_renders_latex_formula_as_readable_text() -> None:
     )
 
 
+def test_feishu_card_renders_display_latex_dollar_delimiters() -> None:
+    markdown = r"$$$$\frac{26.5}{7.10\times 0.87} = 4.663$$$$"
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    card = json.loads(content)
+    assert card["body"]["elements"][0]["content"] == "(26.5) / (7.10 x 0.87) = 4.663"
+
+
 def test_feishu_card_renders_explicit_latex_block_without_latex_commands() -> None:
     markdown = r"\[x=1\]"
 
@@ -1107,6 +1116,61 @@ def test_feishu_card_keeps_latex_inside_code_blocks() -> None:
 
     card = json.loads(content)
     assert card["body"]["elements"][0]["content"] == markdown
+
+
+def test_harness_progress_merges_tool_wave_and_uses_neutral_copy(monkeypatch) -> None:
+    updates: list[str] = []
+
+    async def fake_update(_message_id: str, markdown_text: str, **_kwargs) -> bool:
+        updates.append(markdown_text)
+        return True
+
+    async def run_case() -> feishu._FeishuFeedbackState:
+        state = feishu._FeishuFeedbackState(
+            message_id="feedback-message-id",
+            question="question",
+            prefix_text="",
+            status_text="",
+            update_lock=asyncio.Lock(),
+            harness_mode=True,
+            progress_lines=["<font color='grey'>⏳ 正在连接知识库助手…</font>"],
+        )
+        await feishu._append_harness_progress(
+            state, SimpleNamespace(kind="status", tool_name="", text="正在准备检索")
+        )
+        await feishu._append_harness_progress(
+            state, SimpleNamespace(kind="text", tool_name="", text="我来帮您查询壁厚单位及其转换规则。")
+        )
+        await feishu._append_harness_progress(
+            state, SimpleNamespace(kind="tool_start", tool_name="kb_hybrid_search", arguments={"query": "**secret**"})
+        )
+        await feishu._append_harness_progress(
+            state, SimpleNamespace(kind="tool_end", tool_name="kb_hybrid_search", result={})
+        )
+        await feishu._append_harness_progress(
+            state, SimpleNamespace(kind="tool_start", tool_name="kb_graph_search", arguments={})
+        )
+        await feishu._append_harness_progress(
+            state, SimpleNamespace(kind="tool_end", tool_name="kb_graph_search", result={})
+        )
+        await feishu._append_harness_progress(
+            state, SimpleNamespace(kind="status", tool_name="", text="正在组织答案")
+        )
+        return state
+
+    monkeypatch.setattr(feishu, "_try_update_feishu_markdown_message", fake_update)
+    state = asyncio.run(run_case())
+
+    assert state.progress_lines == [
+        "💬 我来帮您查询壁厚单位及其转换规则。",
+        "<font color='grey'>✓ 已完成：混合检索 1 次、知识图谱检索 1 次</font>",
+        "✦ 正在组织答案",
+    ]
+    assert all("color='green'" not in update and "color='blue'" not in update for update in updates)
+    assert all("secret" not in update for update in updates)
+    assert all("•" not in update for update in updates)
+    assert all("正在准备检索" not in update for update in updates[-4:])
+    assert feishu._clean_harness_feedback_text(r"处理中 \*\*重点\*\*") == "处理中 重点"
 
 
 def test_feishu_card_rewrites_reference_links_and_appends_source_panel() -> None:

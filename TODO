@@ -1,0 +1,6 @@
+1. 运行 install-linux.sh
+2. 重启dockor,关闭旧api
+3. 开启看门狗对话总结
+` .\scripts\harness\run-windows-scheduler.ps1 `
+4. 
+`.\scripts\harness\run-windows.ps1 -HarnessRoot C:\opt\mtsco\deepseek-harness -Port 8000 -ApiPrefix /prod `
