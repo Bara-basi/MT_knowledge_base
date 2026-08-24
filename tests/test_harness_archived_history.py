@@ -49,7 +49,9 @@ def test_conversation_summary_reads_only_current_users_latest_memory(monkeypatch
     assert result["isError"] is False
     assert calls["user_id"] == "current-open-id"
     assert calls["limit"] == 1
-    assert json.loads(result["content"][0]["text"])[0]["summary"] == "# 产品规格\n\n已确认规格。"
+    record = json.loads(result["content"][0]["text"])[0]
+    assert record["summary"] == "# 产品规格\n\n已确认规格。"
+    assert "session_id" not in record
 
 
 def test_excerpt_search_returns_bounded_matching_turns(monkeypatch) -> None:
@@ -66,7 +68,6 @@ def test_excerpt_search_returns_bounded_matching_turns(monkeypatch) -> None:
     )
 
     assert records == [{
-        "session_id": "session-id",
         "topic": "规格",
         "ended_at": "2026-08-20",
         "question_excerpt": "上次的不锈钢规格是什么？",

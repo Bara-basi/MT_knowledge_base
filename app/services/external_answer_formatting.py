@@ -17,6 +17,13 @@ _PSEUDO_TAG = re.compile(r"<(img|link|a)>(.*?)</\1>", re.IGNORECASE | re.DOTALL)
 _SOURCE_HEADING = re.compile(
     r"^\s*(?:#{1,6}\s*)?(?:\*\*)?(知识来源|引用文献|参考来源)(?:\*\*)?\s*[:：]?\s*$"
 )
+_MARKDOWN_LINK = re.compile(r"(?<!!)\[([^\]\n]+)\]\(([^)\n]+)\)")
+_INTERNAL_DETAIL = re.compile(
+    r"(?i)(?:minio|s3|file)://[^\s<>()\]]+"
+    r"|(?:(?<![a-z])[a-z]:[\\/]|(?:\.\.?[\\/])?data[\\/]raw[\\/])[^\s<>()\]]+"
+    r"|https?://[^\s<>()\]]+/api/v1/documents/download\?[^\s<>()\]]+"
+    r"|https?://(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})(?::\d+)?[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]*"
+)
 _LOCAL_TO_LARK_MAPPING_DIR = Path("data") / "metadata" / "local2lark_mapping"
 _local_to_lark_mapping_cache: dict[str, str] | None = None
 
@@ -41,9 +48,12 @@ def format_external_markdown_answer(
         if not raw_path:
             return ""
         normalized = _normalize_reference(raw_path)
+        url = _external_reference_url(raw_path, use_lark_document)
+        if not url:
+            return ""
         if normalized not in source_numbers:
             source_numbers[normalized] = len(sources) + 1
-            sources.append((raw_path, _external_reference_url(raw_path, use_lark_document)))
+            sources.append((raw_path, url))
         return f"[{source_numbers[normalized]}]"
 
     for line in markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
@@ -63,6 +73,7 @@ def format_external_markdown_answer(
         output_lines.append(rewritten)
 
     body = "\n".join(output_lines).strip()
+    body = _sanitize_user_visible_markdown(body)
     body = re.sub(r"\n{3,}", "\n\n", body).strip()
     if not sources:
         return body
@@ -81,6 +92,8 @@ def _replace_pseudo_tag(match: re.Match[str], *, use_lark_document: bool) -> str
         return ""
     url = _external_reference_url(raw_path, use_lark_document)
     label = _escape_markdown_label(_extract_file_name(raw_path) or "链接")
+    if not url:
+        return label
     if tag == "img":
         return f"![{label}]({url})"
     return f"[{label}]({url})"
@@ -107,20 +120,33 @@ def _strip_model_generated_source_section(markdown: str) -> str:
     return markdown
 
 
-def _external_reference_url(raw_path: str, use_lark_document: bool) -> str:
+def _external_reference_url(raw_path: str, use_lark_document: bool) -> str | None:
     normalized = _normalize_reference(raw_path)
     parsed = urlparse(normalized)
     if parsed.scheme in {"http", "https"}:
         return normalized
-    if use_lark_document:
-        lark_url = _resolve_lark_document_url(normalized)
-        if lark_url:
-            return lark_url
-    query = urlencode(
-        {"path": _normalize_download_reference(normalized)},
-        quote_via=quote,
-    )
-    return f"{_public_api_base_url()}/api/v1/documents/download?{query}"
+    # Internal references are user-visible only when a Feishu mapping exists.
+    # ``use_lark_document`` is retained for API compatibility but can no
+    # longer opt into exposing internal download routes.
+    return _resolve_lark_document_url(normalized)
+
+
+def _sanitize_user_visible_markdown(markdown: str) -> str:
+    """Keep public links while suppressing internal paths and download routes."""
+
+    def replace_link(match: re.Match[str]) -> str:
+        label = match.group(1).strip()
+        destination = match.group(2).strip()
+        parsed = urlparse(destination)
+        if parsed.scheme in {"http", "https"} and not parsed.path.rstrip("/").endswith(
+            "/api/v1/documents/download"
+        ):
+            return match.group(0)
+        lark_url = _resolve_lark_document_url(destination)
+        return f"[{label}]({lark_url})" if lark_url else label
+
+    sanitized = _MARKDOWN_LINK.sub(replace_link, markdown)
+    return _INTERNAL_DETAIL.sub("[内部信息已隐藏]", sanitized)
 
 
 def _public_api_base_url() -> str:

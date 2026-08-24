@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+import hmac
 import mimetypes
 from pathlib import PurePosixPath
 from urllib.parse import quote
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 from fastapi.responses import StreamingResponse
 from minio.error import S3Error
 
+from app.core.config import settings
 from app.db.minio import (
     RAW_DOCUMENT_CATEGORIES,
     RawDocumentObject,
@@ -58,6 +61,120 @@ class MarketingAssetSearchRequest(BaseModel):
         max_length=64,
         description="Use harness to receive a compact model-readable result; other values receive the standard response.",
     )
+
+
+class HarnessAttachmentRequest(BaseModel):
+    user_id: str = Field(..., min_length=1, max_length=256)
+    internal_session_id: str = Field(..., min_length=1, max_length=128)
+    attachment_id: str = Field(..., min_length=1, max_length=128)
+
+
+class HarnessAttachmentReadRequest(HarnessAttachmentRequest):
+    query: str | None = Field(None, max_length=500)
+    offset: int = Field(0, ge=0)
+    limit: int = Field(3, ge=1, le=4)
+
+
+def _verify_attachment_api_access(request: Request, token: str | None) -> None:
+    expected = settings.harness_attachment_api_token
+    if expected:
+        if not token or not hmac.compare_digest(token, expected):
+            raise HTTPException(status_code=401, detail="Invalid internal attachment token")
+        return
+    host = (request.client.host if request.client else "").strip().lower()
+    if host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        raise HTTPException(
+            status_code=403,
+            detail="Attachment API is local-only until HARNESS_ATTACHMENT_API_TOKEN is configured",
+        )
+
+
+@router.post("/harness-attachments/upload")
+async def upload_harness_attachment(
+    request: Request,
+    file: UploadFile = File(...),
+    user_id: str = Form(...),
+    internal_session_id: str = Form(...),
+    x_kb_internal_token: str | None = Header(None),
+) -> dict[str, object]:
+    """Store a model attachment without exposing its local path."""
+    _verify_attachment_api_access(request, x_kb_internal_token)
+    from app.services.harness_attachments import save_attachment
+
+    content = await file.read(settings.harness_attachment_max_bytes + 1)
+    try:
+        return save_attachment(
+            user_id=user_id,
+            internal_session_id=internal_session_id,
+            filename=file.filename or "attachment",
+            content=content,
+            content_type=file.content_type,
+            source="api",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        await file.close()
+
+
+@router.get("/harness-attachments")
+def list_harness_attachments(
+    request: Request,
+    user_id: str,
+    internal_session_id: str,
+    x_kb_internal_token: str | None = Header(None),
+) -> dict[str, object]:
+    _verify_attachment_api_access(request, x_kb_internal_token)
+    from app.services.harness_attachments import list_attachments
+
+    return {"attachments": list_attachments(user_id=user_id, internal_session_id=internal_session_id)}
+
+
+@router.post("/harness-attachments/parse")
+async def parse_harness_attachment(
+    payload: HarnessAttachmentRequest,
+    request: Request,
+    x_kb_internal_token: str | None = Header(None),
+) -> dict[str, object]:
+    _verify_attachment_api_access(request, x_kb_internal_token)
+    from app.services.harness_attachments import parse_attachment
+
+    try:
+        return await asyncio.to_thread(
+            parse_attachment,
+            user_id=payload.user_id,
+            internal_session_id=payload.internal_session_id,
+            attachment_id=payload.attachment_id,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/harness-attachments/read")
+async def read_harness_attachment(
+    payload: HarnessAttachmentReadRequest,
+    request: Request,
+    x_kb_internal_token: str | None = Header(None),
+) -> dict[str, object]:
+    _verify_attachment_api_access(request, x_kb_internal_token)
+    from app.services.harness_attachments import read_attachment
+
+    try:
+        return await asyncio.to_thread(
+            read_attachment,
+            user_id=payload.user_id,
+            internal_session_id=payload.internal_session_id,
+            attachment_id=payload.attachment_id,
+            query=payload.query,
+            offset=payload.offset,
+            limit=payload.limit,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/minio/categories")

@@ -237,6 +237,18 @@ class Settings:
         os.getenv("HARNESS_MEMORY_SUMMARY_MAX_TOKENS", "1200")
     )
     harness_scheduler_interval_seconds: int = int(os.getenv("HARNESS_SCHEDULER_INTERVAL_SECONDS", "300"))
+    harness_attachment_root: str = os.getenv(
+        "HARNESS_ATTACHMENT_ROOT", "data/harness_attachments"
+    )
+    harness_attachment_max_bytes: int = int(
+        os.getenv("HARNESS_ATTACHMENT_MAX_BYTES", str(50 * 1024 * 1024))
+    )
+    harness_attachment_ttl_seconds: int = int(
+        os.getenv("HARNESS_ATTACHMENT_TTL_SECONDS", "86400")
+    )
+    harness_attachment_api_token: str = os.getenv(
+        "HARNESS_ATTACHMENT_API_TOKEN", ""
+    ).strip()
 
     feishu_app_id: str = _get_first_env("FEISHU_APP_ID", "LARK_APP_ID")
     feishu_app_secret: str = _get_first_env("FEISHU_APP_SECRET", "LARK_APP_SECRET")

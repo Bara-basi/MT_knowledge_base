@@ -37,7 +37,7 @@ def test_external_ids_are_service_scoped_and_do_not_store_raw_identity() -> None
     assert len(first["user_id"]) <= 128
 
 
-def test_external_markdown_rewrites_and_deduplicates_sources(monkeypatch) -> None:
+def test_external_markdown_hides_unmapped_internal_sources(monkeypatch) -> None:
     monkeypatch.setattr(
         formatting,
         "settings",
@@ -57,11 +57,9 @@ def test_external_markdown_rewrites_and_deduplicates_sources(monkeypatch) -> Non
         use_lark_document=False,
     )
 
-    assert "结论。[1]" in rendered
-    assert "补充。[1]" in rendered
-    assert rendered.count("1. [制度.docx]") == 1
-    assert "\n\n---\n### 知识来源\n" in rendered
-    assert "![流程.png](https://kb.example.com/prod/api/v1/documents/download?" in rendered
+    assert rendered == "结论。\n\n补充。\n\n流程.png"
+    assert "data/raw" not in rendered
+    assert "/documents/download" not in rendered
     assert "<reference>" not in rendered
 
 
@@ -120,7 +118,7 @@ def test_external_query_uses_isolated_harness_identity_and_storage(monkeypatch) 
     assert response.session_id == "session-1"
     assert response.service_id == "crm"
     assert response.answer_format == "markdown"
-    assert "---\n### 知识来源" in response.answer
+    assert response.answer == "答案。"
     assert captured["create"]["user_id"].startswith("external:v1:u:")
     assert captured["create"]["session_id"].startswith("external:v1:s:")
     assert captured["agent"].source == "external"

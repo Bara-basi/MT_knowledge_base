@@ -99,5 +99,5 @@ def test_harness_search_response_is_compact_text(monkeypatch) -> None:
         "query": "管材样册",
         "source": "harness",
         "count": 1,
-        "text": "找到 1 条与“管材样册”匹配的营销资料：\n1. 路径：MTSCO营销资料库/样册/管材样册.pdf\n   飞书链接：https://example.feishu.cn/wiki/a",
+        "text": "找到 1 条与“管材样册”匹配的营销资料：\n1. 管材样册.pdf：https://example.feishu.cn/wiki/a",
     }

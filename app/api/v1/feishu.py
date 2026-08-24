@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import ipaddress
 import json
 import logging
 import mimetypes
@@ -42,6 +43,13 @@ from app.services.privacy import decrypt_chat_text, encrypt_chat_text
 router = APIRouter(prefix="/feishu", tags=["feishu"])
 logger = logging.getLogger(__name__)
 
+
+class _FeishuAttachmentDownloadError(RuntimeError):
+    def __init__(self, message: str, *, code: int | None = None, user_message: str = "") -> None:
+        super().__init__(message)
+        self.code = code
+        self.user_message = user_message or "附件下载失败，请稍后重试。"
+
 _tenant_access_token: str | None = None
 _tenant_access_token_expires_at = 0.0
 _seen_message_keys: dict[str, float] = {}
@@ -66,6 +74,9 @@ _latex_bare_bracket_pattern = re.compile(
 )
 _reference_link_label_pattern = re.compile(r"^\s*(片段\s*\d+)\s*[,，:：]\s*(.+?)\s*$")
 _short_reference_link_pattern = r"\[\[\d+\]\]\([^)]+\)"
+_short_reference_capture_pattern = re.compile(
+    r"\[\[(?P<number>\d+)\]\]\((?P<url>[^)\n]+)\)"
+)
 _adjacent_any_reference_separator_pattern = re.compile(
     rf"(?P<ref>{_short_reference_link_pattern})[ \t\r\n]+(?=(?:{_short_reference_link_pattern}))"
 )
@@ -74,6 +85,14 @@ _adjacent_reference_pattern = re.compile(
 )
 _source_section_heading_pattern = re.compile(
     r"^\s*(?:#{1,6}\s*)?(?:\*\*)?(知识来源|引用文献|参考来源)(?:\*\*)?\s*[:：]?\s*$"
+)
+_internal_detail_pattern = re.compile(
+    r"(?i)(?:minio|s3|file)://[^\s<>()\]]+"
+    r"|(?:(?<![a-z])[a-z]:[\\/]|(?:\.\.?[\\/])?data[\\/]raw[\\/])[^\s<>()\]]+"
+    r"|https?://[^\s<>()\]]+/api/v1/documents/download\?[^\s<>()\]]+"
+    r"|https?://(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})(?::\d+)?[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]*"
+    r"|\b(?:kb_hybrid_search|kb_graph_search|marketing_asset_search|conversation_summary|conversation_excerpt_search|user_attachment_list|user_attachment_parse|user_attachment_read)\b"
+    r"|\b(?:harness_memories|harness_sessions|knowledge-raw-docs|knowledge-processed-docs)\b"
 )
 _feedback_interval_seconds = 1.5
 _comfort_feedback_interval_seconds = 60.0
@@ -231,6 +250,9 @@ async def handle_feishu_events(
         }
 
     question = _extract_message_text(message)
+    attachments = _extract_message_attachments(message)
+    if not question and attachments:
+        question = "请分析我上传的附件，并提取其中与工作相关的关键信息。"
     _debug(
         "message parsed",
         event_id=event_id,
@@ -264,6 +286,7 @@ async def handle_feishu_events(
         event_id=event_id,
         chat_type=message.get("chat_type"),
         dedupe_key=dedupe_key,
+        attachments=attachments,
     )
     _debug(
         "background task queued",
@@ -317,6 +340,7 @@ async def _answer_feishu_message(
     event_id: str | None = None,
     chat_type: str | None = None,
     dedupe_key: str | None = None,
+    attachments: list[dict[str, str]] | None = None,
 ) -> None:
     _debug(
         "background task started",
@@ -356,6 +380,44 @@ async def _answer_feishu_message(
         user_id=sender_id,
         source_session_id=chat_id,
     )
+    if attachments:
+        attachment_records: list[dict[str, Any]] = []
+        attachment_failures: list[str] = []
+        for attachment in attachments:
+            try:
+                attachment_records.append(
+                    await _download_and_store_feishu_attachment(
+                        message_id=message_id or "",
+                        attachment=attachment,
+                        user_id=sender_id or "unknown-user",
+                        internal_session_id=internal_session_id,
+                    )
+                )
+            except Exception as exc:
+                if isinstance(exc, _FeishuAttachmentDownloadError):
+                    attachment_failures.append(exc.user_message)
+                logger.exception("Failed to ingest Feishu attachment: %s", exc)
+                _warn(
+                    "Feishu attachment ingest failed",
+                    message_id=message_id,
+                    filename=attachment.get("filename"),
+                    error=str(exc),
+                )
+        if attachment_records:
+            attachment_lines = "\n".join(
+                f"- 附件 ID：{record['attachment_id']}；文件名：{record['filename']}"
+                for record in attachment_records
+            )
+            question = (
+                f"{question}\n\n当前消息附带以下临时附件（仅限本会话访问）：\n"
+                f"{attachment_lines}\n请先使用附件解析工具，再根据用户问题作答。"
+            )[:8_000]
+        else:
+            failure_reason = attachment_failures[0] if attachment_failures else "附件下载或格式校验失败。"
+            question = (
+                f"{question}\n\n系统未能接收本消息的附件。原因：{failure_reason}"
+                "请向用户简要说明该原因；不要声称已经看过附件。"
+            )[:8_000]
 
     try:
         await create_chat_record(
@@ -1238,6 +1300,9 @@ _HARNESS_TOOL_LABELS = {
     "kb_graph_search": "知识图谱检索",
     "conversation_summary": "会话摘要获取",
     "conversation_excerpt_search": "历史对话片段检索",
+    "user_attachment_list": "附件检查",
+    "user_attachment_parse": "附件解析",
+    "user_attachment_read": "附件内容读取",
     "image_search": "图片检索",
     "image_query": "图片检索",
     "web_search": "联网搜索",
@@ -1374,6 +1439,7 @@ def _clean_harness_feedback_text(text: str) -> str:
     # show those backslashes literally, so flatten presentation-only syntax.
     cleaned = re.sub(r"\\([\\`*_{}\[\]()#+\-.!|])", r"\1", cleaned)
     cleaned = re.sub(r"(`+|\*{1,3}|_{1,3}|~{2})", "", cleaned)
+    cleaned = _redact_internal_details(cleaned)
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
@@ -2100,6 +2166,135 @@ def _extract_message_text(message: dict[str, Any]) -> str:
         return _extract_feishu_post_text(content)
 
     return ""
+
+
+def _extract_message_attachments(message: dict[str, Any]) -> list[dict[str, str]]:
+    message_type = str(message.get("message_type") or "")
+    content = _parse_feishu_message_content(message.get("content"))
+    records: list[dict[str, str]] = []
+    if message_type == "file" and isinstance(content, dict):
+        key = str(content.get("file_key") or "").strip()
+        if key:
+            records.append({
+                "resource_key": key,
+                "resource_type": "file",
+                "filename": str(content.get("file_name") or "attachment").strip() or "attachment",
+            })
+    elif message_type == "image" and isinstance(content, dict):
+        key = str(content.get("image_key") or "").strip()
+        if key:
+            records.append({
+                "resource_key": key,
+                "resource_type": "image",
+                "filename": f"{key[:24]}.jpg",
+            })
+    elif message_type == "post":
+        for key in _collect_feishu_image_keys(content):
+            records.append({
+                "resource_key": key,
+                "resource_type": "image",
+                "filename": f"{key[:24]}.jpg",
+            })
+    return records
+
+
+def _collect_feishu_image_keys(value: Any) -> list[str]:
+    keys: list[str] = []
+    if isinstance(value, dict):
+        key = value.get("image_key")
+        if isinstance(key, str) and key.strip():
+            keys.append(key.strip())
+        for child in value.values():
+            keys.extend(_collect_feishu_image_keys(child))
+    elif isinstance(value, list):
+        for child in value:
+            keys.extend(_collect_feishu_image_keys(child))
+    return list(dict.fromkeys(keys))
+
+
+async def _download_and_store_feishu_attachment(
+    *,
+    message_id: str,
+    attachment: dict[str, str],
+    user_id: str,
+    internal_session_id: str,
+) -> dict[str, Any]:
+    if not message_id:
+        raise ValueError("Feishu message_id is missing")
+    from app.services.harness_attachments import save_attachment
+
+    token = await _get_tenant_access_token()
+    resource_key = quote(str(attachment["resource_key"]), safe="")
+    encoded_message_id = quote(message_id, safe="")
+    resource_type = attachment["resource_type"]
+    url = (
+        f"{settings.feishu_base_url}/open-apis/im/v1/messages/"
+        f"{encoded_message_id}/resources/{resource_key}"
+    )
+    timeout = httpx.Timeout(settings.feishu_timeout)
+    content = bytearray()
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        trust_env=settings.feishu_trust_env,
+        follow_redirects=True,
+    ) as client:
+        async with client.stream(
+            "GET",
+            url,
+            params={"type": resource_type},
+            headers={"Authorization": f"Bearer {token}"},
+        ) as response:
+            if response.is_error:
+                raise await _feishu_attachment_response_error(response)
+            content_type = response.headers.get("content-type", "application/octet-stream").split(";", 1)[0]
+            async for chunk in response.aiter_bytes(1024 * 1024):
+                content.extend(chunk)
+                if len(content) > settings.harness_attachment_max_bytes:
+                    raise ValueError("附件超过允许的大小")
+    filename = attachment["filename"]
+    if resource_type == "image" and Path(filename).suffix.lower() == ".jpg":
+        guessed_extension = mimetypes.guess_extension(content_type) or ".jpg"
+        filename = f"{Path(filename).stem}{guessed_extension}"
+    return save_attachment(
+        user_id=user_id,
+        internal_session_id=internal_session_id,
+        filename=filename,
+        content=bytes(content),
+        content_type=content_type,
+        source="feishu",
+    )
+
+
+async def _feishu_attachment_response_error(
+    response: httpx.Response,
+) -> _FeishuAttachmentDownloadError:
+    raw = await response.aread()
+    payload: dict[str, Any] = {}
+    try:
+        decoded = json.loads(raw.decode("utf-8", errors="replace"))
+        if isinstance(decoded, dict):
+            payload = decoded
+    except json.JSONDecodeError:
+        pass
+    try:
+        code = int(payload.get("code")) if payload.get("code") is not None else None
+    except (TypeError, ValueError):
+        code = None
+    message = str(payload.get("msg") or "").strip()
+    error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+    log_id = str(error.get("log_id") or "").strip()
+    if code == 99991672:
+        detail = (
+            "飞书应用缺少消息读取权限；需开通并发布以下任一权限："
+            "im:message.history:readonly、im:message:readonly、im:message"
+        )
+        user_message = "系统暂未获得读取飞书消息附件的权限，请联系应用管理员开通后再试。"
+    else:
+        detail = message or f"HTTP {response.status_code}"
+        user_message = "飞书附件下载失败，请稍后重试或联系应用管理员。"
+    if log_id:
+        detail = f"{detail}；飞书 log_id={log_id}"
+    return _FeishuAttachmentDownloadError(detail, code=code, user_message=user_message)
 
 
 def _parse_feishu_message_content(content: Any) -> Any:
@@ -3323,24 +3518,25 @@ def _latex_to_readable_text(expr: str) -> str:
 
 
 def _rewrite_reference_links(markdown: str) -> tuple[str, list[_ReferenceSource]]:
-    markdown = _strip_model_generated_source_section(markdown)
     references_by_url: dict[str, _ReferenceSource] = {}
     in_code_block = False
 
     def register_reference(url: str, label: str, description: str) -> _ReferenceSource:
         nonlocal references_by_url
-        normalized_url = _normalize_reference_url(url)
+        normalized_url = _format_markdown_link_url(url)
+        if not normalized_url:
+            raise ValueError("reference has no user-visible URL")
         if normalized_url not in references_by_url:
             references_by_url[normalized_url] = _ReferenceSource(
                 number=len(references_by_url) + 1,
                 label=label,
-                description=description,
-                url=url,
+                description=_redact_internal_details(description),
+                url=normalized_url,
             )
         return references_by_url[normalized_url]
 
     def format_short_reference(source: _ReferenceSource) -> str:
-        return f"[[{source.number}]]({_format_markdown_link_url(source.url)})"
+        return f"[[{source.number}]]({source.url})"
 
     def replace_reference_tag(match: re.Match[str]) -> str:
         if in_code_block:
@@ -3350,8 +3546,11 @@ def _rewrite_reference_links(markdown: str) -> tuple[str, list[_ReferenceSource]
         if not raw_path:
             return ""
 
-        description = _extract_reference_file_name(raw_path) or raw_path
-        source = register_reference(raw_path, f"引用{len(references_by_url) + 1}", description)
+        safe_url = _format_markdown_link_url(raw_path)
+        if not safe_url:
+            return ""
+        description = _extract_reference_file_name(raw_path) or "企业资料"
+        source = register_reference(safe_url, f"引用{len(references_by_url) + 1}", description)
         return format_short_reference(source)
 
     def replace_match(match: re.Match[str]) -> str:
@@ -3360,25 +3559,39 @@ def _rewrite_reference_links(markdown: str) -> tuple[str, list[_ReferenceSource]
 
         label = match.group(1).strip()
         url, existing_title = _parse_markdown_link_destination(match.group(2))
+        safe_url = _format_markdown_link_url(url)
         reference_match = _reference_link_label_pattern.match(label)
         if not reference_match and existing_title:
             reference_match = _reference_link_label_pattern.match(existing_title)
+        if not safe_url:
+            if reference_match:
+                return _redact_internal_details(reference_match.group(2)).strip()
+            safe_label = _redact_internal_details(label).strip()
+            return safe_label if safe_label != "[内部信息已隐藏]" else "内部资料"
         if not reference_match:
-            return match.group(0)
+            return f"[{_redact_internal_details(label)}]({safe_url})"
 
         label_text = reference_match.group(1).replace(" ", "")
         description = existing_title or label
-        source = register_reference(url, label_text, description)
+        source = register_reference(safe_url, label_text, description)
         return format_short_reference(source)
+
+    def replace_short_reference(match: re.Match[str]) -> str:
+        safe_url = _format_markdown_link_url(match.group("url"))
+        if not safe_url:
+            return ""
+        return f"[[{match.group('number')}]]({safe_url})"
 
     rewritten_lines: list[str] = []
     for line in markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         if line.strip().startswith("```"):
             in_code_block = not in_code_block
-            rewritten_lines.append(line)
+            rewritten_lines.append(_redact_internal_details(line))
             continue
-        rewritten_line = _reference_tag_pattern.sub(replace_reference_tag, line)
+        rewritten_line = _short_reference_capture_pattern.sub(replace_short_reference, line)
+        rewritten_line = _reference_tag_pattern.sub(replace_reference_tag, rewritten_line)
         rewritten_line = _markdown_link_pattern.sub(replace_match, rewritten_line)
+        rewritten_line = _redact_internal_details(rewritten_line)
         rewritten_lines.append(_dedupe_adjacent_reference_links(rewritten_line))
 
     rewritten_markdown = _join_adjacent_reference_links("\n".join(rewritten_lines))
@@ -3476,9 +3689,29 @@ def _format_markdown_link_url(url: str) -> str:
     lark_url = _resolve_lark_document_url(url)
     if lark_url:
         return lark_url
-    if _is_document_download_url(url):
-        return url
-    return _build_document_download_url(url)
+    parsed = urlparse(url.strip())
+    if parsed.scheme in {"http", "https"} and not _is_document_download_url(url):
+        host = parsed.hostname or ""
+        if not _is_internal_hostname(host):
+            return url
+    return ""
+
+
+def _redact_internal_details(text: str) -> str:
+    """Remove implementation details from user-visible model output."""
+
+    return _internal_detail_pattern.sub("[内部信息已隐藏]", text)
+
+
+def _is_internal_hostname(host: str) -> bool:
+    normalized = host.strip().lower()
+    if not normalized or normalized == "localhost" or normalized.endswith(".local"):
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_private
+    except ValueError:
+        # A hostname without a dot is normally a container/service name.
+        return "." not in normalized
 
 
 def _is_lark_document_url(url: str) -> bool:

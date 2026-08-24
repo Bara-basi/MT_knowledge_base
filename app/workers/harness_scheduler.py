@@ -19,6 +19,7 @@ from app.db.postgres import (
     complete_harness_archive,
     insert_harness_memory,
     list_expired_harness_sessions,
+    list_live_harness_session_ids,
     postgres_connection,
 )
 from app.services.privacy import decrypt_chat_text
@@ -121,7 +122,17 @@ def _delete_archived_session_log(internal_session_id: str) -> int:
 
 
 def archive_once() -> int:
+    from app.services.harness_attachments import cleanup_expired_attachments
+
     count = 0
+    expired_attachment_dirs = cleanup_expired_attachments(
+        preserve_session_ids=list_live_harness_session_ids()
+    )
+    if expired_attachment_dirs:
+        print(
+            f"[Harness memory scheduler] deleted {expired_attachment_dirs} expired attachment session(s).",
+            flush=True,
+        )
     expired_sessions = list_expired_harness_sessions(idle_seconds=settings.harness_idle_seconds)
     print(
         "[Harness memory scheduler] "
@@ -157,11 +168,18 @@ def archive_once() -> int:
             )
             complete_harness_archive(internal_session_id=session["internal_session_id"])
             deleted_logs = _delete_archived_session_log(str(session["internal_session_id"]))
+            from app.services.harness_attachments import delete_session_attachments
+
+            deleted_attachments = delete_session_attachments(
+                user_id=str(session["user_id"]),
+                internal_session_id=str(session["internal_session_id"]),
+            )
             count += 1
             print(
                 "[Harness memory scheduler] "
                 f"archive succeeded: {len(turns)} turn(s); summary model: {settings.harness_memory_summary_model}; file: {uri}; "
-                f"metadata row: harness_memories; local JSONL directory deleted: {deleted_logs == 1}",
+                f"metadata row: harness_memories; local JSONL directory deleted: {deleted_logs == 1}; "
+                f"temporary attachments deleted: {deleted_attachments == 1}",
                 flush=True,
             )
         except Exception as exc:  # keep it eligible for a later watchdog retry

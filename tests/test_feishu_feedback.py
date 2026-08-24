@@ -5,11 +5,74 @@ import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from app.api.v1 import feishu
 from app.schemas.query import QueryResponse
 from app.services.privacy import encrypt_chat_text
+
+
+def test_feishu_attachment_permission_error_is_actionable() -> None:
+    response = httpx.Response(
+        400,
+        request=httpx.Request("GET", "https://open.feishu.cn/open-apis/im/v1/messages/x/resources/y"),
+        json={
+            "code": 99991672,
+            "msg": "Access denied",
+            "error": {"log_id": "log-test"},
+        },
+    )
+    error = asyncio.run(feishu._feishu_attachment_response_error(response))
+
+    assert error.code == 99991672
+    assert "im:message:readonly" in str(error)
+    assert "log-test" in str(error)
+    assert "系统暂未获得读取飞书消息附件的权限" in error.user_message
+
+
+def test_feishu_attachment_download_consumes_async_byte_stream(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    original_async_client = httpx.AsyncClient
+
+    async def fake_token() -> str:
+        return "tenant-token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["type"] == "image"
+        assert request.headers["authorization"] == "Bearer tenant-token"
+        return httpx.Response(
+            200,
+            headers={"content-type": "image/png"},
+            content=b"image-bytes",
+        )
+
+    def client_factory(**_kwargs):
+        return original_async_client(transport=httpx.MockTransport(handler))
+
+    def fake_save_attachment(**kwargs):
+        captured.update(kwargs)
+        return {"attachment_id": "attachment-id", "filename": kwargs["filename"]}
+
+    monkeypatch.setattr(feishu, "_get_tenant_access_token", fake_token)
+    monkeypatch.setattr(feishu.httpx, "AsyncClient", client_factory)
+    monkeypatch.setattr("app.services.harness_attachments.save_attachment", fake_save_attachment)
+
+    result = asyncio.run(feishu._download_and_store_feishu_attachment(
+        message_id="message-id",
+        attachment={
+            "resource_key": "image-key",
+            "resource_type": "image",
+            "filename": "image-key.jpg",
+        },
+        user_id="user-id",
+        internal_session_id="session-id",
+    ))
+
+    assert result["attachment_id"] == "attachment-id"
+    assert captured["content"] == b"image-bytes"
+    assert captured["content_type"] == "image/png"
+    assert captured["filename"] == "image-key.png"
 
 
 def test_extract_message_text_keeps_plain_text_messages() -> None:
@@ -108,7 +171,7 @@ def test_extract_message_text_rejects_unsupported_messages() -> None:
     assert feishu._extract_message_text(message) == ""
 
 
-def test_unsupported_message_queues_notice_instead_of_silent_ignore(monkeypatch) -> None:
+def test_image_message_is_queued_as_model_attachment(monkeypatch) -> None:
     queued_tasks: list[tuple[object, dict[str, object]]] = []
 
     class FakeBackgroundTasks:
@@ -142,15 +205,18 @@ def test_unsupported_message_queues_notice_instead_of_silent_ignore(monkeypatch)
 
     assert result == {
         "ok": True,
-        "ignored": True,
-        "reason": "unsupported_or_empty_message",
+        "accepted": True,
+        "event_id": "event-unsupported",
+        "message_id": "message-unsupported",
     }
-    assert queued_tasks == [
-        (
-            feishu._send_unsupported_feishu_message_notice,
-            {"chat_id": "chat-id", "message_id": "message-unsupported"},
-        )
-    ]
+    assert len(queued_tasks) == 1
+    func, kwargs = queued_tasks[0]
+    assert func is feishu._answer_feishu_message
+    assert kwargs["attachments"] == [{
+        "resource_key": "img_v3_xyz",
+        "resource_type": "image",
+        "filename": "img_v3_xyz.jpg",
+    }]
 
 
 def test_extract_sender_identity_prefers_union_id_with_type() -> None:
@@ -1207,20 +1273,18 @@ def test_feishu_card_rewrites_reference_links_and_appends_source_panel() -> None
     }
 
 
-def test_feishu_card_rewrites_reference_tags_and_appends_source_panel() -> None:
-    expected_url = feishu._build_document_download_url("data/raw/a.docx")
+def test_feishu_card_hides_unmapped_reference_tags() -> None:
     markdown = "Answer from KB<reference>data/raw/a.docx</Reference>"
 
     content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
 
     card = json.loads(content)
     elements = card["body"]["elements"]
-    assert elements[0]["content"] == f"Answer from KB[[1]]({expected_url})"
-    assert elements[1]["elements"][0]["content"] == f"[[1]]({expected_url}) a.docx"
+    assert elements[0]["content"] == "Answer from KB"
+    assert len(elements) == 1
 
 
-def test_feishu_card_deduplicates_reference_tags() -> None:
-    expected_url = feishu._build_document_download_url("data/raw/a.docx")
+def test_feishu_card_hides_repeated_unmapped_reference_tags() -> None:
     markdown = (
         "First<reference>data/raw/a.docx</reference>\n"
         "Second<Reference>data\\raw\\a.docx</Reference>"
@@ -1230,14 +1294,11 @@ def test_feishu_card_deduplicates_reference_tags() -> None:
 
     card = json.loads(content)
     elements = card["body"]["elements"]
-    assert elements[0]["content"] == f"First[[1]]({expected_url})\nSecond[[1]]({expected_url})"
-    assert elements[1]["elements"][0]["content"] == f"[[1]]({expected_url}) a.docx"
+    assert elements[0]["content"] == "First\nSecond"
+    assert len(elements) == 1
 
 
-def test_feishu_card_joins_reference_tags_split_across_lines() -> None:
-    url_a = feishu._build_document_download_url("data/raw/a.docx")
-    url_b = feishu._build_document_download_url("data/raw/b.docx")
-    url_c = feishu._build_document_download_url("data/raw/c.docx")
+def test_feishu_card_hides_unmapped_reference_tags_split_across_lines() -> None:
     markdown = (
         "结论内容。<reference>data/raw/a.docx</reference>\n"
         "<Reference>data/raw/b.docx</Reference>\n"
@@ -1248,11 +1309,10 @@ def test_feishu_card_joins_reference_tags_split_across_lines() -> None:
 
     card = json.loads(content)
     main_content = card["body"]["elements"][0]["content"]
-    assert main_content == f"结论内容。[[1]]({url_a})[[2]]({url_b})[[3]]({url_c})"
-    assert f"[[1]]({url_a})\n[[2]]({url_b})" not in main_content
+    assert main_content == "结论内容。"
 
 
-def test_feishu_card_joins_existing_short_references_split_across_lines() -> None:
+def test_feishu_card_hides_internal_download_references() -> None:
     url_a = feishu._build_document_download_url("data/raw/a.docx")
     url_b = feishu._build_document_download_url("data/raw/b.docx")
     markdown = f"结论内容。[[1]]({url_a})\n[[2]]({url_b})"
@@ -1260,16 +1320,16 @@ def test_feishu_card_joins_existing_short_references_split_across_lines() -> Non
     content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
 
     card = json.loads(content)
-    assert card["body"]["elements"][0]["content"] == f"结论内容。[[1]]({url_a})[[2]]({url_b})"
+    assert card["body"]["elements"][0]["content"] == "结论内容。"
 
 
-def test_feishu_card_keeps_reference_tags_inside_code_blocks() -> None:
+def test_feishu_card_redacts_internal_paths_inside_code_blocks() -> None:
     markdown = "```\n<reference>data/raw/a.docx</reference>\n```"
 
     content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
 
     card = json.loads(content)
-    assert card["body"]["elements"][0]["content"] == markdown
+    assert card["body"]["elements"][0]["content"] == "```\n<reference>[内部信息已隐藏]</reference>\n```"
     assert len(card["body"]["elements"]) == 1
 
 
@@ -1315,8 +1375,7 @@ def test_feishu_card_rewrites_reference_links_with_windows_paths_and_spaces() ->
     )
 
 
-def test_feishu_card_deduplicates_reference_sources_and_strips_model_source_section() -> None:
-    expected_url = feishu._build_document_download_url("data/raw/a.docx")
+def test_feishu_card_keeps_model_source_explanation_but_hides_unmapped_paths() -> None:
     markdown = (
         "第一段。[片段7,来源甲](data/raw/a.docx)\n"
         "第二段。[片段2,重复来源](data/raw/a.docx)\n\n"
@@ -1329,12 +1388,11 @@ def test_feishu_card_deduplicates_reference_sources_and_strips_model_source_sect
 
     card = json.loads(content)
     elements = card["body"]["elements"]
-    assert elements[0]["content"] == f"第一段。[[1]]({expected_url})\n第二段。[[1]]({expected_url})"
-    assert elements[1]["elements"][0]["content"] == f"[[1]]({expected_url}) 片段7,来源甲"
+    assert elements[0]["content"] == "第一段。来源甲\n第二段。重复来源\n\n---\n知识来源：\n来源甲"
+    assert len(elements) == 1
 
 
-def test_feishu_card_deduplicates_adjacent_repeated_reference_links() -> None:
-    expected_url = feishu._build_document_download_url("data/raw/a.docx")
+def test_feishu_card_keeps_descriptions_for_unmapped_reference_links() -> None:
     markdown = (
         "结论内容。"
         "[片段7,来源甲](data/raw/a.docx)"
@@ -1345,18 +1403,18 @@ def test_feishu_card_deduplicates_adjacent_repeated_reference_links() -> None:
 
     card = json.loads(content)
     elements = card["body"]["elements"]
-    assert elements[0]["content"] == f"结论内容。[[1]]({expected_url})"
-    assert elements[1]["elements"][0]["content"] == f"[[1]]({expected_url}) 片段7,来源甲"
+    assert elements[0]["content"] == "结论内容。来源甲重复来源"
+    assert len(elements) == 1
 
 
-def test_feishu_card_deduplicates_adjacent_existing_short_references() -> None:
+def test_feishu_card_removes_adjacent_internal_download_references() -> None:
     existing_url = feishu._build_document_download_url("data/raw/a.docx")
     markdown = f"结论内容。[[1]]({existing_url})[[1]]({existing_url})"
 
     content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
 
     card = json.loads(content)
-    assert card["body"]["elements"][0]["content"] == f"结论内容。[[1]]({existing_url})"
+    assert card["body"]["elements"][0]["content"] == "结论内容。"
 
 
 def test_feishu_card_keeps_regular_markdown_links_and_code_blocks() -> None:
@@ -1371,6 +1429,24 @@ def test_feishu_card_keeps_regular_markdown_links_and_code_blocks() -> None:
 
     card = json.loads(content)
     assert card["body"]["elements"][0]["content"] == markdown
+
+
+def test_feishu_card_redacts_internal_details_and_keeps_public_links() -> None:
+    markdown = (
+        "内部位置 minio://knowledge-raw-docs/private/manual.docx，"
+        "工具 kb_hybrid_search，"
+        "服务 http://127.0.0.1:8000/internal，"
+        "公开来源：[官网](https://example.com/docs)。"
+    )
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+
+    rendered = json.loads(content)["body"]["elements"][0]["content"]
+    assert "minio://" not in rendered
+    assert "knowledge-raw-docs" not in rendered
+    assert "kb_hybrid_search" not in rendered
+    assert "127.0.0.1" not in rendered
+    assert "[官网](https://example.com/docs)" in rendered
 
 
 def test_format_markdown_link_url_uses_lark_mapping_by_filename(monkeypatch) -> None:
@@ -1397,11 +1473,11 @@ def test_format_markdown_link_url_extracts_filename_from_download_url(monkeypatc
     assert feishu._format_markdown_link_url(raw_url) == "https://example.feishu.cn/wiki/demo"
 
 
-def test_format_markdown_link_url_falls_back_to_download_url(monkeypatch) -> None:
+def test_format_markdown_link_url_hides_unmapped_internal_path(monkeypatch) -> None:
     monkeypatch.setattr(feishu, "_local_to_lark_mapping_cache", {})
     raw_path = "data/raw/folder/missing.docx"
 
-    assert feishu._format_markdown_link_url(raw_path) == feishu._build_document_download_url(raw_path)
+    assert feishu._format_markdown_link_url(raw_path) == ""
 
 
 def test_format_markdown_link_url_keeps_existing_lark_url() -> None:

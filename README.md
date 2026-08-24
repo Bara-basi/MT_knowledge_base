@@ -439,6 +439,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f milvus-s
 - Milvus collection 已创建
 - 知识库数据已导入或确认可检索
 - 飞书回调公网地址可访问
+- 飞书应用已开通并发布消息读取权限（附件下载需要 `im:message:readonly`、`im:message.history:readonly` 或 `im:message` 中任一项）
 - 重要 volume 和 `data/` 已规划备份
 
 ## 常见坑

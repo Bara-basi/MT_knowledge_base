@@ -4,6 +4,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from app.db.minio import parse_raw_document_reference
+from app.services.harness_attachments import harness_attachment_root
 
 
 RAW_ROOT = Path("data") / "raw"
@@ -18,6 +19,17 @@ def processing_document_dir(source_file: str | Path) -> Path:
 
     source_path = Path(source_text)
     source_abs = _absolute_path(source_path)
+    attachment_root = harness_attachment_root()
+    try:
+        relative_attachment = source_abs.relative_to(attachment_root)
+    except ValueError:
+        pass
+    else:
+        # Model uploads already live inside a user/session/attachment boundary.
+        # Keep every parser side effect in that same boundary to prevent
+        # same-name files from different users sharing data/processing output.
+        attachment_dir = attachment_root.joinpath(*relative_attachment.parts[:3])
+        return attachment_dir / "parsed"
     raw_root_abs = (Path.cwd() / RAW_ROOT).resolve()
 
     try:

@@ -6,6 +6,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 from psycopg import sql
 
@@ -161,13 +162,20 @@ def format_harness_results(query: str, matches: list[MarketingAssetMatch]) -> st
         return f"未找到与“{query}”匹配的营销资料。"
     lines = [f"找到 {len(matches)} 条与“{query}”匹配的营销资料："]
     for index, match in enumerate(matches, start=1):
-        lines.extend(
-            (
-                f"{index}. 路径：{match.full_path}",
-                f"   飞书链接：{match.feishu_link}",
-            )
-        )
+        name = match.document_name or f"资料 {index}"
+        if _is_lark_url(match.feishu_link):
+            lines.append(f"{index}. {name}：{match.feishu_link}")
+        else:
+            lines.append(f"{index}. {name}（暂无可展示的飞书链接）")
     return "\n".join(lines)
+
+
+def _is_lark_url(value: str) -> bool:
+    parsed = urlparse(value.strip())
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme in {"http", "https"} and (
+        host.endswith("feishu.cn") or host.endswith("larksuite.com")
+    )
 
 
 def _score_match(row: dict[str, Any], query: str, tokens: list[str]) -> MarketingAssetMatch:

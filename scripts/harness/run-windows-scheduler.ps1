@@ -4,8 +4,8 @@ param()
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $pythonPath = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
-# $env:HARNESS_IDLE_SECONDS = "25200"
-$env:HARNESS_IDLE_SECONDS = "600"
+$env:HARNESS_IDLE_SECONDS = "25200"
+# $env:HARNESS_IDLE_SECONDS = "600"
 $env:HARNESS_ENABLED = "true"
 Push-Location $ProjectRoot
 try {

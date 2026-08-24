@@ -1510,6 +1510,17 @@ def list_expired_harness_sessions(*, idle_seconds: int, limit: int = 100) -> lis
             return rows
 
 
+def list_live_harness_session_ids() -> set[str]:
+    """Return sessions whose temporary attachments must not be TTL-cleaned."""
+    ensure_harness_tables()
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT internal_session_id FROM {HARNESS_SESSIONS_TABLE} WHERE status IN ('active', 'archiving')"
+            )
+            return {str(row["internal_session_id"]) for row in cur.fetchall()}
+
+
 def complete_harness_archive(*, internal_session_id: UUID | str, error: str = "") -> None:
     ensure_harness_tables()
     status = "active" if error else "archived"

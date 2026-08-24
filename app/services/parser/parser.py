@@ -12,9 +12,18 @@ def parse_document(
     file_path: str | Path,
     *,
     image_analysis_workers: int = 3,
+    source: str = "knowledge_base",
 ):
-    """Route an input document to the matching parser by file extension."""
-    source = str(file_path)
+    """Route an input document to the matching parser by file extension.
+
+    ``source=model`` keeps parser artifacts inside the attachment's isolated
+    directory.  The caller remains responsible for returning bounded chunks
+    instead of the full item list to an agent.
+    """
+    if source not in {"knowledge_base", "model"}:
+        raise ValueError(f"Unsupported parser source: {source}")
+    parser_source = source
+    document_source = str(file_path)
     path = _local_parser_path(file_path)
     suffix = path.suffix.lower()
 
@@ -32,19 +41,21 @@ def parse_document(
         items = parse_powerpoint_document(path, image_analysis_workers=image_analysis_workers)
     elif suffix == ".pdf":
         return _parse_pdf_sources(
-            source,
+            document_source,
             local_path=path,
             image_analysis_workers=image_analysis_workers,
+            synchronize=parser_source != "model",
         )
     else:
         raise ValueError(f"Unsupported document type: {suffix or 'unknown'}")
 
-    # `path` may be a cache file while `source` is a MinIO URI.  Synchronize the
+    # `path` may be a cache file while `document_source` is a MinIO URI. Synchronize the
     # parser's real output to the source-derived local path and the archive.
-    synchronize_processed_assets(
-        source,
-        produced_processing_dir=processing_document_dir(path),
-    )
+    if parser_source != "model":
+        synchronize_processed_assets(
+            document_source,
+            produced_processing_dir=processing_document_dir(path),
+        )
     return items
 
 
@@ -53,6 +64,7 @@ def _parse_pdf_sources(
     *,
     local_path: Path,
     image_analysis_workers: int,
+    synchronize: bool = True,
 ) -> list[dict]:
     from app.services.parser.unified_pdf_parser import (
         parse_unified_pdf_document,
@@ -74,14 +86,15 @@ def _parse_pdf_sources(
             image_analysis_workers=image_analysis_workers,
             source_reference=resolved_source,
         )
-        synchronize_processed_assets(
-            resolved_source,
-            produced_processing_dir=processing_document_dir(resolved_path),
-            update_registry=(
-                len(resolved_sources) == 1
-                and not is_generated_standard_pdf_section(resolved_source)
-            ),
-        )
+        if synchronize:
+            synchronize_processed_assets(
+                resolved_source,
+                produced_processing_dir=processing_document_dir(resolved_path),
+                update_registry=(
+                    len(resolved_sources) == 1
+                    and not is_generated_standard_pdf_section(resolved_source)
+                ),
+            )
         all_items.extend(items)
     return all_items
 
