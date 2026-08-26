@@ -41,6 +41,90 @@ def test_attachment_ids_are_user_and_session_scoped(monkeypatch, tmp_path) -> No
         )
 
 
+def test_legacy_xls_is_accepted_and_upgraded_before_parsing(monkeypatch, tmp_path) -> None:
+    _configure_root(monkeypatch, tmp_path)
+    converted: list[Path] = []
+    parsed_paths: list[Path] = []
+
+    def fake_convert(_source: Path, target: Path) -> None:
+        target.write_bytes(b"xlsx")
+        converted.append(target)
+
+    def fake_parse(path: Path, **_kwargs):
+        parsed_paths.append(Path(path))
+        return [{"type": "paragraph", "style": "正文", "text": "旧表格已解析"}]
+
+    monkeypatch.setattr(harness_attachments, "_convert_xls_to_xlsx", fake_convert)
+    monkeypatch.setattr(document_parser, "parse_document", fake_parse)
+    record = harness_attachments.save_attachment(
+        user_id="user-a",
+        internal_session_id="session-a",
+        filename="出库明细.xls",
+        content=b"legacy-xls",
+    )
+
+    parsed = harness_attachments.parse_attachment(
+        user_id="user-a",
+        internal_session_id="session-a",
+        attachment_id=record["attachment_id"],
+    )
+
+    assert converted[0].suffix == ".xlsx"
+    assert parsed_paths[0] == converted[0]
+    assert parsed["normalized_filename"] == "出库明细.xlsx"
+    assert parsed["normalized_from"] == ".xls"
+    assert "旧表格已解析" in parsed["preview"]
+
+
+def test_python_xls_converter_preserves_values_sheets_and_merges(monkeypatch, tmp_path) -> None:
+    import xlrd
+    from openpyxl import load_workbook
+
+    class FakeCell:
+        def __init__(self, value, ctype):
+            self.value = value
+            self.ctype = ctype
+
+    class FakeSheet:
+        name = "旧/表"
+        nrows = 2
+        ncols = 2
+        merged_cells = [(0, 1, 0, 2)]
+        cells = [
+            [FakeCell("标题", xlrd.XL_CELL_TEXT), FakeCell("", xlrd.XL_CELL_EMPTY)],
+            [FakeCell(12.0, xlrd.XL_CELL_NUMBER), FakeCell(True, xlrd.XL_CELL_BOOLEAN)],
+        ]
+
+        def cell(self, row: int, column: int):
+            return self.cells[row][column]
+
+    class FakeBook:
+        datemode = 0
+
+        def sheets(self):
+            return [FakeSheet()]
+
+        def release_resources(self):
+            return None
+
+    monkeypatch.setattr(xlrd, "open_workbook", lambda *_args, **_kwargs: FakeBook())
+    source = tmp_path / "legacy.xls"
+    source.write_bytes(b"legacy")
+    target = tmp_path / "modern.xlsx"
+
+    harness_attachments._convert_xls_to_xlsx(source, target)
+
+    workbook = load_workbook(target, data_only=False)
+    try:
+        sheet = workbook["旧_表"]
+        assert sheet["A1"].value == "标题"
+        assert sheet["A2"].value == 12
+        assert sheet["B2"].value is True
+        assert str(next(iter(sheet.merged_cells.ranges))) == "A1:B1"
+    finally:
+        workbook.close()
+
+
 def test_relative_attachment_root_is_stable_across_process_workdirs(monkeypatch, tmp_path) -> None:
     project_root = tmp_path / "project"
     other_cwd = tmp_path / "harness-cwd"

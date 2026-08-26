@@ -13,6 +13,82 @@ from app.schemas.query import QueryResponse
 from app.services.privacy import encrypt_chat_text
 
 
+def test_feishu_request_bypasses_environment_proxy_and_retries_connect_errors(
+    monkeypatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    sleeps: list[float] = []
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            calls.append(dict(kwargs))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def request(self, method, url, **_kwargs):
+            if len(calls) < 3:
+                raise httpx.ConnectError(
+                    "TLS proxy connection failed",
+                    request=httpx.Request(method, url),
+                )
+            return httpx.Response(200, request=httpx.Request(method, url), json={"code": 0})
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(feishu.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(feishu.asyncio, "sleep", fake_sleep)
+
+    response = asyncio.run(
+        feishu._feishu_request(
+            "POST",
+            "https://open.feishu.cn/example",
+            operation="test",
+            json={"hello": "world"},
+        )
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 3
+    assert all(call["trust_env"] is False for call in calls)
+    assert sleeps == [0.5, 1.0]
+
+
+def test_feishu_request_does_not_retry_read_timeout(monkeypatch) -> None:
+    attempts = 0
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def request(self, method, url, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            raise httpx.ReadTimeout("response lost", request=httpx.Request(method, url))
+
+    monkeypatch.setattr(feishu.httpx, "AsyncClient", FakeAsyncClient)
+
+    with pytest.raises(httpx.ReadTimeout):
+        asyncio.run(
+            feishu._feishu_request(
+                "POST",
+                "https://open.feishu.cn/example",
+                operation="test",
+            )
+        )
+    assert attempts == 1
+
+
 def test_feishu_attachment_permission_error_is_actionable() -> None:
     response = httpx.Response(
         400,
@@ -1032,7 +1108,7 @@ def test_download_minio_image_to_temp_decodes_standard_asset_uri(monkeypatch) ->
             temp_path.unlink(missing_ok=True)
 
 
-def test_feishu_card_preserves_markdown_for_json2_renderer() -> None:
+def test_feishu_card_flattens_markdown_tables_for_json2_renderer() -> None:
     markdown = (
         "### 标题\n\n"
         "> 引用内容\n\n"
@@ -1046,14 +1122,39 @@ def test_feishu_card_preserves_markdown_for_json2_renderer() -> None:
 
     card = json.loads(content)
     assert card["schema"] == "2.0"
-    assert card["body"]["elements"] == [
-        {
-            "tag": "markdown",
-            "content": markdown.strip(),
-            "text_align": "left",
-            "text_size": "normal_v2",
-        }
-    ]
+    rendered = card["body"]["elements"][0]["content"]
+    assert "**标题**" in rendered
+    assert "▌ 引用内容" in rendered
+    assert "1. 列一: A；列二: B" in rendered
+    assert "| --- |" not in rendered
+
+
+def test_feishu_card_flattens_many_tables_before_delivery() -> None:
+    markdown = "\n\n".join(
+        f"表{i}\n名称 | 数值\n--- | ---\n项目{i} | {i}"
+        for i in range(20)
+    )
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+    card = json.loads(content)
+    rendered = card["body"]["elements"][0]["content"]
+
+    assert "--- | ---" not in rendered
+    assert rendered.count("名称: 项目") == 20
+
+
+def test_feishu_card_keeps_terminal_bold_span_renderable() -> None:
+    markdown = (
+        "**MT Pipeline（管道）**、**Oilfield Services（油服/盘管）**、"
+        "**MT Wire（线材）**、**MT Plate（板材）**"
+    )
+
+    content = asyncio.run(feishu._build_feishu_card_content(markdown, "tenant-token"))
+    card = json.loads(content)
+    rendered = card["body"]["elements"][0]["content"]
+
+    assert rendered[:-1] == markdown
+    assert rendered.endswith("**\u200b")
 
 
 def test_feishu_card_renders_latex_formula_as_readable_text() -> None:
@@ -1239,6 +1340,42 @@ def test_harness_progress_merges_tool_wave_and_uses_neutral_copy(monkeypatch) ->
     assert feishu._clean_harness_feedback_text(r"处理中 \*\*重点\*\*") == "处理中 重点"
 
 
+def test_harness_progress_uses_bounded_table_safe_rolling_window(monkeypatch) -> None:
+    updates: list[str] = []
+
+    async def fake_update(_message_id: str, markdown_text: str, **_kwargs) -> bool:
+        updates.append(markdown_text)
+        return True
+
+    async def run_case() -> feishu._FeishuFeedbackState:
+        state = feishu._FeishuFeedbackState(
+            message_id="feedback-message-id",
+            question="question",
+            prefix_text="",
+            status_text="",
+            update_lock=asyncio.Lock(),
+            harness_mode=True,
+        )
+        for index in range(15):
+            await feishu._append_harness_progress(
+                state,
+                SimpleNamespace(
+                    kind="text",
+                    tool_name="",
+                    text=f"步骤{index} | 表头 | 内容 " + ("很长" * 80),
+                ),
+            )
+        return state
+
+    monkeypatch.setattr(feishu, "_try_update_feishu_markdown_message", fake_update)
+    state = asyncio.run(run_case())
+
+    assert len(state.progress_lines) <= 6
+    assert sum(len(line) + 1 for line in state.progress_lines) <= 1_200
+    assert all("|" not in line for line in state.progress_lines)
+    assert "步骤14" in state.progress_lines[-1]
+
+
 def test_feishu_card_rewrites_reference_links_and_appends_source_panel() -> None:
     expected_url = feishu._format_markdown_link_url(
         "data/raw/结构化word文档/造船行业.docx"
@@ -1388,7 +1525,7 @@ def test_feishu_card_keeps_model_source_explanation_but_hides_unmapped_paths() -
 
     card = json.loads(content)
     elements = card["body"]["elements"]
-    assert elements[0]["content"] == "第一段。来源甲\n第二段。重复来源\n\n---\n知识来源：\n来源甲"
+    assert elements[0]["content"] == "第一段。来源甲\n第二段。重复来源\n\n────────\n知识来源：\n来源甲"
     assert len(elements) == 1
 
 

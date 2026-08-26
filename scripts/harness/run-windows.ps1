@@ -38,6 +38,7 @@ if (-not $env:DEEPSEEK_API_KEY) {
 
 $env:DHS_REPO = $HarnessRoot
 $env:HARNESS_ENABLED = "true"
+$env:FEISHU_DURABLE_QUEUE_ENABLED = "false"
 $env:HARNESS_MODEL = "deepseek-v4-flash"
 $env:HARNESS_WORKDIR = (Join-Path $ProjectRoot "data\processing")
 $env:HARNESS_SESSION_ROOT = (Join-Path $ProjectRoot "data\harness_sessions")

@@ -26,6 +26,13 @@ services:
       MINIO_ENDPOINT: ${MINIO_INTERNAL_ENDPOINT:-http://milvus-minio:9000}
       API_ROUTE_PREFIX: ${API_ROUTE_PREFIX:-/prod}
       FEISHU_ROUTE_PREFIX: ${FEISHU_ROUTE_PREFIX:-/prod}
+      HARNESS_WORKDIR: /app/harness_workspace
+      HARNESS_GLOBAL_CONCURRENCY: ${HARNESS_GLOBAL_CONCURRENCY:-2}
+      HARNESS_CONTEXT_ARCHIVE_TOKENS: ${HARNESS_CONTEXT_ARCHIVE_TOKENS:-90000}
+      FEISHU_DURABLE_QUEUE_ENABLED: "false"
+      SHARED_RATE_LIMIT_ENABLED: "true"
+    volumes:
+      - ./data/processing:/app/harness_workspace:ro
     depends_on:
       milvus-minio:
         condition: service_healthy

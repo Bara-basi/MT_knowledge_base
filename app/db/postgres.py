@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime
+import time
 from typing import Any, Iterator
 from uuid import UUID, uuid4
 
@@ -22,6 +23,8 @@ CONVERSATION_TOPICS_TABLE = "conversation_topics"
 CONVERSATION_TOPICS_TABLE_COMMENT = "Virtual conversation topics for Feishu chat sessions"
 CHAT_TEXT_ENCRYPTION_PREFIX = "fernet:v1:"
 FEISHU_ANSWER_FEEDBACK_TABLE = "feishu_answer_feedback_states"
+FEISHU_ANSWER_JOBS_TABLE = "feishu_answer_jobs"
+API_RATE_LIMITS_TABLE = "api_rate_limits"
 HARNESS_SESSIONS_TABLE = "harness_sessions"
 HARNESS_MEMORIES_TABLE = "harness_memories"
 
@@ -60,6 +63,62 @@ def postgres_connection() -> Iterator[Connection[Any]]:
         conn.close()
 
 
+@contextmanager
+def postgres_advisory_lock(lock_key: int) -> Iterator[None]:
+    """Hold one cross-process PostgreSQL advisory lock for a long operation."""
+
+    conn = get_postgres_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(%s)", (lock_key,))
+        yield
+    finally:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
+        finally:
+            conn.close()
+
+
+@contextmanager
+def postgres_capacity_slot(
+    *, namespace: int, slots: int, timeout_seconds: float
+) -> Iterator[int | None]:
+    """Lease one of ``slots`` shared advisory locks, or wait until timeout."""
+
+    if slots <= 0:
+        yield None
+        return
+    deadline = time.monotonic() + max(0.1, timeout_seconds)
+    conn = get_postgres_connection()
+    acquired: int | None = None
+    try:
+        while acquired is None:
+            with conn.cursor() as cur:
+                for slot in range(slots):
+                    lock_key = namespace + slot
+                    cur.execute("SELECT pg_try_advisory_lock(%s) AS acquired", (lock_key,))
+                    row = cur.fetchone() or {}
+                    if row.get("acquired"):
+                        acquired = lock_key
+                        break
+            if acquired is not None:
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Timed out waiting for a shared Harness capacity slot")
+            time.sleep(0.25)
+        yield acquired - namespace
+    finally:
+        if acquired is not None:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_unlock(%s)", (acquired,))
+            finally:
+                conn.close()
+        else:
+            conn.close()
+
+
 def ensure_chat_messages_table(table_name: str | None = None) -> dict[str, Any]:
     """Create the chat message table if it does not already exist."""
 
@@ -68,10 +127,13 @@ def ensure_chat_messages_table(table_name: str | None = None) -> dict[str, Any]:
 
     with postgres_connection() as conn:
         with conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
             cur.execute(
                 sql.SQL(
                     """
                     CREATE TABLE IF NOT EXISTS {table} (
+                        message_id UUID NOT NULL DEFAULT gen_random_uuid(),
+                        source_message_id TEXT,
                         user_id VARCHAR(128) NOT NULL,
                         user_name TEXT,
                         feishu_user_id TEXT,
@@ -90,6 +152,47 @@ def ensure_chat_messages_table(table_name: str | None = None) -> dict[str, Any]:
                     )
                     """
                 ).format(table=table)
+            )
+            cur.execute(
+                sql.SQL(
+                    "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS message_id "
+                    "UUID DEFAULT gen_random_uuid()"
+                ).format(table=table)
+            )
+            cur.execute(
+                sql.SQL("UPDATE {table} SET message_id = gen_random_uuid() WHERE message_id IS NULL").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ALTER COLUMN message_id SET NOT NULL").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ALTER COLUMN message_id SET DEFAULT gen_random_uuid()").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL("CREATE UNIQUE INDEX IF NOT EXISTS {index} ON {table} (message_id)").format(
+                    index=sql.Identifier(f"{table_name}_message_id_uidx"),
+                    table=table,
+                )
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS source_message_id TEXT").format(
+                    table=table
+                )
+            )
+            cur.execute(
+                sql.SQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS {index} ON {table} (source_message_id) "
+                    "WHERE source_message_id IS NOT NULL"
+                ).format(
+                    index=sql.Identifier(f"{table_name}_source_message_id_uidx"),
+                    table=table,
+                )
             )
             cur.execute(
                 sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS user_name TEXT").format(
@@ -964,6 +1067,7 @@ def insert_chat_message(
                     )
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
                     RETURNING
+                        message_id,
                         user_id,
                         user_name,
                         session_id,
@@ -1081,6 +1185,7 @@ def create_chat_message(
     conversation_id: str,
     question: str,
     user_name: str | None = None,
+    source_message_id: str | None = None,
     table_name: str | None = None,
 ) -> dict[str, Any]:
     """Create the initial chat row before the QA workflow returns an answer."""
@@ -1096,12 +1201,17 @@ def create_chat_message(
                     INSERT INTO {table} (
                         user_id,
                         user_name,
+                        source_message_id,
                         session_id,
                         conversation_id,
                         question
                     )
-                    VALUES (%s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (source_message_id) WHERE source_message_id IS NOT NULL
+                    DO UPDATE SET user_name = COALESCE(EXCLUDED.user_name, {table}.user_name)
                     RETURNING
+                        message_id,
+                        source_message_id,
                         user_id,
                         user_name,
                         session_id,
@@ -1112,7 +1222,14 @@ def create_chat_message(
                         answer
                     """
                 ).format(table=table),
-                (user_id, user_name, session_id, conversation_id, question),
+                (
+                    user_id,
+                    user_name,
+                    source_message_id,
+                    session_id,
+                    conversation_id,
+                    question,
+                ),
             )
             row = cur.fetchone()
 
@@ -1121,6 +1238,7 @@ def create_chat_message(
 
 def update_chat_answer(
     *,
+    message_id: UUID | str | None = None,
     user_id: str,
     session_id: str,
     conversation_id: str,
@@ -1129,16 +1247,45 @@ def update_chat_answer(
     topic_id: UUID | str | None = None,
     table_name: str | None = None,
 ) -> dict[str, Any]:
-    """Attach an answer to the latest matching chat row."""
+    """Attach an answer to one stable chat row.
+
+    ``message_id`` is required by all new call sites. The legacy selector is
+    retained only so old rollback scripts can still complete pre-migration
+    rows; it must not be used for concurrent request processing.
+    """
 
     table_name = table_name or settings.postgres_chat_table
     table = sql.Identifier(table_name)
 
     with postgres_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                sql.SQL(
-                    """
+            if message_id is not None:
+                cur.execute(
+                    sql.SQL(
+                        """
+                    UPDATE {table}
+                    SET answer = CASE WHEN answer = '' THEN %s ELSE answer END,
+                        user_name = COALESCE(%s, user_name),
+                        topic_id = COALESCE(%s::uuid, topic_id)
+                    WHERE message_id = %s
+                    RETURNING
+                        message_id,
+                        user_id,
+                        user_name,
+                        session_id,
+                        conversation_id,
+                        topic_id,
+                        create_time,
+                        question,
+                        answer
+                        """
+                    ).format(table=table),
+                    (answer, user_name, topic_id, message_id),
+                )
+            else:
+                cur.execute(
+                    sql.SQL(
+                        """
                     UPDATE {table}
                     SET answer = %s,
                         user_name = COALESCE(%s, user_name),
@@ -1154,6 +1301,7 @@ def update_chat_answer(
                         LIMIT 1
                     )
                     RETURNING
+                        message_id,
                         user_id,
                         user_name,
                         session_id,
@@ -1162,10 +1310,10 @@ def update_chat_answer(
                         create_time,
                         question,
                         answer
-                    """
-                ).format(table=table),
-                (answer, user_name, topic_id, user_id, session_id, conversation_id),
-            )
+                        """
+                    ).format(table=table),
+                    (answer, user_name, topic_id, user_id, session_id, conversation_id),
+                )
             row = cur.fetchone()
 
     return dict(row or {})
@@ -1376,6 +1524,281 @@ def delete_expired_feishu_answer_feedback_states(*, older_than_seconds: float) -
             return cur.rowcount or 0
 
 
+def ensure_answer_job_tables() -> None:
+    """Create the PostgreSQL-backed Feishu queue and shared rate buckets."""
+
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {FEISHU_ANSWER_JOBS_TABLE} (
+                    job_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    dedupe_key TEXT NOT NULL UNIQUE,
+                    user_id TEXT NOT NULL,
+                    source_session_id TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    max_attempts INTEGER NOT NULL DEFAULT 3,
+                    available_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    leased_at TIMESTAMPTZ,
+                    lease_owner TEXT,
+                    cancel_requested_at TIMESTAMPTZ,
+                    completed_at TIMESTAMPTZ,
+                    last_error TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS feishu_answer_jobs_claim_idx ON {FEISHU_ANSWER_JOBS_TABLE} (status, available_at, created_at)"
+            )
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS feishu_answer_jobs_session_idx ON {FEISHU_ANSWER_JOBS_TABLE} (user_id, source_session_id, status)"
+            )
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {API_RATE_LIMITS_TABLE} (
+                    scope TEXT NOT NULL,
+                    subject_key TEXT NOT NULL,
+                    window_start TIMESTAMPTZ NOT NULL,
+                    request_count INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (scope, subject_key, window_start)
+                )
+                """
+            )
+
+
+def enqueue_feishu_answer_job(
+    *,
+    dedupe_key: str,
+    user_id: str,
+    source_session_id: str,
+    payload: str,
+    max_attempts: int,
+) -> tuple[dict[str, Any], bool]:
+    """Atomically enqueue a message; return ``(row, created)``."""
+
+    ensure_answer_job_tables()
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {FEISHU_ANSWER_JOBS_TABLE}
+                    (dedupe_key, user_id, source_session_id, payload, max_attempts)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (dedupe_key) DO NOTHING
+                RETURNING *
+                """,
+                (dedupe_key, user_id, source_session_id, payload, max(1, max_attempts)),
+            )
+            row = cur.fetchone()
+            if row:
+                return dict(row), True
+            cur.execute(
+                f"SELECT * FROM {FEISHU_ANSWER_JOBS_TABLE} WHERE dedupe_key = %s",
+                (dedupe_key,),
+            )
+            return dict(cur.fetchone() or {}), False
+
+
+def claim_feishu_answer_job(*, lease_owner: str, lease_seconds: int) -> dict[str, Any]:
+    """Lease the oldest runnable job with crash-safe stale-lease recovery."""
+
+    ensure_answer_job_tables()
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE {FEISHU_ANSWER_JOBS_TABLE}
+                SET status = CASE
+                        WHEN cancel_requested_at IS NOT NULL THEN 'cancelled'
+                        WHEN attempts >= max_attempts THEN 'failed'
+                        ELSE 'queued'
+                    END,
+                    completed_at = CASE
+                        WHEN cancel_requested_at IS NOT NULL OR attempts >= max_attempts
+                        THEN CURRENT_TIMESTAMP ELSE completed_at
+                    END,
+                    lease_owner = NULL, leased_at = NULL,
+                    available_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP,
+                    last_error = COALESCE(last_error, 'worker lease expired')
+                WHERE status = 'running'
+                  AND leased_at < CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
+                """,
+                (max(30, lease_seconds),),
+            )
+            cur.execute(
+                f"""
+                WITH candidate AS (
+                    SELECT queued.job_id
+                    FROM {FEISHU_ANSWER_JOBS_TABLE} AS queued
+                    WHERE queued.status = 'queued'
+                      AND queued.attempts < queued.max_attempts
+                      AND queued.available_at <= CURRENT_TIMESTAMP
+                      AND queued.cancel_requested_at IS NULL
+                      AND NOT EXISTS (
+                        SELECT 1 FROM {FEISHU_ANSWER_JOBS_TABLE} AS running
+                        WHERE running.status = 'running'
+                          AND running.user_id = queued.user_id
+                          AND running.source_session_id = queued.source_session_id
+                      )
+                    ORDER BY queued.created_at
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE {FEISHU_ANSWER_JOBS_TABLE} AS jobs
+                SET status = 'running', attempts = attempts + 1,
+                    leased_at = CURRENT_TIMESTAMP, lease_owner = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                FROM candidate
+                WHERE jobs.job_id = candidate.job_id
+                RETURNING jobs.*
+                """,
+                (lease_owner,),
+            )
+            return dict(cur.fetchone() or {})
+
+
+def finish_feishu_answer_job(
+    *, job_id: UUID | str, success: bool, error: str = ""
+) -> dict[str, Any]:
+    """Complete a job or requeue it with bounded exponential backoff."""
+
+    ensure_answer_job_tables()
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            if success:
+                cur.execute(
+                    f"""
+                    UPDATE {FEISHU_ANSWER_JOBS_TABLE}
+                    SET status = CASE WHEN cancel_requested_at IS NULL THEN 'succeeded' ELSE 'cancelled' END,
+                        completed_at = CURRENT_TIMESTAMP, lease_owner = NULL,
+                        leased_at = NULL, last_error = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE job_id = %s RETURNING *
+                    """,
+                    (job_id,),
+                )
+            else:
+                cur.execute(
+                    f"""
+                    UPDATE {FEISHU_ANSWER_JOBS_TABLE}
+                    SET status = CASE
+                            WHEN cancel_requested_at IS NOT NULL THEN 'cancelled'
+                            WHEN attempts >= max_attempts THEN 'failed'
+                            ELSE 'queued'
+                        END,
+                        available_at = CURRENT_TIMESTAMP
+                            + (LEAST(60, POWER(2, GREATEST(attempts - 1, 0))) * INTERVAL '1 second'),
+                        completed_at = CASE
+                            WHEN cancel_requested_at IS NOT NULL OR attempts >= max_attempts
+                            THEN CURRENT_TIMESTAMP ELSE NULL END,
+                        lease_owner = NULL, leased_at = NULL,
+                        last_error = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE job_id = %s RETURNING *
+                    """,
+                    (error[:1000], job_id),
+                )
+            return dict(cur.fetchone() or {})
+
+
+def request_feishu_answer_job_cancel(job_id: UUID | str) -> bool:
+    ensure_answer_job_tables()
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE {FEISHU_ANSWER_JOBS_TABLE}
+                SET cancel_requested_at = COALESCE(cancel_requested_at, CURRENT_TIMESTAMP),
+                    status = CASE WHEN status = 'queued' THEN 'cancelled' ELSE status END,
+                    completed_at = CASE WHEN status = 'queued' THEN CURRENT_TIMESTAMP ELSE completed_at END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = %s AND status IN ('queued', 'running')
+                RETURNING job_id
+                """,
+                (job_id,),
+            )
+            return cur.fetchone() is not None
+
+
+def is_feishu_answer_job_cancelled(job_id: UUID | str) -> bool:
+    ensure_answer_job_tables()
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT cancel_requested_at IS NOT NULL AS cancelled FROM {FEISHU_ANSWER_JOBS_TABLE} WHERE job_id = %s",
+                (job_id,),
+            )
+            row = cur.fetchone() or {}
+            return bool(row.get("cancelled"))
+
+
+def answer_job_metrics() -> dict[str, Any]:
+    ensure_answer_job_tables()
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT status, COUNT(*) AS count
+                FROM {FEISHU_ANSWER_JOBS_TABLE}
+                GROUP BY status
+                """
+            )
+            counts = {str(row["status"]): int(row["count"]) for row in cur.fetchall()}
+            cur.execute(
+                f"SELECT EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - MIN(created_at))) AS oldest_seconds FROM {FEISHU_ANSWER_JOBS_TABLE} WHERE status = 'queued'"
+            )
+            oldest = cur.fetchone() or {}
+    return {"counts": counts, "oldest_queued_seconds": float(oldest.get("oldest_seconds") or 0)}
+
+
+def harness_session_metrics() -> dict[str, int]:
+    ensure_harness_tables()
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT status, COUNT(*) AS count FROM {HARNESS_SESSIONS_TABLE} GROUP BY status"
+            )
+            return {str(row["status"]): int(row["count"]) for row in cur.fetchall()}
+
+
+def consume_rate_limit(
+    *, scope: str, subject_key: str, limit: int, burst: int = 0
+) -> tuple[bool, int, int]:
+    """Consume one shared fixed-minute bucket and return allowed/count/retry."""
+
+    if limit <= 0:
+        return True, 0, 0
+    ensure_answer_job_tables()
+    effective_limit = max(1, limit + max(0, burst))
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {API_RATE_LIMITS_TABLE}
+                    (scope, subject_key, window_start, request_count)
+                VALUES (%s, %s, date_trunc('minute', CURRENT_TIMESTAMP), 1)
+                ON CONFLICT (scope, subject_key, window_start)
+                DO UPDATE SET request_count = {API_RATE_LIMITS_TABLE}.request_count + 1
+                RETURNING request_count,
+                    GREATEST(1, CEIL(EXTRACT(EPOCH FROM
+                        (date_trunc('minute', CURRENT_TIMESTAMP) + INTERVAL '1 minute' - CURRENT_TIMESTAMP))))::int
+                        AS retry_after
+                """,
+                (scope, subject_key),
+            )
+            row = cur.fetchone() or {}
+            count = int(row.get("request_count") or 0)
+            retry_after = int(row.get("retry_after") or 1)
+            if count == 1:
+                cur.execute(
+                    f"DELETE FROM {API_RATE_LIMITS_TABLE} WHERE window_start < CURRENT_TIMESTAMP - INTERVAL '10 minutes'"
+                )
+    return count <= effective_limit, count, retry_after
+
+
 def ensure_harness_tables() -> None:
     """Create the small control-plane tables used by the Harness adapter.
 
@@ -1396,7 +1819,14 @@ def ensure_harness_tables() -> None:
                     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     last_activity_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     archived_at TIMESTAMPTZ,
-                    archive_error TEXT
+                    archive_error TEXT,
+                    context_tokens BIGINT NOT NULL DEFAULT 0,
+                    rollover_requested_at TIMESTAMPTZ,
+                    archive_summary TEXT NOT NULL DEFAULT '',
+                    handoff_summary TEXT NOT NULL DEFAULT '',
+                    handoff_pending BOOLEAN NOT NULL DEFAULT FALSE,
+                    handoff_consumed_at TIMESTAMPTZ,
+                    handoff_source_session_id UUID
                 )
                 """
             )
@@ -1420,6 +1850,16 @@ def ensure_harness_tables() -> None:
             cur.execute(
                 f"ALTER TABLE {HARNESS_MEMORIES_TABLE} ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''"
             )
+            for statement in (
+                f"ALTER TABLE {HARNESS_SESSIONS_TABLE} ADD COLUMN IF NOT EXISTS context_tokens BIGINT NOT NULL DEFAULT 0",
+                f"ALTER TABLE {HARNESS_SESSIONS_TABLE} ADD COLUMN IF NOT EXISTS rollover_requested_at TIMESTAMPTZ",
+                f"ALTER TABLE {HARNESS_SESSIONS_TABLE} ADD COLUMN IF NOT EXISTS archive_summary TEXT NOT NULL DEFAULT ''",
+                f"ALTER TABLE {HARNESS_SESSIONS_TABLE} ADD COLUMN IF NOT EXISTS handoff_summary TEXT NOT NULL DEFAULT ''",
+                f"ALTER TABLE {HARNESS_SESSIONS_TABLE} ADD COLUMN IF NOT EXISTS handoff_pending BOOLEAN NOT NULL DEFAULT FALSE",
+                f"ALTER TABLE {HARNESS_SESSIONS_TABLE} ADD COLUMN IF NOT EXISTS handoff_consumed_at TIMESTAMPTZ",
+                f"ALTER TABLE {HARNESS_SESSIONS_TABLE} ADD COLUMN IF NOT EXISTS handoff_source_session_id UUID",
+            ):
+                cur.execute(statement)
             cur.execute(
                 f"CREATE INDEX IF NOT EXISTS harness_sessions_idle_idx ON {HARNESS_SESSIONS_TABLE} (status, last_activity_at)"
             )
@@ -1435,6 +1875,10 @@ def get_or_create_harness_session(*, user_id: str, source_session_id: str) -> di
     ensure_harness_tables()
     with postgres_connection() as conn:
         with conn.cursor() as cur:
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"harness-session:{user_id}:{source_session_id}",),
+            )
             cur.execute(
                 f"""
                 SELECT * FROM {HARNESS_SESSIONS_TABLE}
@@ -1454,13 +1898,98 @@ def get_or_create_harness_session(*, user_id: str, source_session_id: str) -> di
             harness_id = f"mtsco-{internal_id}"
             cur.execute(
                 f"""
-                INSERT INTO {HARNESS_SESSIONS_TABLE}
-                (internal_session_id, user_id, source_session_id, harness_session_id)
-                VALUES (%s, %s, %s, %s) RETURNING *
+                SELECT internal_session_id, archive_summary, rollover_requested_at
+                FROM {HARNESS_SESSIONS_TABLE}
+                WHERE user_id = %s AND source_session_id = %s
+                ORDER BY created_at DESC
+                LIMIT 1
                 """,
-                (internal_id, user_id, source_session_id, harness_id),
+                (user_id, source_session_id),
+            )
+            previous = cur.fetchone() or {}
+            is_rollover = previous.get("rollover_requested_at") is not None
+            handoff_summary = (
+                str(previous.get("archive_summary") or "")[:8000] if is_rollover else ""
+            )
+            handoff_source_session_id = (
+                previous.get("internal_session_id") if is_rollover else None
+            )
+            cur.execute(
+                f"""
+                INSERT INTO {HARNESS_SESSIONS_TABLE}
+                (internal_session_id, user_id, source_session_id, harness_session_id,
+                 handoff_summary, handoff_pending, handoff_source_session_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING *
+                """,
+                (
+                    internal_id,
+                    user_id,
+                    source_session_id,
+                    harness_id,
+                    handoff_summary,
+                    is_rollover,
+                    handoff_source_session_id,
+                ),
             )
             return dict(cur.fetchone() or {})
+
+
+def update_harness_context_pressure(
+    *, internal_session_id: UUID | str, context_tokens: int, archive_threshold: int
+) -> bool:
+    """Persist provider pressure and request a between-turn rollover once."""
+
+    ensure_harness_tables()
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE {HARNESS_SESSIONS_TABLE}
+                SET context_tokens = GREATEST(context_tokens, %s),
+                    rollover_requested_at = CASE
+                        WHEN %s >= %s THEN COALESCE(rollover_requested_at, CURRENT_TIMESTAMP)
+                        ELSE rollover_requested_at END
+                WHERE internal_session_id = %s AND status = 'active'
+                RETURNING rollover_requested_at IS NOT NULL AS requested
+                """,
+                (max(0, context_tokens), max(0, context_tokens), max(1, archive_threshold), internal_session_id),
+            )
+            row = cur.fetchone() or {}
+            return bool(row.get("requested"))
+
+
+def get_harness_handoff_summary(*, internal_session_id: UUID | str) -> str:
+    ensure_harness_tables()
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT COALESCE(NULLIF(current.handoff_summary, ''), source.archive_summary, '') AS handoff_summary
+                FROM {HARNESS_SESSIONS_TABLE} AS current
+                LEFT JOIN {HARNESS_SESSIONS_TABLE} AS source
+                  ON source.internal_session_id = current.handoff_source_session_id
+                 AND source.status = 'archived'
+                WHERE current.internal_session_id = %s
+                  AND current.handoff_pending = TRUE
+                """,
+                (internal_session_id,),
+            )
+            row = cur.fetchone() or {}
+            return str(row.get("handoff_summary") or "")
+
+
+def mark_harness_handoff_consumed(*, internal_session_id: UUID | str) -> None:
+    ensure_harness_tables()
+    with postgres_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE {HARNESS_SESSIONS_TABLE}
+                SET handoff_pending = FALSE, handoff_consumed_at = CURRENT_TIMESTAMP
+                WHERE internal_session_id = %s AND handoff_pending = TRUE
+                """,
+                (internal_session_id,),
+            )
 
 
 def list_harness_chat_turns(*, internal_session_id: UUID | str, limit: int = 32) -> list[dict[str, Any]]:
@@ -1495,7 +2024,13 @@ def list_expired_harness_sessions(*, idle_seconds: int, limit: int = 100) -> lis
                 f"""
                 SELECT * FROM {HARNESS_SESSIONS_TABLE}
                 WHERE status = 'active'
-                  AND last_activity_at < CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
+                  AND (
+                    (
+                      rollover_requested_at < CURRENT_TIMESTAMP - INTERVAL '30 seconds'
+                      AND last_activity_at < CURRENT_TIMESTAMP - INTERVAL '30 seconds'
+                    )
+                    OR last_activity_at < CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
+                  )
                 ORDER BY last_activity_at
                 LIMIT %s FOR UPDATE SKIP LOCKED
                 """,
@@ -1521,7 +2056,9 @@ def list_live_harness_session_ids() -> set[str]:
             return {str(row["internal_session_id"]) for row in cur.fetchall()}
 
 
-def complete_harness_archive(*, internal_session_id: UUID | str, error: str = "") -> None:
+def complete_harness_archive(
+    *, internal_session_id: UUID | str, error: str = "", summary: str = ""
+) -> None:
     ensure_harness_tables()
     status = "active" if error else "archived"
     with postgres_connection() as conn:
@@ -1529,9 +2066,10 @@ def complete_harness_archive(*, internal_session_id: UUID | str, error: str = ""
             cur.execute(
                 f"""UPDATE {HARNESS_SESSIONS_TABLE}
                 SET status = %s, archived_at = CASE WHEN %s = '' THEN CURRENT_TIMESTAMP ELSE NULL END,
-                    archive_error = NULLIF(%s, '')
+                    archive_error = NULLIF(%s, ''),
+                    archive_summary = CASE WHEN %s = '' THEN archive_summary ELSE %s END
                 WHERE internal_session_id = %s""",
-                (status, error, error, internal_session_id),
+                (status, error, error, summary, summary[:8000], internal_session_id),
             )
 
 

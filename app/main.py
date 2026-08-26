@@ -1,12 +1,21 @@
+import asyncio
 import logging
 import time
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import PlainTextResponse
 
 from app.api.v1.feishu import router as feishu_router
 from app.api.v1.router import router as api_v1_router
 from app.core.config import settings
+from app.db.postgres import (
+    answer_job_metrics,
+    check_postgres_health,
+    harness_session_metrics,
+)
+from app.services.metrics import observe_http, render_prometheus
+from app.services.harness import close_local_harnesses
 from app.services.retrieval import get_retrieval_service
 
 logger = logging.getLogger(__name__)
@@ -24,6 +33,12 @@ async def log_requests(request: Request, call_next):
     start = time.perf_counter()
     response = await call_next(request)
     duration_ms = (time.perf_counter() - start) * 1000
+    observe_http(
+        method=request.method,
+        path=request.url.path,
+        status=response.status_code,
+        duration_seconds=duration_ms / 1000,
+    )
     logger.info(
         "%s %s -> %s %.1fms",
         request.method,
@@ -42,6 +57,13 @@ def warmup_retrieval_models() -> None:
     get_retrieval_service().warmup_models()
 
 
+@app.on_event("shutdown")
+def shutdown_harness_runtimes() -> None:
+    closed = close_local_harnesses()
+    if closed:
+        logger.info("Closed %s local Harness runtime(s)", closed)
+
+
 @app.get("/")
 def read_root() -> dict[str, str]:
     return {
@@ -54,6 +76,32 @@ def read_root() -> dict[str, str]:
 @app.get("/health")
 def health_check() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/health/ready")
+async def readiness_check() -> dict[str, object]:
+    try:
+        postgres = await asyncio.to_thread(check_postgres_health)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="postgres is unavailable") from exc
+    return {
+        "status": "ready",
+        "postgres": {
+            "database": postgres.get("database"),
+            "schema": postgres.get("schema"),
+        },
+        "harness_enabled": settings.harness_enabled,
+        "durable_queue_enabled": settings.feishu_durable_queue_enabled,
+    }
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+async def prometheus_metrics() -> str:
+    jobs, sessions = await asyncio.gather(
+        asyncio.to_thread(answer_job_metrics),
+        asyncio.to_thread(harness_session_metrics),
+    )
+    return render_prometheus(answer_jobs=jobs, harness_sessions=sessions)
 
 
 async def proxy_dev_request(path: str, request: Request) -> Response:

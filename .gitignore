@@ -65,3 +65,4 @@ node_modules/
 # Local editable-development checkout.  Server installation keeps this source
 # outside the project repository at DHS_REPO instead.
 deepseek-harness/
+evals/results/

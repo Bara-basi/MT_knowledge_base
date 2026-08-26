@@ -7,6 +7,7 @@ cutoff is honoured even when no new Feishu message arrives.
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 import time
 from datetime import datetime
@@ -20,6 +21,7 @@ from app.db.postgres import (
     insert_harness_memory,
     list_expired_harness_sessions,
     list_live_harness_session_ids,
+    postgres_advisory_lock,
     postgres_connection,
 )
 from app.services.privacy import decrypt_chat_text
@@ -28,6 +30,19 @@ from app.services.llm import LLMClient, LLMSettings
 
 _SUMMARY_SOURCE_MAX_CHARS = 60_000
 _SUMMARY_MAX_CHARS = 8_000
+_SUMMARY_CHUNK_CHARS = 45_000
+_SUMMARY_MAX_CHUNKS = 10
+
+
+def _session_lock_key(internal_session_id: str) -> int:
+    return int.from_bytes(
+        hashlib.blake2b(
+            f"harness-session:{internal_session_id}".encode("utf-8"),
+            digest_size=8,
+        ).digest(),
+        "big",
+        signed=True,
+    )
 
 
 def _turns(user_id: str, session_id: str) -> list[dict[str, str]]:
@@ -80,12 +95,48 @@ def _summary_payload(turns: list[dict[str, str]]) -> tuple[str, list[str], str]:
                 read_timeout=settings.harness_timeout,
             )
         )
-        summary = client.chat(
-            [{"role": "user", "content": prompt + source}],
-            model=settings.harness_memory_summary_model,
-            temperature=0.1,
-            max_tokens=settings.harness_memory_summary_max_tokens,
-        )[:_SUMMARY_MAX_CHARS]
+        if len(transcript) <= _SUMMARY_SOURCE_MAX_CHARS:
+            summary = client.chat(
+                [{"role": "user", "content": prompt + source}],
+                model=settings.harness_memory_summary_model,
+                temperature=0.1,
+                max_tokens=settings.harness_memory_summary_max_tokens,
+            )[:_SUMMARY_MAX_CHARS]
+        else:
+            chunks = [
+                transcript[index:index + _SUMMARY_CHUNK_CHARS]
+                for index in range(0, len(transcript), _SUMMARY_CHUNK_CHARS)
+            ][:_SUMMARY_MAX_CHUNKS]
+            partials = []
+            for index, chunk in enumerate(chunks, start=1):
+                partials.append(
+                    client.chat(
+                        [{
+                            "role": "user",
+                            "content": (
+                                prompt
+                                + f"\n这是第 {index}/{len(chunks)} 段，只总结本段事实：\n"
+                                + chunk
+                            ),
+                        }],
+                        model=settings.harness_memory_summary_model,
+                        temperature=0.1,
+                        max_tokens=settings.harness_memory_summary_max_tokens,
+                    )[:2_500]
+                )
+            summary = client.chat(
+                [{
+                    "role": "user",
+                    "content": (
+                        prompt
+                        + "\n以下是按时间顺序生成的分段摘要，请合并、去重并保留前后因果：\n"
+                        + "\n\n".join(partials)
+                    ),
+                }],
+                model=settings.harness_memory_summary_model,
+                temperature=0.1,
+                max_tokens=settings.harness_memory_summary_max_tokens,
+            )[:_SUMMARY_MAX_CHARS]
     except Exception as exc:  # archiving must not depend on model availability
         print(f"[Harness memory scheduler] summary model failed: {type(exc).__name__}: {exc}", flush=True)
         return "历史对话", [], _fallback_summary(turns)
@@ -142,53 +193,57 @@ def archive_once() -> int:
         flush=True,
     )
     for session in expired_sessions:
-        try:
-            print(
-                "[Harness memory scheduler] "
-                f"archiving session {session['internal_session_id']} for user {session['user_id']}",
-                flush=True,
-            )
-            turns = _turns(session["user_id"], str(session["internal_session_id"]))
-            topic, keywords, summary = _summary_payload(turns)
-            day = datetime.now().strftime("%Y-%m-%d")
-            object_name = f"{session['user_id']}/{session['internal_session_id']}/{day} 完整对话.md"
-            bucket = ensure_bucket(settings.harness_memory_bucket)
-            markdown = f"# 完整对话记录\n\n{json.dumps({'turns': turns}, ensure_ascii=False, indent=2)}\n".encode("utf-8")
-            get_minio_client().put_object(bucket, object_name, data=__import__("io").BytesIO(markdown), length=len(markdown), content_type="text/markdown; charset=utf-8")
-            uri = build_minio_uri(bucket, object_name)
-            insert_harness_memory(
-                user_id=session["user_id"],
-                internal_session_id=session["internal_session_id"],
-                topic=topic,
-                keywords=keywords,
-                object_uri=uri,
-                summary=summary,
-                started_at=session["created_at"],
-                ended_at=session["last_activity_at"],
-            )
-            complete_harness_archive(internal_session_id=session["internal_session_id"])
-            deleted_logs = _delete_archived_session_log(str(session["internal_session_id"]))
-            from app.services.harness_attachments import delete_session_attachments
+        with postgres_advisory_lock(_session_lock_key(str(session["internal_session_id"]))):
+            try:
+                print(
+                    "[Harness memory scheduler] "
+                    f"archiving session {session['internal_session_id']} for user {session['user_id']}",
+                    flush=True,
+                )
+                turns = _turns(session["user_id"], str(session["internal_session_id"]))
+                topic, keywords, summary = _summary_payload(turns)
+                day = datetime.now().strftime("%Y-%m-%d")
+                object_name = f"{session['user_id']}/{session['internal_session_id']}/{day} 完整对话.md"
+                bucket = ensure_bucket(settings.harness_memory_bucket)
+                markdown = f"# 完整对话记录\n\n{json.dumps({'turns': turns}, ensure_ascii=False, indent=2)}\n".encode("utf-8")
+                get_minio_client().put_object(bucket, object_name, data=__import__("io").BytesIO(markdown), length=len(markdown), content_type="text/markdown; charset=utf-8")
+                uri = build_minio_uri(bucket, object_name)
+                insert_harness_memory(
+                    user_id=session["user_id"],
+                    internal_session_id=session["internal_session_id"],
+                    topic=topic,
+                    keywords=keywords,
+                    object_uri=uri,
+                    summary=summary,
+                    started_at=session["created_at"],
+                    ended_at=session["last_activity_at"],
+                )
+                complete_harness_archive(
+                    internal_session_id=session["internal_session_id"],
+                    summary=summary,
+                )
+                deleted_logs = _delete_archived_session_log(str(session["internal_session_id"]))
+                from app.services.harness_attachments import delete_session_attachments
 
-            deleted_attachments = delete_session_attachments(
-                user_id=str(session["user_id"]),
-                internal_session_id=str(session["internal_session_id"]),
-            )
-            count += 1
-            print(
-                "[Harness memory scheduler] "
-                f"archive succeeded: {len(turns)} turn(s); summary model: {settings.harness_memory_summary_model}; file: {uri}; "
-                f"metadata row: harness_memories; local JSONL directory deleted: {deleted_logs == 1}; "
-                f"temporary attachments deleted: {deleted_attachments == 1}",
-                flush=True,
-            )
-        except Exception as exc:  # keep it eligible for a later watchdog retry
-            complete_harness_archive(internal_session_id=session["internal_session_id"], error=str(exc)[:1000])
-            print(
-                "[Harness memory scheduler] "
-                f"archive failed for session {session['internal_session_id']}: {exc}",
-                flush=True,
-            )
+                deleted_attachments = delete_session_attachments(
+                    user_id=str(session["user_id"]),
+                    internal_session_id=str(session["internal_session_id"]),
+                )
+                count += 1
+                print(
+                    "[Harness memory scheduler] "
+                    f"archive succeeded: {len(turns)} turn(s); summary model: {settings.harness_memory_summary_model}; file: {uri}; "
+                    f"metadata row: harness_memories; local JSONL directory deleted: {deleted_logs == 1}; "
+                    f"temporary attachments deleted: {deleted_attachments == 1}",
+                    flush=True,
+                )
+            except Exception as exc:  # keep it eligible for a later watchdog retry
+                complete_harness_archive(internal_session_id=session["internal_session_id"], error=str(exc)[:1000])
+                print(
+                    "[Harness memory scheduler] "
+                    f"archive failed for session {session['internal_session_id']}: {exc}",
+                    flush=True,
+                )
     print(f"[Harness memory scheduler] cycle finished: {count} archive(s) succeeded.", flush=True)
     return count
 

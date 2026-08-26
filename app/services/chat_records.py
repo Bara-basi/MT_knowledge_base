@@ -28,6 +28,7 @@ async def create_chat_record(
     conversation_id: str | None,
     question: str,
     user_name: str | None = None,
+    source_message_id: str | None = None,
 ) -> dict[str, Any]:
     """Persist the initial user question before the answer is available."""
 
@@ -40,6 +41,7 @@ async def create_chat_record(
         _create_chat_record_sync,
         user_id=ids["user_id"],
         user_name=normalize_optional_text(user_name),
+        source_message_id=normalize_optional_text(source_message_id),
         session_id=ids["session_id"],
         conversation_id=ids["conversation_id"],
         question=question,
@@ -48,6 +50,7 @@ async def create_chat_record(
 
 async def record_chat_answer(
     *,
+    message_id: str | None = None,
     user_id: str | None,
     session_id: str | None,
     conversation_id: str | None,
@@ -65,6 +68,7 @@ async def record_chat_answer(
     )
     return await asyncio.to_thread(
         _record_chat_answer_sync,
+        message_id=message_id,
         user_id=ids["user_id"],
         user_name=normalize_optional_text(user_name),
         session_id=ids["session_id"],
@@ -98,6 +102,7 @@ def _create_chat_record_sync(
     *,
     user_id: str,
     user_name: str | None,
+    source_message_id: str | None,
     session_id: str,
     conversation_id: str,
     question: str,
@@ -106,6 +111,7 @@ def _create_chat_record_sync(
     return create_chat_message(
         user_id=user_id,
         user_name=user_name,
+        source_message_id=source_message_id,
         session_id=session_id,
         conversation_id=conversation_id,
         question=encrypt_chat_text(question),
@@ -114,6 +120,7 @@ def _create_chat_record_sync(
 
 def _record_chat_answer_sync(
     *,
+    message_id: str | None,
     user_id: str,
     user_name: str | None,
     session_id: str,
@@ -124,6 +131,7 @@ def _record_chat_answer_sync(
 ) -> dict[str, Any]:
     ensure_chat_messages_table()
     row = update_chat_answer(
+        message_id=message_id,
         user_id=user_id,
         user_name=user_name,
         session_id=session_id,

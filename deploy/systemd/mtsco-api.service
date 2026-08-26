@@ -1,0 +1,22 @@
+[Unit]
+Description=MTSCO Knowledge Base API
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mtsco
+Group=mtsco
+WorkingDirectory=/opt/mtsco-knowledge-base
+EnvironmentFile=/opt/mtsco-knowledge-base/.env
+EnvironmentFile=-/opt/mtsco-knowledge-base/.env.host
+Environment=DHS_REPO=/opt/mtsco/deepseek-harness
+ExecStart=/opt/mtsco-knowledge-base/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 2 --timeout-keep-alive 30
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

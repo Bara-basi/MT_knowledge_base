@@ -1,0 +1,195 @@
+diff --git a/packages/fs/fs-local/src/index.ts b/packages/fs/fs-local/src/index.ts
+index 661ef236b8..ef405598eb 100644
+--- a/packages/fs/fs-local/src/index.ts
++++ b/packages/fs/fs-local/src/index.ts
+@@ -41,6 +41,8 @@ import type { FsIoInternals } from './fsio.ts'
+ export interface Config {
+   /** Base directory for relative paths. Defaults to `process.cwd()`. */
+   cwd?: string
++  /** Reject every resolved path outside ``cwd`` after canonicalization. */
++  rooted?: boolean
+   /**
+    * Exclusive UTF-8 byte limit on each overwrite-diff side, capped by the
+    * runtime's safe allocation/decode maximum. Defaults to 10 MiB.
+@@ -64,6 +66,7 @@ const MAX_DIFF_BASIS_BYTES = Math.min(
+ export class LocalFileSystem extends FileSystem {
+   static Config: z<Config> = z.object({
+     cwd: z.string().default(process.cwd()),
++    rooted: z.boolean().default(false),
+     diffBasisMaxBytes: z.number().default(DEFAULT_DIFF_BASIS_MAX_BYTES),
+   })
+ 
+@@ -106,6 +109,14 @@ export class LocalFileSystem extends FileSystem {
+   override async resolve(path: string, opts?: { cwd?: string; signal?: AbortSignal }): Promise<FsTarget> {
+     if (opts?.signal?.aborted) throw new FsError('resolve aborted', 'FS_ABORTED')
+     const local = await resolveLocalTarget(opts?.cwd ?? this.config.cwd, path)
++    if (this.config.rooted) {
++      const root = await resolveLocalTarget(this.config.cwd, '.')
++      const rel = relative(String(root.targetKey), String(local.targetKey))
++      const contained = rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
++      if (!contained) {
++        throw new FsError(`cannot access "${local.displayPath}": path is outside the configured root`, 'FS_SANDBOX_DENIED')
++      }
++    }
+     if (opts?.signal?.aborted) throw new FsError('resolve aborted', 'FS_ABORTED')
+     return { targetKey: local.targetKey, displayPath: local.displayPath }
+   }
+@@ -134,6 +145,7 @@ export class LocalFileSystem extends FileSystem {
+   override async lstat(path: string, opts?: { cwd?: string }, signal?: AbortSignal): Promise<FsPathInfo | undefined> {
+     if (signal?.aborted) throw new FsError('lstat aborted', 'FS_ABORTED')
+     if (path.trim().length === 0) throw new FsError('file_path must be a non-empty string', 'FS_NOT_FOUND')
++    if (this.config.rooted) await this.resolve(path, opts)
+     const info = await probeNoFollow(resolve(opts?.cwd ?? this.config.cwd, path))
+     if (signal?.aborted) throw new FsError('lstat aborted', 'FS_ABORTED')
+     if (!info) return undefined
+diff --git a/packages/fs/tool-fs-search/src/glob.ts b/packages/fs/tool-fs-search/src/glob.ts
+index 871dc16ae8..0ff120d33e 100644
+--- a/packages/fs/tool-fs-search/src/glob.ts
++++ b/packages/fs/tool-fs-search/src/glob.ts
+@@ -39,6 +39,8 @@ export const GLOB_VCS_EXCLUDES: readonly string[] = ['.git', '.svn', '.hg', '.bz
+ 
+ /** Resolved glob-tool caps — plugin config after defaulting (see `Config` in index.ts). */
+ export interface GlobToolCaps {
++  /** Constrain the explicit search path to the session workspace. */
++  rooted?: boolean
+   /** Whether over-cap pages are sampled across top-level entries instead of taking the modification-time head. */
+   sampleOverCapGlobResults: boolean
+   /** Max paths retained inline; later paths go to the formatted spill file. */
+@@ -341,7 +343,7 @@ export function applyGlobTool(ctx: Context, caps: GlobToolCaps): void {
+     },
+     async execute(args, exec) {
+       const input = parseGlobArgs(args)
+-      const run = await runRipgrep(ctx, exec, 'glob', buildGlobCommand(input), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes)
++      const run = await runRipgrep(ctx, exec, 'glob', buildGlobCommand(input), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes, caps.rooted ?? false, input.path)
+       const root = input.path === undefined ? '.' : toWorkdirRelative(input.path, run.workdir)
+       if (run.noMatches) return { root, paths: [] }
+ 
+diff --git a/packages/fs/tool-fs-search/src/grep.ts b/packages/fs/tool-fs-search/src/grep.ts
+index 38f54aa2a5..969e918ea5 100644
+--- a/packages/fs/tool-fs-search/src/grep.ts
++++ b/packages/fs/tool-fs-search/src/grep.ts
+@@ -37,6 +37,8 @@ export const GREP_MAX_LINE_BYTES = 2000
+ 
+ /** Resolved grep-tool caps — plugin config after defaulting (see `Config` in index.ts). */
+ export interface GrepToolCaps {
++  /** Constrain the explicit search path to the session workspace. */
++  rooted?: boolean
+   /** Max flat matches retained inline; later matches go to the formatted spill file. */
+   maxMatches: number
+   /** Max bytes retained per matched-line preview. */
+@@ -319,7 +321,7 @@ export function applyGrepTool(ctx: Context, caps: GrepToolCaps): void {
+     },
+     async execute(args, exec) {
+       const input = parseGrepArgs(args)
+-      const run = await runRipgrep(ctx, exec, 'grep', buildGrepCommand(input), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes)
++      const run = await runRipgrep(ctx, exec, 'grep', buildGrepCommand(input), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes, caps.rooted ?? false, input.path)
+       if (run.noMatches) return { matches: [] }
+ 
+       const all: GrepMatch[] = []
+diff --git a/packages/fs/tool-fs-search/src/index.ts b/packages/fs/tool-fs-search/src/index.ts
+index 1765d1b781..a61fcc8442 100644
+--- a/packages/fs/tool-fs-search/src/index.ts
++++ b/packages/fs/tool-fs-search/src/index.ts
+@@ -71,6 +71,8 @@ export const inject = ['tools', 'systemPrompt', 'subprocess']
+ 
+ /** Plugin config; over-cap glob sampling is an explicit deployment choice and the remaining fields have defaults. */
+ export interface Config {
++  /** Reject explicit glob/grep paths outside the session workspace. */
++  rooted?: boolean
+   /** Whether an over-cap `glob` page is sampled across top-level entries instead of taking the modification-time head. */
+   sampleOverCapGlobResults: boolean
+   /** Max paths one `glob` call retains inline; later paths go to the formatted spill file. */
+@@ -95,6 +97,7 @@ export interface Config {
+ }
+ 
+ export const Config: z<Config> = z.object({
++  rooted: z.boolean().default(false),
+   sampleOverCapGlobResults: z.boolean().required(),
+   globMaxResults: z.number().default(GLOB_MAX_RESULTS),
+   grepMaxMatches: z.number().default(GREP_MAX_MATCHES),
+@@ -140,6 +143,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
+   assertPositiveInteger('stderrMaxBytes', resolved.stderrMaxBytes)
+   assertPositiveInteger('timeoutMs', resolved.timeoutMs)
+   applyGlobTool(ctx, {
++    rooted: resolved.rooted,
+     sampleOverCapGlobResults: resolved.sampleOverCapGlobResults,
+     maxResults: resolved.globMaxResults,
+     maxMetaBytes: resolved.searchMetaMaxBytes,
+@@ -149,6 +153,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
+     timeoutMs: resolved.timeoutMs,
+   })
+   applyGrepTool(ctx, {
++    rooted: resolved.rooted,
+     maxMatches: resolved.grepMaxMatches,
+     maxLineBytes: resolved.grepMaxLineBytes,
+     maxMetaBytes: resolved.searchMetaMaxBytes,
+diff --git a/packages/fs/tool-fs-search/src/search-core.ts b/packages/fs/tool-fs-search/src/search-core.ts
+index 1dddb99373..293b4ef036 100644
+--- a/packages/fs/tool-fs-search/src/search-core.ts
++++ b/packages/fs/tool-fs-search/src/search-core.ts
+@@ -19,7 +19,8 @@
+  * @module @deepseek-ai/dsh-tool-fs-search/search-core
+  */
+ 
+-import { isAbsolute, relative, sep } from 'node:path'
++import { realpath } from 'node:fs/promises'
++import { isAbsolute, relative, resolve, sep } from 'node:path'
+ import type { Context } from '@deepseek-ai/cordis'
+ import { HarnessError } from '@deepseek-ai/dsh-llm'
+ import { ItemRetainer, TextRetainer } from '@deepseek-ai/dsh-output-retention'
+@@ -216,12 +217,23 @@ export async function runRipgrep(
+   rawOutputMaxBytes: number,
+   graceMs: number,
+   stderrMaxBytes: number,
++  rooted = false,
++  requestedPath?: string,
+ ): Promise<RipgrepRun> {
+   if (exec.signal.aborted) {
+     throw new SearchError(`${toolName} was aborted before completion (tool timeout or caller cancellation)`, 'SEARCH_ABORTED')
+   }
+   const cwd = exec.agent?.session.header.cwd
+   const workdir = cwd ?? process.cwd()
++  if (rooted) {
++    const canonicalRoot = await realpath(workdir)
++    const lexicalTarget = resolve(workdir, requestedPath ?? '.')
++    const canonicalTarget = await realpath(lexicalTarget).catch(() => lexicalTarget)
++    const rel = relative(canonicalRoot, canonicalTarget)
++    if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
++      throw new SearchError(`${toolName} path is outside the configured workspace`, 'SEARCH_FAILED')
++    }
++  }
+   let handle: SubprocessHandle
+   try {
+     handle = ctx.subprocess.spawn({
+diff --git a/packages/fs/tool-fs/src/index.ts b/packages/fs/tool-fs/src/index.ts
+index cfbec13cda..89bb057586 100644
+--- a/packages/fs/tool-fs/src/index.ts
++++ b/packages/fs/tool-fs/src/index.ts
+@@ -23,6 +23,8 @@ export const inject = ['tools', 'fs', 'systemPrompt']
+ 
+ /** Plugin config (all optional — `Config` supplies the defaults). */
+ export interface Config {
++  /** Register only read/read_image; never expose mutation tools to the model. */
++  readOnly?: boolean
+   /** Default and maximum number of lines returned by one `read` call. */
+   readLimit?: number
+   /** Maximum characters returned for a single line before truncation. */
+@@ -34,6 +36,7 @@ export interface Config {
+ }
+ 
+ export const Config: z<Config> = z.object({
++  readOnly: z.boolean().default(false),
+   readLimit: z.number().default(READ_LIMIT),
+   readMaxLineLength: z.number().default(READ_MAX_LINE_LENGTH),
+   readMaxBytes: z.number().default(READ_MAX_BYTES),
+@@ -76,3 +79,5 @@ export function apply(ctx: Context, config: Config): void {
+-  const sandbox = new FsSandboxController(ctx)
+-  applyWriteTool(ctx, sandbox)
+-  applyEditTool(ctx, sandbox)
++  // Fail closed when an older loader omits a newly-added config field.
++  if (resolved.readOnly === false) {
++    const sandbox = new FsSandboxController(ctx)
++    applyWriteTool(ctx, sandbox)
++    applyEditTool(ctx, sandbox)
++  }
+ }

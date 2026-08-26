@@ -9,6 +9,8 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import ValidationError
 
 from app.api.v1.query import ask_knowledge_base
+from app.core.config import settings
+from app.db.postgres import consume_rate_limit
 from app.schemas.external import (
     ExternalQueryRequest,
     ExternalQueryResponse,
@@ -44,6 +46,7 @@ async def query_external_knowledge_base(
 ) -> ExternalQueryResponse:
     """Run the standard QA workflow with isolated external history storage."""
 
+    await _enforce_external_rate_limit(request.service_id)
     response = await _execute_external_query(
         request,
         additional_system_prompt=(
@@ -90,6 +93,7 @@ async def score_external_quote(
 ) -> QuoteScoreResponse:
     """Score quote text or an uploaded Excel workbook through the QA workflow."""
 
+    await _enforce_external_rate_limit(service_id)
     try:
         request = ExternalQueryRequest(
             question=question,
@@ -223,3 +227,20 @@ def _plain_quote_input(question: str) -> str:
         ensure_ascii=False,
         separators=(",", ":"),
     )
+
+
+async def _enforce_external_rate_limit(service_id: str) -> None:
+    if not settings.shared_rate_limit_enabled:
+        return
+    allowed, _count, retry_after = await asyncio.to_thread(
+        consume_rate_limit,
+        scope="external-service",
+        subject_key=service_id,
+        limit=settings.external_rate_limit_per_minute,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded; retry shortly.",
+            headers={"Retry-After": str(retry_after)},
+        )

@@ -237,6 +237,12 @@ class Settings:
         os.getenv("HARNESS_MEMORY_SUMMARY_MAX_TOKENS", "1200")
     )
     harness_scheduler_interval_seconds: int = int(os.getenv("HARNESS_SCHEDULER_INTERVAL_SECONDS", "300"))
+    harness_context_archive_tokens: int = int(
+        os.getenv("HARNESS_CONTEXT_ARCHIVE_TOKENS", "90000")
+    )
+    # Zero keeps the developer process unconstrained. Production pins this to
+    # two so every API/worker process shares the same PostgreSQL-backed budget.
+    harness_global_concurrency: int = int(os.getenv("HARNESS_GLOBAL_CONCURRENCY", "0"))
     harness_attachment_root: str = os.getenv(
         "HARNESS_ATTACHMENT_ROOT", "data/harness_attachments"
     )
@@ -250,6 +256,23 @@ class Settings:
         "HARNESS_ATTACHMENT_API_TOKEN", ""
     ).strip()
 
+    feishu_durable_queue_enabled: bool = _env_bool(
+        "FEISHU_DURABLE_QUEUE_ENABLED", False
+    )
+    answer_worker_concurrency: int = int(os.getenv("ANSWER_WORKER_CONCURRENCY", "1"))
+    answer_worker_poll_seconds: float = float(os.getenv("ANSWER_WORKER_POLL_SECONDS", "1"))
+    answer_job_lease_seconds: int = int(os.getenv("ANSWER_JOB_LEASE_SECONDS", "900"))
+    answer_job_max_attempts: int = int(os.getenv("ANSWER_JOB_MAX_ATTEMPTS", "3"))
+
+    feishu_rate_limit_per_minute: int = int(
+        os.getenv("FEISHU_RATE_LIMIT_PER_MINUTE", "10")
+    )
+    feishu_rate_limit_burst: int = int(os.getenv("FEISHU_RATE_LIMIT_BURST", "3"))
+    external_rate_limit_per_minute: int = int(
+        os.getenv("EXTERNAL_RATE_LIMIT_PER_MINUTE", "60")
+    )
+    shared_rate_limit_enabled: bool = _env_bool("SHARED_RATE_LIMIT_ENABLED", False)
+
     feishu_app_id: str = _get_first_env("FEISHU_APP_ID", "LARK_APP_ID")
     feishu_app_secret: str = _get_first_env("FEISHU_APP_SECRET", "LARK_APP_SECRET")
     feishu_verification_token: str = _get_first_env(
@@ -259,6 +282,10 @@ class Settings:
     feishu_base_url: str = os.getenv("FEISHU_BASE_URL", "https://open.feishu.cn").rstrip("/")
     feishu_timeout: float = float(os.getenv("FEISHU_TIMEOUT", "30"))
     feishu_trust_env: bool = _env_bool("FEISHU_TRUST_ENV", False)
+    feishu_connect_retries: int = max(
+        0,
+        int(os.getenv("FEISHU_CONNECT_RETRIES", "2")),
+    )
     feishu_feedback_form_url: str = os.getenv(
         "FEISHU_FEEDBACK_FORM_URL",
         "https://tmqhw1h9zt.feishu.cn/wiki/LbjCwUPA6iUbF5k2SFbcowT8nne",

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
+import subprocess
 import time
 import uuid
 from datetime import datetime, timezone
@@ -13,9 +15,13 @@ from typing import Any
 from app.core.config import settings
 
 
-DOCUMENT_SUFFIXES = {".docx", ".xlsx", ".pptx", ".pdf"}
+MODERN_DOCUMENT_SUFFIXES = {".docx", ".xlsx", ".pptx", ".pdf"}
+LEGACY_DOCUMENT_SUFFIXES = {".doc", ".xls", ".ppt"}
+DOCUMENT_SUFFIXES = MODERN_DOCUMENT_SUFFIXES | LEGACY_DOCUMENT_SUFFIXES
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 SUPPORTED_SUFFIXES = DOCUMENT_SUFFIXES | IMAGE_SUFFIXES
+_LEGACY_TARGET_SUFFIX = {".doc": ".docx", ".xls": ".xlsx", ".ppt": ".pptx"}
+_LIBREOFFICE_TIMEOUT_SECONDS = 180
 _CHUNK_CHARS = 3_000
 _CHUNK_OVERLAP = 200
 _MAX_READ_CHARS = 12_000
@@ -101,14 +107,21 @@ def parse_attachment(
         raise ValueError("附件原文件不存在或不唯一")
     source_path = candidates[0]
     try:
-        if source_path.suffix.lower() in DOCUMENT_SUFFIXES:
+        parse_path = _normalize_legacy_document(directory, source_path)
+        if parse_path != source_path:
+            manifest.update(
+                normalized_filename=parse_path.name,
+                normalized_from=source_path.suffix.lower(),
+            )
+            _write_json(directory / "manifest.json", manifest)
+        if parse_path.suffix.lower() in MODERN_DOCUMENT_SUFFIXES:
             from app.services.parser.parser import parse_document
 
-            items = parse_document(source_path, source="model")
+            items = parse_document(parse_path, source="model")
         else:
             from app.services.parser.img_parser import parse_image_file
 
-            items = parse_image_file(source_path)
+            items = parse_image_file(parse_path)
         text = _items_to_model_text(items)
         chunks = _chunk_text(text)
         _write_json(directory / "chunks.json", chunks)
@@ -298,6 +311,7 @@ def _public_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         for key in (
             "attachment_id", "filename", "content_type", "size", "source", "status",
             "created_at", "parsed_at", "item_count", "chunk_count", "text_chars", "error",
+            "normalized_filename", "normalized_from",
         )
         if manifest.get(key) is not None
     }
@@ -310,3 +324,142 @@ def _read_json(path: Path) -> Any:
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _normalize_legacy_document(directory: Path, source_path: Path) -> Path:
+    """Upgrade a legacy Office binary to OOXML without Microsoft Office."""
+
+    suffix = source_path.suffix.lower()
+    target_suffix = _LEGACY_TARGET_SUFFIX.get(suffix)
+    if target_suffix is None:
+        return source_path
+
+    normalized_dir = directory / "normalized"
+    normalized_dir.mkdir(parents=True, exist_ok=True)
+    target_path = normalized_dir / f"{source_path.stem}{target_suffix}"
+    if target_path.is_file() and target_path.stat().st_size > 0:
+        return target_path
+
+    if suffix == ".xls":
+        _convert_xls_to_xlsx(source_path, target_path)
+    else:
+        _convert_with_libreoffice(source_path, target_path)
+    if not target_path.is_file() or target_path.stat().st_size <= 0:
+        raise RuntimeError(f"旧版文档转换失败：未生成 {target_path.name}")
+    return target_path
+
+
+def _convert_xls_to_xlsx(source_path: Path, target_path: Path) -> None:
+    """Convert BIFF .xls cell data to .xlsx with xlrd and openpyxl."""
+
+    import xlrd
+    from openpyxl import Workbook
+
+    try:
+        source_book = xlrd.open_workbook(str(source_path), on_demand=True)
+    except Exception as exc:
+        raise ValueError(f"无法读取旧版 Excel 文件：{source_path.name}") from exc
+
+    target_book = Workbook()
+    target_book.remove(target_book.active)
+    used_titles: set[str] = set()
+    try:
+        for sheet_index, source_sheet in enumerate(source_book.sheets(), start=1):
+            title = _safe_excel_sheet_title(source_sheet.name, sheet_index, used_titles)
+            target_sheet = target_book.create_sheet(title)
+            for row_index in range(source_sheet.nrows):
+                for column_index in range(source_sheet.ncols):
+                    cell = source_sheet.cell(row_index, column_index)
+                    value = _legacy_xls_cell_value(cell, source_book.datemode, xlrd)
+                    if value is not None:
+                        target_sheet.cell(row=row_index + 1, column=column_index + 1, value=value)
+            for row_low, row_high, column_low, column_high in source_sheet.merged_cells:
+                if row_high > row_low and column_high > column_low:
+                    target_sheet.merge_cells(
+                        start_row=row_low + 1,
+                        end_row=row_high,
+                        start_column=column_low + 1,
+                        end_column=column_high,
+                    )
+        if not target_book.worksheets:
+            target_book.create_sheet("Sheet1")
+        temporary_path = target_path.with_suffix(target_path.suffix + ".tmp")
+        target_book.save(temporary_path)
+        os.replace(temporary_path, target_path)
+    finally:
+        target_book.close()
+        source_book.release_resources()
+
+
+def _legacy_xls_cell_value(cell: Any, datemode: int, xlrd_module: Any) -> Any:
+    if cell.ctype in {xlrd_module.XL_CELL_EMPTY, xlrd_module.XL_CELL_BLANK}:
+        return None
+    if cell.ctype == xlrd_module.XL_CELL_DATE:
+        return xlrd_module.xldate_as_datetime(cell.value, datemode)
+    if cell.ctype == xlrd_module.XL_CELL_BOOLEAN:
+        return bool(cell.value)
+    if cell.ctype == xlrd_module.XL_CELL_ERROR:
+        return xlrd_module.biffh.error_text_from_code.get(
+            cell.value,
+            f"#ERROR:{cell.value}",
+        )
+    if cell.ctype == xlrd_module.XL_CELL_NUMBER:
+        number = float(cell.value)
+        return int(number) if number.is_integer() else number
+    return str(cell.value) if cell.value is not None else None
+
+
+def _safe_excel_sheet_title(name: Any, index: int, used_titles: set[str]) -> str:
+    base = re.sub(r"[\\/*?:\[\]]", "_", str(name or "").strip())[:31]
+    base = base or f"Sheet{index}"
+    candidate = base
+    suffix_index = 2
+    while candidate.casefold() in used_titles:
+        suffix = f"_{suffix_index}"
+        candidate = f"{base[:31 - len(suffix)]}{suffix}"
+        suffix_index += 1
+    used_titles.add(candidate.casefold())
+    return candidate
+
+
+def _convert_with_libreoffice(source_path: Path, target_path: Path) -> None:
+    """Convert .doc/.ppt using LibreOffice headless, never MS Office COM."""
+
+    configured = os.getenv("LIBREOFFICE_BIN", "").strip()
+    executable = configured or shutil.which("libreoffice") or shutil.which("soffice")
+    if not executable:
+        raise RuntimeError(
+            f"解析 {source_path.suffix.lower()} 需要服务器安装 LibreOffice headless，"
+            "或设置 LIBREOFFICE_BIN；不会调用 Microsoft Office"
+        )
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    # LibreOffice otherwise shares a global user profile and concurrent
+    # attachment conversions can attach to the wrong process or produce no
+    # output.  One isolated profile per conversion is deterministic.
+    profile_dir = target_path.parent / f".lo-profile-{uuid.uuid4().hex}"
+    profile_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        result = subprocess.run(
+            [
+                executable,
+                f"-env:UserInstallation={profile_dir.resolve().as_uri()}",
+                "--headless",
+                "--convert-to",
+                target_path.suffix.lstrip("."),
+                "--outdir",
+                str(target_path.parent),
+                str(source_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_LIBREOFFICE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    finally:
+        shutil.rmtree(profile_dir, ignore_errors=True)
+    generated = target_path.parent / f"{source_path.stem}{target_path.suffix}"
+    if result.returncode != 0 or not generated.is_file():
+        detail = (result.stderr or result.stdout or "unknown conversion error").strip()
+        raise RuntimeError(f"LibreOffice 转换失败：{detail[:500]}")
+    if generated.resolve() != target_path.resolve():
+        os.replace(generated, target_path)

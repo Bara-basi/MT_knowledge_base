@@ -120,8 +120,17 @@ def _extract_document_items(document: Any, context: ParseContext) -> list[dict[s
 
 
 def _clean_document_items(items: list[dict[str, str]]) -> list[dict[str, str]]:
-    cleaned = _remove_reference_sections(items)
-    cleaned = _remove_source_link_lines(cleaned)
+    # References and source-link sections are evidence in a knowledge base.
+    # Normalize them like ordinary content instead of deleting whole sections.
+    cleaned: list[dict[str, str]] = []
+    for item in items:
+        normalized = dict(item)
+        text = normalized.get("text", "")
+        if text:
+            normalized["text"] = _clean_text(text).strip()
+            if not normalized["text"] and normalized.get("type") != "image":
+                continue
+        cleaned.append(normalized)
     cleaned = _remove_empty_heading_sections(cleaned)
     return cleaned
 

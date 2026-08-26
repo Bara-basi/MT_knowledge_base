@@ -31,5 +31,8 @@ async def ask_knowledge_base(
         user_id=request.user_id,
         source_session_id=request.session_id,
         on_progress=on_progress,
+        additional_system_prompt=request.additional_system_prompt,
+        task_input=request.task_input,
+        metadata=request.metadata,
     )
     return QueryResponse(question=request.question, answer=answer, topic_id=None)

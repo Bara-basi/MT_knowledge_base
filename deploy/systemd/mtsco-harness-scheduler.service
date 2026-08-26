@@ -1,0 +1,21 @@
+[Unit]
+Description=MTSCO Harness Context Archive Scheduler
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mtsco
+Group=mtsco
+WorkingDirectory=/opt/mtsco-knowledge-base
+EnvironmentFile=/opt/mtsco-knowledge-base/.env
+EnvironmentFile=-/opt/mtsco-knowledge-base/.env.host
+ExecStart=/opt/mtsco-knowledge-base/.venv/bin/python -m app.workers.harness_scheduler
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -31,6 +31,8 @@ from app.db.postgres import (
     delete_expired_feishu_answer_feedback_states,
     get_feishu_answer_feedback_state,
     insert_feishu_answer_feedback_state,
+    is_feishu_answer_job_cancelled,
+    request_feishu_answer_job_cancel,
     update_feishu_answer_feedback_selection,
 )
 from app.schemas.query import QueryRequest
@@ -42,6 +44,46 @@ from app.services.privacy import decrypt_chat_text, encrypt_chat_text
 
 router = APIRouter(prefix="/feishu", tags=["feishu"])
 logger = logging.getLogger(__name__)
+
+
+async def _feishu_request(
+    method: str,
+    url: str,
+    *,
+    operation: str,
+    **kwargs: Any,
+) -> httpx.Response:
+    """Retry only failures known to happen before a request is sent."""
+
+    retries = settings.feishu_connect_retries
+    timeout = httpx.Timeout(settings.feishu_timeout)
+    for attempt in range(retries + 1):
+        try:
+            async with httpx.AsyncClient(
+                timeout=timeout,
+                trust_env=settings.feishu_trust_env,
+            ) as client:
+                return await client.request(method, url, **kwargs)
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+            # Never retry read timeouts for message creation: Feishu may have
+            # accepted the request already, which could produce duplicate cards.
+            if attempt >= retries:
+                raise
+            delay = min(0.5 * (2**attempt), 2.0)
+            _warn(
+                "Feishu connection failed; retrying",
+                operation=operation,
+                error_type=type(exc).__name__,
+                attempt=attempt + 1,
+                max_attempts=retries + 1,
+                retry_in_seconds=delay,
+            )
+            await asyncio.sleep(delay)
+
+
+def _httpx_error_detail(exc: httpx.HTTPError) -> str:
+    message = str(exc).strip()
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
 
 
 class _FeishuAttachmentDownloadError(RuntimeError):
@@ -96,6 +138,8 @@ _internal_detail_pattern = re.compile(
 )
 _feedback_interval_seconds = 1.5
 _comfort_feedback_interval_seconds = 60.0
+_harness_progress_max_lines = 6
+_harness_progress_max_chars = 1_200
 _feedback_texts_cache: list[str] | None = None
 _local_to_lark_mapping_dir = Path("data") / "metadata" / "local2lark_mapping"
 _local_to_lark_mapping_cache: dict[str, str] | None = None
@@ -275,12 +319,14 @@ async def handle_feishu_events(
             )
         return {"ok": True, "ignored": True, "reason": "unsupported_or_empty_message"}
 
-    background_tasks.add_task(
-        _answer_feishu_message,
+    sender_id = _extract_sender_id(event.get("sender") or {})
+    sender_id_type = _extract_sender_id_type(event.get("sender") or {})
+    sender_name = _extract_sender_name(event.get("sender") or {})
+    job_payload = dict(
         question=question,
-        sender_id=_extract_sender_id(event.get("sender") or {}),
-        sender_id_type=_extract_sender_id_type(event.get("sender") or {}),
-        sender_name=_extract_sender_name(event.get("sender") or {}),
+        sender_id=sender_id,
+        sender_id_type=sender_id_type,
+        sender_name=sender_name,
         chat_id=message.get("chat_id"),
         message_id=message_id,
         event_id=event_id,
@@ -288,6 +334,7 @@ async def handle_feishu_events(
         dedupe_key=dedupe_key,
         attachments=attachments,
     )
+    background_tasks.add_task(_answer_feishu_message, **job_payload)
     _debug(
         "background task queued",
         event_id=event_id,
@@ -331,6 +378,7 @@ def _handle_feishu_drive_file_edit_event(payload: dict[str, Any]) -> dict[str, A
 
 async def _answer_feishu_message(
     *,
+    job_id: str | None = None,
     question: str,
     sender_id: str | None = None,
     sender_id_type: str | None = None,
@@ -356,6 +404,7 @@ async def _answer_feishu_message(
         question=question,
         chat_id=chat_id,
         message_id=message_id,
+        cancel_id=job_id,
     )
     feedback_handle_task = _schedule_initial_feishu_feedback(
         question=question,
@@ -419,14 +468,17 @@ async def _answer_feishu_message(
                 "请向用户简要说明该原因；不要声称已经看过附件。"
             )[:8_000]
 
+    chat_message_id: str | None = None
     try:
-        await create_chat_record(
+        chat_row = await create_chat_record(
             user_id=sender_id,
             user_name=sender_name,
             session_id=internal_session_id,
             conversation_id=internal_session_id,
             question=question,
+            source_message_id=message_id,
         )
+        chat_message_id = str(chat_row.get("message_id") or "") or None
         _debug(
             "chat record created",
             event_id=event_id,
@@ -540,7 +592,12 @@ async def _answer_feishu_message(
             )
             await _stop_feishu_feedback_loop(feedback_handle)
             _discard_feishu_answer_cancel_state(cancel_id)
-            return
+            # A Harness/UI status is not a user answer.  Returning here made
+            # durable jobs succeed while their chat answer stayed empty.
+            raise HTTPException(
+                status_code=502,
+                detail="Harness returned a status message without a final answer",
+            )
 
         if _is_feishu_answer_cancelled(cancel_id):
             _debug(
@@ -562,6 +619,7 @@ async def _answer_feishu_message(
 
         try:
             await record_chat_answer(
+                message_id=chat_message_id,
                 user_id=sender_id,
                 user_name=sender_name,
                 session_id=internal_session_id,
@@ -596,6 +654,11 @@ async def _answer_feishu_message(
         feedback_handle = await _resolve_initial_feishu_feedback(feedback_handle_task, wait=False)
         await _stop_feishu_feedback_loop(feedback_handle)
         _discard_feishu_answer_cancel_state(cancel_id)
+        if job_id:
+            # Let the durable worker return the lease to PostgreSQL. Legacy
+            # in-process BackgroundTasks keep their historical swallow/cancel
+            # behaviour because there is no queue owner to retry them.
+            raise
         return
     except HTTPException as exc:
         detail = _detail_to_text(exc.detail)
@@ -632,6 +695,10 @@ async def _answer_feishu_message(
                 markdown_text=failed_text,
             )
         _discard_feishu_answer_cancel_state(cancel_id)
+        if job_id:
+            # A durable job must be returned to PostgreSQL for retry instead
+            # of being recorded as successful after a Harness/API failure.
+            raise
         return
 
     await close_harness_progress()
@@ -683,6 +750,8 @@ async def _answer_feishu_message(
         sent=sent,
     )
     _discard_feishu_answer_cancel_state(cancel_id)
+    if job_id and not sent:
+        raise RuntimeError("Failed to deliver the final Feishu answer")
 
 
 def _schedule_initial_feishu_feedback(
@@ -1345,6 +1414,7 @@ async def _append_harness_progress(state: _FeishuFeedbackState, update: Any) -> 
         state.harness_active_tool_counts[label] = state.harness_active_tool_counts.get(label, 0) + 1
         line = _format_harness_tool_wave_line(state)
         _replace_harness_tool_wave_line(state, line)
+        _trim_harness_progress_window(state)
         return await _update_feishu_feedback_card(state)
     elif kind == "tool_end":
         active_count = state.harness_active_tool_counts.get(label, 0)
@@ -1354,6 +1424,7 @@ async def _append_harness_progress(state: _FeishuFeedbackState, update: Any) -> 
             state.harness_active_tool_counts.pop(label, None)
         state.harness_tool_counts[label] = state.harness_tool_counts.get(label, 0) + 1
         _replace_harness_tool_wave_line(state, _format_harness_tool_wave_line(state))
+        _trim_harness_progress_window(state)
         return await _update_feishu_feedback_card(state)
     elif kind == "text":
         _close_harness_tool_wave(state)
@@ -1368,7 +1439,7 @@ async def _append_harness_progress(state: _FeishuFeedbackState, update: Any) -> 
         text = _clean_harness_feedback_text(text)
         if not text:
             return False
-        line = f"✦ {text}"
+        line = f"✦ {text[:240]}"
     else:
         return False
 
@@ -1378,16 +1449,31 @@ async def _append_harness_progress(state: _FeishuFeedbackState, update: Any) -> 
     if state.progress_lines and state.progress_lines[-1] == line:
         return False
     state.progress_lines.append(line)
-    # Preserve a compact, readable card even on tool-heavy requests.
-    overflow = max(0, len(state.progress_lines) - 12)
-    if overflow:
-        del state.progress_lines[:overflow]
-        if state.harness_group_line_index is not None:
-            state.harness_group_line_index -= overflow
-            if state.harness_group_line_index < 0:
-                state.harness_group_line_index = None
-                state.harness_active_tool_counts.clear()
+    _trim_harness_progress_window(state)
     return await _update_feishu_feedback_card(state)
+
+
+def _trim_harness_progress_window(state: _FeishuFeedbackState) -> None:
+    """Keep only the newest bounded progress lines and repair the wave index."""
+
+    removed = 0
+    while len(state.progress_lines) > _harness_progress_max_lines:
+        state.progress_lines.pop(0)
+        removed += 1
+    while (
+        len(state.progress_lines) > 1
+        and sum(len(line) + 1 for line in state.progress_lines)
+        > _harness_progress_max_chars
+    ):
+        state.progress_lines.pop(0)
+        removed += 1
+    if state.progress_lines and len(state.progress_lines[0]) > _harness_progress_max_chars:
+        state.progress_lines[0] = state.progress_lines[0][-_harness_progress_max_chars:]
+    if removed and state.harness_group_line_index is not None:
+        state.harness_group_line_index -= removed
+        if state.harness_group_line_index < 0:
+            state.harness_group_line_index = None
+            state.harness_active_tool_counts.clear()
 
 
 def _replace_harness_tool_wave_line(state: _FeishuFeedbackState, line: str) -> None:
@@ -1439,6 +1525,9 @@ def _clean_harness_feedback_text(text: str) -> str:
     # show those backslashes literally, so flatten presentation-only syntax.
     cleaned = re.sub(r"\\([\\`*_{}\[\]()#+\-.!|])", r"\1", cleaned)
     cleaned = re.sub(r"(`+|\*{1,3}|_{1,3}|~{2})", "", cleaned)
+    # Never let streamed assistant text create Markdown tables in a progress
+    # card.  Tables belong only in the final answer and are flattened there.
+    cleaned = cleaned.replace("|", "｜")
     cleaned = _redact_internal_details(cleaned)
     return re.sub(r"\s+", " ", cleaned).strip()
 
@@ -1768,9 +1857,10 @@ def _register_feishu_answer_cancel_state(
     question: str,
     chat_id: str | None,
     message_id: str | None,
+    cancel_id: str | None = None,
 ) -> str:
     _cleanup_feishu_answer_cancel_states()
-    cancel_id = uuid.uuid4().hex
+    cancel_id = cancel_id or uuid.uuid4().hex
     _feishu_answer_cancel_states[cancel_id] = _FeishuAnswerCancelState(
         cancel_id=cancel_id,
         started_at=time.monotonic(),
@@ -1859,7 +1949,14 @@ def _is_feishu_answer_cancelled(cancel_id: str | None) -> bool:
     if not cancel_id:
         return False
     cancel_state = _feishu_answer_cancel_states.get(cancel_id)
-    return bool(cancel_state and cancel_state.canceled_at is not None)
+    if cancel_state and cancel_state.canceled_at is not None:
+        return True
+    if settings.feishu_durable_queue_enabled:
+        try:
+            return is_feishu_answer_job_cancelled(cancel_id)
+        except Exception as exc:  # noqa: BLE001 - cancellation polling is best effort.
+            _warn("durable cancellation check failed", cancel_id=cancel_id, error=str(exc))
+    return False
 
 
 def _is_feishu_card_action_event(event_type: Any, payload: dict[str, Any]) -> bool:
@@ -2050,9 +2147,18 @@ async def _select_feishu_answer_feedback(
 
 async def _cancel_feishu_answer(cancel_id: str) -> bool:
     cancel_state = _feishu_answer_cancel_states.get(cancel_id)
+    durable_cancelled = False
+    if settings.feishu_durable_queue_enabled:
+        try:
+            durable_cancelled = await asyncio.to_thread(
+                request_feishu_answer_job_cancel,
+                cancel_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - local cancellation may still work.
+            _warn("durable answer cancel failed", cancel_id=cancel_id, error=str(exc))
     if not cancel_state:
         _debug("answer cancel ignored", reason="missing_cancel_state", cancel_id=cancel_id)
-        return False
+        return durable_cancelled
 
     if cancel_state.canceled_at is None:
         cancel_state.canceled_at = time.monotonic()
@@ -2743,7 +2849,6 @@ async def _send_feishu_markdown_message_to_receive_id(
         return None
 
     token = await _get_tenant_access_token()
-    timeout = httpx.Timeout(settings.feishu_timeout)
     url = f"{settings.feishu_base_url}/open-apis/im/v1/messages"
     content = await _build_feishu_card_content(
         markdown_text,
@@ -2763,25 +2868,26 @@ async def _send_feishu_markdown_message_to_receive_id(
     _debug("markdown send api request", **fields)
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                url,
-                params={"receive_id_type": receive_id_type},
-                headers={"Authorization": f"Bearer {token}"},
-                json={
-                    "receive_id": receive_id,
-                    "msg_type": "interactive",
-                    "content": content,
-                },
-            )
-            _debug(
-                "markdown send api response",
-                receive_id=receive_id,
-                receive_id_type=receive_id_type,
-                http_status=response.status_code,
-                body_preview=_preview(response.text),
-            )
-            response.raise_for_status()
+        response = await _feishu_request(
+            "POST",
+            url,
+            operation="markdown_send",
+            params={"receive_id_type": receive_id_type},
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "receive_id": receive_id,
+                "msg_type": "interactive",
+                "content": content,
+            },
+        )
+        _debug(
+            "markdown send api response",
+            receive_id=receive_id,
+            receive_id_type=receive_id_type,
+            http_status=response.status_code,
+            body_preview=_preview(response.text),
+        )
+        response.raise_for_status()
     except httpx.TimeoutException as exc:
         raise HTTPException(status_code=504, detail="Feishu markdown send API timed out") from exc
     except httpx.HTTPStatusError as exc:
@@ -2793,7 +2899,7 @@ async def _send_feishu_markdown_message_to_receive_id(
     except httpx.RequestError as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to call Feishu markdown send API: {exc}",
+            detail=f"Failed to call Feishu markdown send API: {_httpx_error_detail(exc)}",
         ) from exc
 
     result = response.json()
@@ -2833,7 +2939,6 @@ async def _send_feishu_markdown_reply(
         return None
 
     token = await _get_tenant_access_token()
-    timeout = httpx.Timeout(settings.feishu_timeout)
     url = f"{settings.feishu_base_url}/open-apis/im/v1/messages/{message_id}/reply"
     content = await _build_feishu_card_content(
         markdown_text,
@@ -2849,22 +2954,23 @@ async def _send_feishu_markdown_reply(
     _debug("markdown reply api request", **fields)
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                url,
-                headers={"Authorization": f"Bearer {token}"},
-                json={
-                    "msg_type": "interactive",
-                    "content": content,
-                },
-            )
-            _debug(
-                "markdown reply api response",
-                message_id=message_id,
-                http_status=response.status_code,
-                body_preview=_preview(response.text),
-            )
-            response.raise_for_status()
+        response = await _feishu_request(
+            "POST",
+            url,
+            operation="markdown_reply",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "msg_type": "interactive",
+                "content": content,
+            },
+        )
+        _debug(
+            "markdown reply api response",
+            message_id=message_id,
+            http_status=response.status_code,
+            body_preview=_preview(response.text),
+        )
+        response.raise_for_status()
     except httpx.TimeoutException as exc:
         raise HTTPException(status_code=504, detail="Feishu markdown reply API timed out") from exc
     except httpx.HTTPStatusError as exc:
@@ -2876,7 +2982,7 @@ async def _send_feishu_markdown_reply(
     except httpx.RequestError as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to call Feishu markdown reply API: {exc}",
+            detail=f"Failed to call Feishu markdown reply API: {_httpx_error_detail(exc)}",
         ) from exc
 
     result = response.json()
@@ -3002,6 +3108,10 @@ async def _build_feishu_card_content(
 ) -> str:
     markdown_text, reference_sources = _rewrite_reference_links(markdown_text)
     markdown_text = _render_latex_for_feishu(markdown_text)
+    # Feishu cards impose a low table-count limit.  Render every Markdown
+    # table as ordinary numbered text so table-heavy knowledge answers remain
+    # deliverable without dropping their cells.
+    markdown_text = _normalize_card_markdown(markdown_text)
     elements = await _build_feishu_card_elements(markdown_text, token)
     if reference_sources:
         elements.append(_build_reference_sources_panel(reference_sources))
@@ -3334,9 +3444,16 @@ def _flush_markdown_buffer(elements: list[dict[str, Any]], buffer: list[str]) ->
 
 
 def _build_markdown_element(markdown: str) -> dict[str, str]:
+    content = markdown.strip() or " "
+    # Feishu's card Markdown renderer can leave the final strong span
+    # unrendered when its closing ** is also the last bytes of the element.
+    # A zero-width text terminator keeps the delimiter away from the element
+    # boundary without changing the visible answer or copied wording.
+    if content.endswith("**"):
+        content += "\u200b"
     return {
         "tag": "markdown",
-        "content": markdown.strip() or " ",
+        "content": content,
         "text_align": "left",
         "text_size": "normal_v2",
     }
@@ -3900,7 +4017,8 @@ def _find_markdown_table_end(lines: list[str], start_index: int) -> int | None:
 
 
 def _looks_like_markdown_table_row(line: str) -> bool:
-    return line.startswith("|") and line.endswith("|") and line.count("|") >= 2
+    stripped = line.strip()
+    return bool(stripped) and stripped.count("|") >= 1 and len(_split_markdown_table_row(stripped)) >= 2
 
 
 def _is_markdown_table_separator(line: str) -> bool:
@@ -4102,7 +4220,6 @@ async def _get_tenant_access_token() -> str:
         _debug("tenant token cache hit")
         return _tenant_access_token
 
-    timeout = httpx.Timeout(settings.feishu_timeout)
     url = f"{settings.feishu_base_url}/open-apis/auth/v3/tenant_access_token/internal"
     _debug(
         "tenant token request",
@@ -4112,20 +4229,21 @@ async def _get_tenant_access_token() -> str:
     )
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                url,
-                json={
-                    "app_id": settings.feishu_app_id,
-                    "app_secret": settings.feishu_app_secret,
-                },
-            )
-            _debug(
-                "tenant token response",
-                http_status=response.status_code,
-                has_token=_response_has_tenant_token(response),
-            )
-            response.raise_for_status()
+        response = await _feishu_request(
+            "POST",
+            url,
+            operation="tenant_token",
+            json={
+                "app_id": settings.feishu_app_id,
+                "app_secret": settings.feishu_app_secret,
+            },
+        )
+        _debug(
+            "tenant token response",
+            http_status=response.status_code,
+            has_token=_response_has_tenant_token(response),
+        )
+        response.raise_for_status()
     except httpx.TimeoutException as exc:
         raise HTTPException(status_code=504, detail="Feishu token API timed out") from exc
     except httpx.HTTPStatusError as exc:
@@ -4137,7 +4255,7 @@ async def _get_tenant_access_token() -> str:
     except httpx.RequestError as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to call Feishu token API: {exc}",
+            detail=f"Failed to call Feishu token API: {_httpx_error_detail(exc)}",
         ) from exc
 
     result = response.json()

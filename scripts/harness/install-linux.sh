@@ -16,13 +16,20 @@ if [[ ! -d "$HARNESS_DIR/.git" ]]; then
 fi
 git -C "$HARNESS_DIR" fetch --depth 1 origin "$HARNESS_REF" || true
 git -C "$HARNESS_DIR" checkout --detach "$HARNESS_REF"
-PATCH_FILE="$PROJECT_ROOT/app/harness/patches/dsh-sdk-jsonrpc-session-resume.patch"
-if git -C "$HARNESS_DIR" apply --recount --check "$PATCH_FILE"; then
-  git -C "$HARNESS_DIR" apply --recount "$PATCH_FILE"
-elif ! git -C "$HARNESS_DIR" apply --recount --reverse --check "$PATCH_FILE"; then
-  echo "Harness session-resume patch does not match the pinned source revision." >&2
-  exit 1
-fi
+for PATCH_FILE in \
+  "$PROJECT_ROOT/app/harness/patches/dsh-sdk-jsonrpc-session-resume.patch" \
+  "$PROJECT_ROOT/app/harness/patches/rooted-readonly-fs.patch"; do
+  if git -C "$HARNESS_DIR" apply --recount --check "$PATCH_FILE"; then
+    git -C "$HARNESS_DIR" apply --recount "$PATCH_FILE"
+  elif [[ "$(basename "$PATCH_FILE")" == "rooted-readonly-fs.patch" ]] \
+    && grep -q "rooted: z.boolean().default(false)" "$HARNESS_DIR/packages/fs/fs-local/src/index.ts" \
+    && grep -q "readOnly: z.boolean().default(false)" "$HARNESS_DIR/packages/fs/tool-fs/src/index.ts"; then
+    : # already applied; reverse checking multi-file generated patches is brittle on Windows line endings
+  elif ! git -C "$HARNESS_DIR" apply --recount --reverse --check "$PATCH_FILE"; then
+    echo "Harness patch does not match the pinned source revision: $PATCH_FILE" >&2
+    exit 1
+  fi
+done
 corepack enable
 ( cd "$HARNESS_DIR" && pnpm install --frozen-lockfile && pnpm run build )
 
@@ -33,7 +40,7 @@ fi
 
 mkdir -p "$PROJECT_ROOT/app/harness/node_modules/@deepseek-ai"
 for pair in \
-  'dsh-sdk-jsonrpc-server:packages/sdk/server' 'dsh-llm-pi-ai:packages/llm/llm-pi-ai' \
+  'dsh-sdk-jsonrpc-server:packages/sdk/server' 'dsh-llm-pi-ai:packages/llm/llm-pi-ai' 'dsh-llm-retry:packages/llm/llm-retry' \
   'dsh-agent-spine-demo:packages/examples/agent-spine-demo' 'dsh-subprocess-local:packages/subprocess/subprocess-local' \
   'dsh-fs-local:packages/fs/fs-local' 'dsh-fs-observation-policy:packages/fs/fs-observation-policy' \
   'dsh-tool-fs:packages/fs/tool-fs' 'dsh-tool-fs-search:packages/fs/tool-fs-search' \

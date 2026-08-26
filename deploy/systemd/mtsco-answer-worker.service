@@ -1,0 +1,23 @@
+[Unit]
+Description=MTSCO Durable Feishu Answer Worker
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mtsco
+Group=mtsco
+WorkingDirectory=/opt/mtsco-knowledge-base
+EnvironmentFile=/opt/mtsco-knowledge-base/.env
+EnvironmentFile=-/opt/mtsco-knowledge-base/.env.host
+Environment=DHS_REPO=/opt/mtsco/deepseek-harness
+Environment=FEISHU_DURABLE_QUEUE_ENABLED=true
+ExecStart=/opt/mtsco-knowledge-base/.venv/bin/python -m app.workers.answer_worker
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

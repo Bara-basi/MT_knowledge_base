@@ -38,7 +38,6 @@ REPEATED_HASH_DISTANCE = 8
 POSITION_TOLERANCE = 0.04
 SIZE_TOLERANCE = 0.06
 ROW_TOP_TOLERANCE_EMU = 260_000
-FRONT_MATTER_SLIDE_LIMIT = 5
 TITLE_STYLE = "标题 1"
 PAGE_HEADING_STYLE = "标题 2"
 
@@ -103,16 +102,8 @@ def parse_powerpoint_document(
 
 def _extract_slides(presentation: Presentation, context: ParseContext) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
-    last_slide_index = len(presentation.slides)
 
     for slide_index, slide in enumerate(presentation.slides, start=1):
-        if slide_index == last_slide_index:
-            _log(f"skip last slide: {slide_index}")
-            continue
-        if _slide_has_video(slide):
-            _log(f"skip video slide: {slide_index}")
-            continue
-
         slide_width = int(presentation.slide_width)
         slide_height = int(presentation.slide_height)
         elements: list[dict[str, Any]] = []
@@ -139,14 +130,6 @@ def _iter_shapes(shapes: Iterable[Any]) -> Iterable[Any]:
             yield from _iter_shapes(shape.shapes)
         else:
             yield shape
-
-
-def _slide_has_video(slide: Any) -> bool:
-    for shape in _iter_shapes(slide.shapes):
-        shape_type = getattr(shape, "shape_type", None)
-        if shape_type in {MSO_SHAPE_TYPE.MEDIA, MSO_SHAPE_TYPE.WEB_VIDEO}:
-            return True
-    return False
 
 
 def _extract_picture(
@@ -245,7 +228,9 @@ def _extract_table_text_items(shape: Any, slide_index: int, shape_order: int) ->
             rows.append(values)
     if not rows:
         return []
-    text = "\n".join(" | ".join(value for value in row if value) for row in rows)
+    # Keep empty cells so column positions remain stable for downstream table
+    # reasoning. A blank value is data, not a reason to shift later columns.
+    text = "\n".join(" | ".join(row) for row in rows)
     return [
         {
             "type": "paragraph",
@@ -292,24 +277,20 @@ def _build_items(slides: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for info in slide_infos
         if _looks_like_title_slide(info, title_cutoff)
     }
-    catalog_slide_indexes = {
-        int(info["slide_index"])
-        for info in slide_infos
-        if _looks_like_catalog_slide(info, title_cutoff)
-    }
     output: list[dict[str, Any]] = []
     page_number = 1
 
     for slide in slides:
         slide_index = int(slide["slide_index"])
-        if slide_index in catalog_slide_indexes:
-            _log(f"skip catalog slide: {slide_index}")
-            continue
-
         if slide_index in title_slide_indexes:
             title_item = _merged_title_item(slide)
             if title_item is not None:
                 output.append(title_item)
+            output.extend(
+                dict(element)
+                for element in slide["elements"]
+                if element.get("type") != "paragraph"
+            )
             page_number = 1
             continue
 
@@ -327,8 +308,6 @@ def _build_items(slides: list[dict[str, Any]]) -> list[dict[str, Any]]:
             page_number += 1
 
         for element in slide["elements"]:
-            if slide_index == 1 and element.get("type") == "image":
-                continue
             item = dict(element)
             output.append(item)
 
@@ -374,18 +353,6 @@ def _looks_like_title_slide(info: dict[str, Any], font_cutoff: float) -> bool:
     if not compact or len(compact) >= MAX_TITLE_PAGE_CHARS:
         return False
     if any(keyword.lower() in text.lower() for keyword in CATALOG_KEYWORDS):
-        return False
-    if float(info.get("max_font_size") or 0) < font_cutoff:
-        return False
-    return bool(TITLE_KEYWORD_PATTERN.search(text))
-
-
-def _looks_like_catalog_slide(info: dict[str, Any], font_cutoff: float) -> bool:
-    slide_index = int(info.get("slide_index") or 0)
-    if slide_index > FRONT_MATTER_SLIDE_LIMIT:
-        return False
-    text = str(info.get("text") or "").strip()
-    if not any(keyword.lower() in text.lower() for keyword in CATALOG_KEYWORDS):
         return False
     if float(info.get("max_font_size") or 0) < font_cutoff:
         return False
