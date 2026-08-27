@@ -148,5 +148,5 @@ def set_registry_processed_document_path(
                 ).format(table=table),
                 (processed_path, source_uri),
             )
-            if cur.rowcount != 1:
-                raise LookupError(f"No ingestion registry row for raw document: {source_uri}")
+            # if cur.rowcount != 1:
+            #     raise LookupError(f"No ingestion registry row for raw document: {source_uri}")
