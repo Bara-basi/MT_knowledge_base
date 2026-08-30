@@ -23,6 +23,7 @@ env/
 !.env.example
 !.env.prod.example
 !.env.dev.example
+!.env.host.example
 *.pem
 *.key
 *.crt

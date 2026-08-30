@@ -89,7 +89,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile init ru
 
 ### Linux 服务器
 
-生产环境采用“Docker Compose 承载 PostgreSQL、MinIO、Milvus、Neo4j；宿主机承载 FastAPI、Harness、回答 Worker 和封存调度器”的方式。当前 Harness 依赖固定源码版本及项目补丁，这种拆分最容易升级和排障。
+生产环境采用“Docker Compose 承载 PostgreSQL、MinIO、Milvus、Neo4j；宿主机承载 FastAPI、Harness 和封存调度器”的方式。当前 Harness 依赖固定源码版本及项目补丁，这种拆分最容易升级和排障。
 
 ```bash
 git clone <REPOSITORY_URL> /opt/mtsco-knowledge-base
