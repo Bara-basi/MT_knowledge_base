@@ -184,6 +184,9 @@ def test_quote_scoring_prompt_uses_visible_precision_and_material_terms() -> Non
     assert "不是要求逐项寻找理由扣分" in QUOTE_SCORING_PROMPT
     assert "就不能判断与这些外部基准不一致" in QUOTE_SCORING_PROMPT
     assert "绝不输出扣分为 0" in QUOTE_SCORING_PROMPT
+    assert "报价单价×报价数量=报价合计" in QUOTE_SCORING_PROMPT
+    assert "不能把公斤价直接填入以米或支为单位" in QUOTE_SCORING_PROMPT
+    assert "只汇总管件、漏掉钢管" in QUOTE_SCORING_PROMPT
 
 
 def test_quote_score_finalizer_uses_json_mode_and_recalculates_scores() -> None:
@@ -213,8 +216,11 @@ def test_quote_score_finalizer_uses_json_mode_and_recalculates_scores() -> None:
     )
     payload = json.loads(finalized)
 
-    assert captured["extra_body"] == {"response_format": {"type": "json_object"}}
-    assert captured["max_tokens"] == 32_768
+    assert captured["extra_body"] == {
+        "response_format": {"type": "json_object"},
+        "enable_thinking": False,
+    }
+    assert captured["max_tokens"] == 4_096
     assert captured["temperature"] == 0
     assert "必须亲自核对" in captured["messages"][0]["content"]
     assert "草稿可能错误" in captured["messages"][1]["content"]
@@ -257,9 +263,10 @@ def test_quote_formula_audit_context_adds_headers_and_row_values() -> None:
 
     audit = json.loads(_quote_formula_audit_context(task_input))
 
-    assert audit[0]["cell"] == "S12"
-    assert audit[0]["header"] == "支数"
-    context = {item["cell"]: item for item in audit[0]["row_context"]}
+    assert audit[0]["row"] == 12
+    assert audit[0]["formulas"][0]["cell"] == "S12"
+    assert audit[0]["formulas"][0]["header"] == "支数"
+    context = {item["cell"]: item for item in audit[0]["cells"]}
     assert context["H12"] == {"cell": "H12", "header": "Length mm/PC", "value": 6096}
     assert context["J12"] == {"cell": "J12", "header": "Qty", "value": 1250}
     assert context["K12"] == {"cell": "K12", "header": "UOM", "value": "M"}
@@ -354,7 +361,7 @@ def test_quote_score_endpoint_passes_uploaded_sheet_as_task_data(monkeypatch) ->
             ),
         )
 
-    monkeypatch.setattr(external, "_execute_external_query", fake_execute)
+    monkeypatch.setattr(external, "_execute_external_quote_score", fake_execute)
     response = asyncio.run(
         external.score_external_quote(
             question="请评分",
@@ -368,12 +375,55 @@ def test_quote_score_endpoint_passes_uploaded_sheet_as_task_data(monkeypatch) ->
 
     assert response.total_score == 98
     assert response.file_name == "quote.xlsx"
-    assert captured["tool_name"] == "quote_scoring"
-    assert captured["additional_system_prompt"] == QUOTE_SCORING_PROMPT
-    assert captured["answer_parser"] is parse_quote_score
-    assert callable(captured["answer_finalizer"])
     task_input = json.loads(captured["task_input"])
     assert task_input["sheets"][0]["rows"][1]["cells"]["A"] == "钢管"
+
+
+def test_direct_quote_score_uses_one_model_call_without_harness(monkeypatch) -> None:
+    calls: dict = {"finalizer": 0, "recorded": None}
+
+    async def fake_create(**_kwargs):
+        return {"message_id": UUID("00000000-0000-0000-0000-000000000030")}
+
+    def fake_finalizer(**kwargs):
+        calls["finalizer"] += 1
+        calls["finalizer_kwargs"] = kwargs
+        return json.dumps(
+            {
+                "扣分项": [
+                    {"评分维度": "计算准确度", "扣分原因": "公式错误", "扣分": -2}
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+    async def fake_record(**kwargs):
+        calls["recorded"] = kwargs
+
+    async def fail_if_harness_runs(_request):
+        raise AssertionError("the dedicated quote scorer must not start Harness")
+
+    monkeypatch.setattr(external, "create_external_chat_record", fake_create)
+    monkeypatch.setattr(external, "finalize_quote_score_json", fake_finalizer)
+    monkeypatch.setattr(external, "record_external_chat_answer", fake_record)
+    monkeypatch.setattr(external, "ask_knowledge_base", fail_if_harness_runs)
+
+    request = ExternalQueryRequest(
+        question="请评分",
+        user_id="u1",
+        service_id="crm",
+        session_id="unique-score-1",
+        format_type="json",
+    )
+    response = asyncio.run(
+        external._execute_external_quote_score(request, task_input='{"sheets":[]}')
+    )
+
+    assert calls["finalizer"] == 1
+    assert calls["finalizer_kwargs"]["harness_answer"] == ""
+    assert calls["finalizer_kwargs"]["user_instruction"] == "请评分"
+    assert json.loads(response.answer)["总分"] == 98
+    assert calls["recorded"]["answer"] == response.answer
 
 
 def test_invalid_json_is_repaired_in_same_harness_session_before_storage(

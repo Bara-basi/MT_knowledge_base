@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from pathlib import PurePosixPath
+import time
 from typing import Any, Callable
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -26,7 +27,6 @@ from app.services.external_chat_records import (
 )
 from app.services.quote_scoring import (
     JSON_OUTPUT_PROMPT,
-    QUOTE_SCORING_PROMPT,
     finalize_quote_score_json,
     parse_json_answer,
     parse_quote_score,
@@ -97,8 +97,9 @@ async def score_external_quote(
     use_lark_document: bool = Form(False),
     file: UploadFile | None = File(None),
 ) -> QuoteScoreResponse:
-    """Score quote text or an uploaded Excel workbook through the QA workflow."""
+    """Score quote text or an uploaded workbook with one constrained model turn."""
 
+    started_at = time.perf_counter()
     await _enforce_external_rate_limit(service_id)
     try:
         request = ExternalQueryRequest(
@@ -115,6 +116,7 @@ async def score_external_quote(
             detail=exc.errors(include_context=False),
         ) from exc
     file_name: str | None = None
+    parse_started_at = time.perf_counter()
     if file is not None:
         file_name = PurePosixPath(
             str(file.filename or "quote.xlsx").replace("\\", "/")
@@ -132,25 +134,29 @@ async def score_external_quote(
             await file.close()
     else:
         task_input = _plain_quote_input(request.question)
+    parse_seconds = time.perf_counter() - parse_started_at
 
-    response = await _execute_external_query(
+    response = await _execute_external_quote_score(
         request,
-        additional_system_prompt=QUOTE_SCORING_PROMPT,
         task_input=task_input,
-        tool_name="quote_scoring",
-        answer_parser=parse_quote_score,
-        answer_finalizer=lambda draft: finalize_quote_score_json(
-            task_input=task_input,
-            harness_answer=draft,
-        ),
     )
     try:
         result = parse_quote_score(response.answer)
     except ValueError as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"Harness returned an invalid quote score: {exc}",
+            detail=f"Quote scoring model returned an invalid score: {exc}",
         ) from exc
+
+    logger.info(
+        "Quote score completed service_id=%s session_id=%s file_name=%s "
+        "parse_seconds=%.3f total_seconds=%.3f",
+        request.service_id,
+        request.session_id,
+        file_name or "<text>",
+        parse_seconds,
+        time.perf_counter() - started_at,
+    )
 
     return QuoteScoreResponse(
         **result.model_dump(),
@@ -160,6 +166,91 @@ async def score_external_quote(
         file_name=file_name,
         topic_id=response.topic_id,
     )
+
+
+async def _execute_external_quote_score(
+    request: ExternalQueryRequest,
+    *,
+    task_input: str,
+) -> QueryResponse:
+    """Persist and execute the low-latency, single-pass quote scorer.
+
+    Quote scoring carries its complete rubric and bounded workbook data, so a
+    general Harness planning/retrieval turn before the constrained scorer only
+    repeats the analysis. General external QA continues to use Harness.
+    """
+
+    canonical_ids = canonical_external_ids(
+        service_id=request.service_id,
+        user_id=request.user_id,
+        session_id=request.session_id,
+    )
+    try:
+        pending_row = await create_external_chat_record(
+            service_id=request.service_id,
+            user_id=canonical_ids["user_id"],
+            session_id=canonical_ids["session_id"],
+            question=request.question,
+        )
+    except Exception as exc:  # noqa: BLE001 - stable public storage error.
+        logger.exception("Failed to create external quote record: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="external chat storage is unavailable",
+        ) from exc
+
+    model_started_at = time.perf_counter()
+    try:
+        finalized_answer = await asyncio.to_thread(
+            finalize_quote_score_json,
+            task_input=task_input,
+            harness_answer="",
+            user_instruction=request.question,
+        )
+    except (RuntimeError, ValueError, OSError) as exc:
+        logger.warning(
+            "Direct quote scoring failed service_id=%s session_id=%s "
+            "model_seconds=%.3f: %s",
+            request.service_id,
+            request.session_id,
+            time.perf_counter() - model_started_at,
+            str(exc)[:1_000],
+        )
+        raise HTTPException(status_code=502, detail="quote scoring model failed") from exc
+
+    model_seconds = time.perf_counter() - model_started_at
+    try:
+        parsed = parse_quote_score(finalized_answer)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"quote scoring model returned an invalid score: {exc}",
+        ) from exc
+    canonical_answer = _canonical_json(parsed)
+
+    try:
+        await record_external_chat_answer(
+            message_id=pending_row["message_id"],
+            service_id=request.service_id,
+            user_id=canonical_ids["user_id"],
+            session_id=canonical_ids["session_id"],
+            answer=canonical_answer,
+            topic_id=None,
+        )
+    except Exception as exc:  # noqa: BLE001 - do not report unpersisted success.
+        logger.exception("Failed to complete external quote record: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="external chat answer could not be persisted",
+        ) from exc
+
+    logger.info(
+        "Quote score model stage service_id=%s session_id=%s model_seconds=%.3f",
+        request.service_id,
+        request.session_id,
+        model_seconds,
+    )
+    return QueryResponse(question=request.question, answer=canonical_answer)
 
 
 async def _execute_external_query(

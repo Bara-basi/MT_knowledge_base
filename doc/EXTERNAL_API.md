@@ -152,7 +152,7 @@ POST /prod/api/v1/external/quote-score
 Content-Type: multipart/form-data
 ```
 
-该接口是知识库问答链路上的专用任务。模型会结合知识库资料、内置评分规则和通用报价计算知识分析输入，接口固定返回经过后端校验和重算的评分 JSON。
+该接口使用报价专用的单次模型审核链路，根据内置评分规则和通用报价计算知识分析输入；不会先启动通用知识库 Harness。接口固定返回经过后端校验和重算的评分 JSON。
 
 可以采用两种输入方式：
 
@@ -169,10 +169,10 @@ Content-Type: multipart/form-data
 | `user_id` | string | 是 | 无 | 去除首尾空格后长度 `1–512` | 调用系统内的用户标识 |
 | `service_id` | string | 是 | 无 | 去除首尾空格后长度 `1–128` | 调用系统或项目组标识 |
 | `session_id` | string | 是 | 无 | 去除首尾空格后长度 `1–512` | 本次评分会话标识 |
-| `use_lark_document` | boolean | 否 | `false` | `true` 或 `false` | 是否允许知识检索优先使用飞书文档链接；不改变评分 JSON 结构 |
+| `use_lark_document` | boolean | 否 | `false` | `true` 或 `false` | 为兼容旧调用方保留；当前报价专用链路不执行知识检索 |
 | `file` | file | 否 | 无 | 仅 `.xlsx` 或 `.xls` | 待评分报价表格 |
 
-评分接口不需要传 `format_type`，其输出格式固定为 `json`。
+评分接口不需要传 `format_type`，其输出格式固定为 `json`。服务端日志会分别记录文件解析、模型和请求总耗时，且不会记录报价文件正文。
 
 #### Excel 文件限制
 
@@ -224,7 +224,7 @@ with workbook_path.open("rb") as workbook:
         url,
         data=form_data,
         files=files,
-        timeout=620,
+        timeout=300,
     )
 
 response.raise_for_status()
@@ -345,9 +345,9 @@ for item in score["扣分项"]:
 | --- | --- | --- | --- |
 | `400` | 报价评分 | 文件格式不支持、文件损坏、超过大小/行列/转换长度限制，或 `.xls` 解析依赖不可用 | 修正或精简文件后重试，不要原样自动重试 |
 | `422` | 两个接口 | 缺少必填参数、字符串为空或过长、类型错误、`format_type` 非法 | 根据响应 `detail` 修正请求 |
-| `502` | 两个接口 | n8n 无法访问、n8n 返回错误、响应缺少答案，或模型没有生成符合要求的 JSON/评分结构 | 可有限次数重试；持续发生时联系知识库维护方并提供时间、`service_id`、`session_id` |
+| `502` | 两个接口 | Harness/报价评分模型不可用、响应缺少答案，或模型没有生成符合要求的 JSON/评分结构 | 可有限次数重试；持续发生时联系知识库维护方并提供时间、`service_id`、`session_id` |
 | `503` | 两个接口 | 外部聊天记录表不可用，或答案无法写入隔离表 | 稍后重试，并检查 PostgreSQL 状态 |
-| `504` | 两个接口 | n8n 问答超时 | 可稍后重试；同时确认客户端自身超时不少于 600 秒 |
+| `504` | 通用问答 | Harness 问答超时 | 可稍后重试；同时确认客户端自身超时设置 |
 | `500` | 两个接口 | 未预期的服务端错误 | 联系维护方排查服务日志 |
 
 错误示例：
