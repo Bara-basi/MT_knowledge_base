@@ -380,6 +380,12 @@ def build_non_thinking_extra_body(*, model: str, base_url: str) -> dict[str, Any
         # Moonshot's official K2.5/K2.6 API ignores the SiliconFlow-style
         # ``enable_thinking`` flag and expects this object instead.
         return {"thinking": {"type": "disabled"}}
+    if "api.deepseek.com" in normalized_base_url:
+        # DeepSeek's official OpenAI-compatible endpoint uses the structured
+        # thinking switch. ``enable_thinking=false`` is used by gateways such
+        # as SiliconFlow and may be ignored by the official endpoint, allowing
+        # hidden reasoning to consume the entire output budget.
+        return {"thinking": {"type": "disabled"}}
     return {"enable_thinking": False}
 
 

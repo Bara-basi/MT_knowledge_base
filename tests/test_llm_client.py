@@ -32,6 +32,13 @@ def test_moonshot_kimi_uses_official_non_thinking_parameter() -> None:
     ) == {"enable_thinking": False}
 
 
+def test_deepseek_official_uses_structured_non_thinking_parameter() -> None:
+    assert build_non_thinking_extra_body(
+        model="deepseek-v4-flash",
+        base_url="https://api.deepseek.com/v1",
+    ) == {"thinking": {"type": "disabled"}}
+
+
 def test_chat_rejects_empty_content_with_finish_metadata(monkeypatch) -> None:
     client = _client()
     monkeypatch.setattr(

@@ -176,8 +176,9 @@ def test_quote_scoring_prompt_uses_visible_precision_and_material_terms() -> Non
     assert "业务含义仍然明确" in QUOTE_SCORING_PROMPT
     assert "同一根因被复制到多个产品行" in QUOTE_SCORING_PROMPT
     assert "不得为了重复行而重复扣分" in QUOTE_SCORING_PROMPT
-    assert "必须先逐一检查文件中提供的公式" in QUOTE_SCORING_PROMPT
-    assert "不能只检查最终显示金额" in QUOTE_SCORING_PROMPT
+    assert "优先检查服务端提供的公式索引" in QUOTE_SCORING_PROMPT
+    assert "最多返回 8 个最明确" in QUOTE_SCORING_PROMPT
+    assert "不为追求穷举继续推演" in QUOTE_SCORING_PROMPT
     assert "不自动规定付款比例或尾款支付节点" in QUOTE_SCORING_PROMPT
     assert "不得推断 CIF 必须凭提单副本支付尾款" in QUOTE_SCORING_PROMPT
     assert "证据门控规则" in QUOTE_SCORING_PROMPT
@@ -218,18 +219,18 @@ def test_quote_score_finalizer_uses_json_mode_and_recalculates_scores() -> None:
 
     assert captured["extra_body"] == {
         "response_format": {"type": "json_object"},
-        "enable_thinking": False,
+        "thinking": {"type": "disabled"},
     }
     assert captured["max_tokens"] == 4_096
     assert captured["temperature"] == 0
-    assert "必须亲自核对" in captured["messages"][0]["content"]
+    assert "只核对最明确的异常" in captured["messages"][0]["content"]
     assert "草稿可能错误" in captured["messages"][1]["content"]
     assert "<mtsco-formula-audit-context>" in captured["messages"][1]["content"]
     assert payload["总分"] == 98
     assert payload["评分维度"]["计算准确度"] == 98
 
 
-def test_quote_formula_audit_context_adds_headers_and_row_values() -> None:
+def test_quote_formula_audit_context_adds_headers_without_repeating_rows() -> None:
     task_input = json.dumps(
         {
             "sheets": [
@@ -266,10 +267,7 @@ def test_quote_formula_audit_context_adds_headers_and_row_values() -> None:
     assert audit[0]["row"] == 12
     assert audit[0]["formulas"][0]["cell"] == "S12"
     assert audit[0]["formulas"][0]["header"] == "支数"
-    context = {item["cell"]: item for item in audit[0]["cells"]}
-    assert context["H12"] == {"cell": "H12", "header": "Length mm/PC", "value": 6096}
-    assert context["J12"] == {"cell": "J12", "header": "Qty", "value": 1250}
-    assert context["K12"] == {"cell": "K12", "header": "UOM", "value": "M"}
+    assert "cells" not in audit[0]
 
 
 def test_xlsx_is_converted_to_compact_json_with_formulas() -> None:
