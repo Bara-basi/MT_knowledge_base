@@ -111,6 +111,12 @@ class Settings:
     )
     minio_secure: bool = _env_bool("MINIO_SECURE", False)
 
+    # Canonical raw knowledge documents are stored in Alibaba Cloud OSS.
+    aliyun_oss_endpoint: str = os.getenv("ALIYUN_OSS_ENDPOINT", "").strip()
+    aliyun_access_key_id: str = os.getenv("ALIYUN_ACCESS_KEY_ID", "").strip()
+    aliyun_access_key_secret: str = os.getenv("ALIYUN_ACCESS_KEY_SECRET", "").strip()
+    aliyun_raw_data_bucket: str = os.getenv("ALIYUN_RAW_DATA_BUCKET", "").strip()
+
     embedding_model_name: str = os.getenv(
         "EMBEDDING_MODEL_NAME",
         "BAAI/bge-large-zh-v1.5",

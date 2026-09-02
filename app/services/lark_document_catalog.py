@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from psycopg import sql
 from psycopg.types.json import Jsonb
@@ -39,6 +39,15 @@ def sanitize_file_name(name: str) -> str:
     name = re.sub(r"\s+", " ", name)
     name = name.strip(" .")
     return name or "untitled"
+
+
+def split_source_path(source_name: str) -> list[str]:
+    """Turn a source-map key into its declared OSS directory hierarchy."""
+    parts = [part.strip() for part in source_name.replace("\\", "/").split("/")]
+    parts = [part for part in parts if part and part not in {".", ".."}]
+    if not parts:
+        raise ValueError("source mapping key must contain at least one path segment")
+    return parts
 
 
 def document_name_for_node(node: dict[str, Any]) -> str:
@@ -131,6 +140,7 @@ def build_record(
     source_url: str,
     node: dict[str, Any],
     path_titles: list[str],
+    storage_file_name: str | None = None,
 ) -> dict[str, Any] | None:
     if not is_supported_document_node(node):
         return None
@@ -153,6 +163,7 @@ def build_record(
         "space_id": str(node.get("space_id") or ""),
         "parent_node_token": str(node.get("parent_node_token") or ""),
         "path_titles": path_titles,
+        "storage_file_name": storage_file_name,
         "raw_node": node,
     }
 
@@ -171,21 +182,27 @@ def collect_wiki_node_records(
     records: dict[str, dict[str, Any]],
     failures: list[dict[str, Any]],
     path_titles: list[str],
+    is_source_root: bool = False,
 ) -> None:
     title = node_title(node)
-    current_path = path_titles + [title]
-    merge_record(
-        records,
-        build_record(
-            source_type="wiki",
-            source_name=source_name,
-            source_url=source_url,
-            node=node,
-            path_titles=current_path,
-        ),
-    )
     if not node.get("has_child"):
+        # Only terminal Wiki nodes are corpus documents.  Nodes that contain
+        # children are directory documents in Feishu and must not be ingested.
+        merge_record(
+            records,
+            build_record(
+                source_type="wiki",
+                source_name=source_name,
+                source_url=source_url,
+                node=node,
+                path_titles=path_titles,
+            ),
+        )
         return
+
+    # The source-map key already names the selected Wiki directory.  Do not
+    # append its Feishu title again; append only nested subdirectories.
+    current_path = path_titles if is_source_root else path_titles + [title]
 
     try:
         children = list(list_child_nodes(access_token, node["space_id"], node["node_token"]))
@@ -212,6 +229,7 @@ def collect_wiki_node_records(
             records=records,
             failures=failures,
             path_titles=current_path,
+            is_source_root=False,
         )
 
 
@@ -229,8 +247,9 @@ def collect_wiki_source_records(
 
     root_node = get_node(access_token, token)
     root_node.setdefault("url", source_url)
+    source_path = split_source_path(source_name)
     try:
-        root_nodes = collect_wiki_root_nodes(access_token, root_node)
+        space_root_nodes = collect_wiki_root_nodes(access_token, root_node)
     except Exception as exc:
         failures.append(
             {
@@ -239,23 +258,39 @@ def collect_wiki_source_records(
                 "source_url": source_url,
                 "title": node_title(root_node),
                 "node_token": root_node.get("node_token", ""),
-                "stage": "detect_space_root",
+                "stage": "expand_space_root",
                 "reason": str(exc),
             }
         )
-        root_nodes = None
+        return
 
-    nodes = root_nodes if root_nodes is not None else [root_node]
-    for node in nodes:
-        collect_wiki_node_records(
-            access_token,
-            node=node,
-            source_name=source_name,
-            source_url=source_url,
-            records=records,
-            failures=failures,
-            path_titles=[source_name],
-        )
+    if space_root_nodes is not None:
+        # A Feishu Wiki homepage exposes its hierarchy through the space-level
+        # nodes endpoint, not through its own child-node endpoint.  The
+        # homepage document itself remains excluded as a directory document.
+        for node in space_root_nodes:
+            collect_wiki_node_records(
+                access_token,
+                node=node,
+                source_name=source_name,
+                source_url=source_url,
+                records=records,
+                failures=failures,
+                path_titles=source_path,
+                is_source_root=False,
+            )
+        return
+
+    collect_wiki_node_records(
+        access_token,
+        node=root_node,
+        source_name=source_name,
+        source_url=source_url,
+        records=records,
+        failures=failures,
+        path_titles=source_path,
+        is_source_root=True,
+    )
 
 
 def collect_direct_link_record(
@@ -298,6 +333,9 @@ def collect_direct_link_record(
             raise ValueError(f"unsupported Feishu link type={link_type}: {source_url}")
         node = {"title": source_name, "obj_type": obj_type, "obj_token": token, "node_token": token, "url": source_url}
 
+    declared_path = split_source_path(source_name)
+    if len(declared_path) < 2:
+        raise ValueError("single_file mapping key must include both directory and file name")
     merge_record(
         records,
         build_record(
@@ -305,28 +343,49 @@ def collect_direct_link_record(
             source_name=source_name,
             source_url=source_url,
             node=node,
-            path_titles=[source_name],
+            path_titles=declared_path[:-1],
+            storage_file_name=declared_path[-1],
         ),
     )
 
 
-def collect_records(source_path: str | Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def collect_records(
+    source_path: str | Path,
+    *,
+    progress: Callable[[str, str, str], None] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     sources = load_vector_sources(source_path)
+    if progress:
+        progress("start", "auth", "Feishu tenant access token")
     access_token = get_access_token()
+    if progress:
+        progress("done", "auth", "Feishu tenant access token")
     records: dict[str, dict[str, Any]] = {}
     failures: list[dict[str, Any]] = []
 
     for source_name, link in sources["single_file"].items():
+        if progress:
+            progress("start", "single_file", source_name)
         try:
             collect_direct_link_record(access_token, source_name=source_name, source_url=link, records=records)
+            if progress:
+                progress("done", "single_file", source_name)
         except Exception as exc:
             failures.append({"source_type": "single_file", "source_name": source_name, "source_url": link, "stage": "resolve_source", "reason": str(exc)})
+            if progress:
+                progress("failed", "single_file", source_name)
 
     for source_name, link in sources["wiki"].items():
+        if progress:
+            progress("start", "wiki", source_name)
         try:
             collect_wiki_source_records(access_token, source_name=source_name, source_url=link, records=records, failures=failures)
+            if progress:
+                progress("done", "wiki", source_name)
         except Exception as exc:
             failures.append({"source_type": "wiki", "source_name": source_name, "source_url": link, "stage": "resolve_source", "reason": str(exc)})
+            if progress:
+                progress("failed", "wiki", source_name)
 
     return list(records.values()), failures
 
@@ -376,12 +435,29 @@ def ensure_catalog_table(table_name: str = CATALOG_TABLE) -> None:
                         parent_node_token TEXT NOT NULL DEFAULT '',
                         path_titles JSONB NOT NULL DEFAULT '[]'::jsonb,
                         raw_node JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-                        last_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        is_deleted BOOLEAN NOT NULL DEFAULT FALSE
+                        oss_object_key TEXT,
+                        oss_uri TEXT,
+                        content_sha256 TEXT,
+                        content_size BIGINT,
+                        ingested_at TIMESTAMPTZ,
+                        last_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
                     )
                     """
-                ).format(table=table)
+            ).format(table=table)
             )
+            cur.execute(sql.SQL("ALTER TABLE {table} DROP COLUMN IF EXISTS is_deleted").format(table=table))
+            for column, definition in (
+                ("oss_object_key", "TEXT"),
+                ("oss_uri", "TEXT"),
+                ("content_sha256", "TEXT"),
+                ("content_size", "BIGINT"),
+                ("ingested_at", "TIMESTAMPTZ"),
+            ):
+                cur.execute(
+                    sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} " + definition).format(
+                        table=table, column=sql.Identifier(column)
+                    )
+                )
             for suffix, column in (
                 ("document_name_idx", "document_name"),
                 ("document_link_idx", "document_link"),
@@ -409,7 +485,8 @@ def upsert_records(rows: list[dict[str, Any]], table_name: str = CATALOG_TABLE) 
                         document_key, source_type, source_name, document_name,
                         document_title, document_link, lark_created_at, lark_updated_at,
                         obj_type, obj_token, node_token, space_id, parent_node_token,
-                        path_titles, raw_node, last_seen_at, is_deleted
+                        path_titles, raw_node, oss_object_key, oss_uri,
+                        content_sha256, content_size, ingested_at, last_seen_at
                     )
                     VALUES (
                         %(document_key)s, %(source_type)s, %(source_name)s,
@@ -417,7 +494,8 @@ def upsert_records(rows: list[dict[str, Any]], table_name: str = CATALOG_TABLE) 
                         %(lark_created_at)s, %(lark_updated_at)s, %(obj_type)s,
                         %(obj_token)s, %(node_token)s, %(space_id)s,
                         %(parent_node_token)s, %(path_titles)s, %(raw_node)s,
-                        CURRENT_TIMESTAMP, FALSE
+                        %(oss_object_key)s, %(oss_uri)s, %(content_sha256)s,
+                        %(content_size)s, %(ingested_at)s, CURRENT_TIMESTAMP
                     )
                     ON CONFLICT (document_key) DO UPDATE
                     SET updated_at = CURRENT_TIMESTAMP,
@@ -435,11 +513,27 @@ def upsert_records(rows: list[dict[str, Any]], table_name: str = CATALOG_TABLE) 
                         parent_node_token = EXCLUDED.parent_node_token,
                         path_titles = EXCLUDED.path_titles,
                         raw_node = EXCLUDED.raw_node,
-                        last_seen_at = CURRENT_TIMESTAMP,
-                        is_deleted = FALSE
+                        oss_object_key = EXCLUDED.oss_object_key,
+                        oss_uri = EXCLUDED.oss_uri,
+                        content_sha256 = EXCLUDED.content_sha256,
+                        content_size = EXCLUDED.content_size,
+                        ingested_at = EXCLUDED.ingested_at,
+                        last_seen_at = CURRENT_TIMESTAMP
                     """
                 ).format(table=table),
-                [{**row, "path_titles": Jsonb(row["path_titles"]), "raw_node": Jsonb(row["raw_node"])} for row in rows],
+                [
+                    {
+                        **row,
+                        "oss_object_key": row.get("oss_object_key"),
+                        "oss_uri": row.get("oss_uri"),
+                        "content_sha256": row.get("content_sha256"),
+                        "content_size": row.get("content_size"),
+                        "ingested_at": row.get("ingested_at"),
+                        "path_titles": Jsonb(row["path_titles"]),
+                        "raw_node": Jsonb(row["raw_node"]),
+                    }
+                    for row in rows
+                ],
             )
     return len(rows)
 
@@ -453,28 +547,11 @@ def mark_missing_records_deleted(
         with conn.cursor() as cur:
             if document_keys:
                 cur.execute(
-                    sql.SQL(
-                        """
-                        UPDATE {table}
-                        SET is_deleted = TRUE,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE NOT is_deleted
-                          AND NOT (document_key = ANY(%s))
-                        """
-                    ).format(table=table),
+                    sql.SQL("DELETE FROM {table} WHERE NOT (document_key = ANY(%s))").format(table=table),
                     (document_keys,),
                 )
             else:
-                cur.execute(
-                    sql.SQL(
-                        """
-                        UPDATE {table}
-                        SET is_deleted = TRUE,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE NOT is_deleted
-                        """
-                    ).format(table=table)
-                )
+                cur.execute(sql.SQL("DELETE FROM {table}").format(table=table))
             return cur.rowcount or 0
 
 
@@ -496,7 +573,7 @@ def sync_ingestion_registry_times(
                             MIN(lark_created_at) AS lark_created_at,
                             MAX(COALESCE(lark_updated_at, lark_created_at)) AS lark_updated_at
                         FROM {catalog_table}
-                        WHERE NOT is_deleted AND document_name <> ''
+                        WHERE document_name <> ''
                         GROUP BY regexp_replace(lower(document_name), '\\s+', '', 'g')
                     )
                     UPDATE {ingestion_table} AS registry
@@ -523,7 +600,7 @@ def catalog_summary(table_name: str = CATALOG_TABLE) -> dict[str, Any]:
                     """
                     SELECT
                         COUNT(*) AS total,
-                        COUNT(*) FILTER (WHERE NOT is_deleted) AS active,
+                        COUNT(*) FILTER (WHERE oss_uri IS NOT NULL AND oss_uri <> '') AS oss_backed,
                         COUNT(*) FILTER (WHERE lark_created_at IS NULL) AS missing_created_at,
                         COUNT(*) FILTER (WHERE lark_updated_at IS NULL) AS missing_updated_at,
                         MIN(lark_created_at) AS earliest_lark_created_at,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -172,19 +172,30 @@ def test_send_weekly_report_force_bypasses_disabled_setting(monkeypatch) -> None
     assert result["ok"] is True
 
 
-def test_seconds_until_next_weekly_run_targets_friday_1735() -> None:
-    seconds = weekly_report.seconds_until_next_weekly_run(
-        now=datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc),
-        timezone=timezone.utc,
+def test_send_weekly_report_sends_to_open_id(monkeypatch) -> None:
+    sent: dict[str, object] = {}
+
+    async def fake_send(**kwargs):
+        sent.update(kwargs)
+        return "om_test_message"
+
+    monkeypatch.setattr(weekly_report, "fetch_weekly_report_data", lambda **_kwargs: UsageReportData())
+    monkeypatch.setattr(weekly_report.feishu, "_send_feishu_markdown_message_to_receive_id", fake_send)
+    monkeypatch.setattr(
+        weekly_report,
+        "settings",
+        SimpleNamespace(
+            weekly_report_enabled=True,
+            weekly_report_target_union_id="on_default",
+            weekly_report_target_session_id="oc_default",
+            weekly_report_timezone="Asia/Shanghai",
+            postgres_chat_table="chat_messages",
+        ),
     )
 
-    assert seconds == 4 * 24 * 60 * 60 + 8 * 60 * 60 + 35 * 60
+    result = asyncio.run(weekly_report.send_weekly_report(target_open_id="ou_requester"))
 
-
-def test_seconds_until_next_weekly_run_rolls_to_next_week_after_trigger() -> None:
-    seconds = weekly_report.seconds_until_next_weekly_run(
-        now=datetime(2026, 7, 17, 17, 36, tzinfo=timezone.utc),
-        timezone=timezone.utc,
-    )
-
-    assert seconds == 6 * 24 * 60 * 60 + 23 * 60 * 60 + 59 * 60
+    assert sent["receive_id"] == "ou_requester"
+    assert sent["receive_id_type"] == "open_id"
+    assert result["target_union_id"] == ""
+    assert result["target_open_id"] == "ou_requester"

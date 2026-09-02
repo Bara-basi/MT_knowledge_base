@@ -295,6 +295,80 @@ def test_image_message_is_queued_as_model_attachment(monkeypatch) -> None:
     }]
 
 
+def test_bot_menu_daily_report_is_queued_for_requesting_user(monkeypatch) -> None:
+    queued_tasks: list[tuple[object, dict[str, object]]] = []
+
+    class FakeBackgroundTasks:
+        def add_task(self, func, **kwargs) -> None:
+            queued_tasks.append((func, kwargs))
+
+    class FakeRequest:
+        client = "test-client"
+
+        async def json(self) -> dict:
+            return {
+                "header": {
+                    "event_type": "application.bot.menu_v6",
+                    "event_id": "menu-event-daily",
+                },
+                "event": {
+                    "event_key": "report.daily",
+                    "operator": {"operator_id": {"open_id": "ou_requester"}},
+                },
+            }
+
+    monkeypatch.setattr(feishu, "_seen_message_keys", {})
+
+    result = asyncio.run(feishu.handle_feishu_events(FakeRequest(), FakeBackgroundTasks()))
+
+    assert result == {
+        "ok": True,
+        "accepted": True,
+        "event_id": "menu-event-daily",
+        "report_kind": "daily",
+    }
+    assert queued_tasks == [
+        (
+            feishu._send_feishu_menu_report,
+            {
+                "report_kind": "daily",
+                "target_open_id": "ou_requester",
+                "event_id": "menu-event-daily",
+            },
+        )
+    ]
+
+
+def test_bot_menu_weekly_report_is_queued_for_requesting_user(monkeypatch) -> None:
+    queued_tasks: list[tuple[object, dict[str, object]]] = []
+
+    class FakeBackgroundTasks:
+        def add_task(self, func, **kwargs) -> None:
+            queued_tasks.append((func, kwargs))
+
+    class FakeRequest:
+        client = "test-client"
+
+        async def json(self) -> dict:
+            return {
+                "header": {
+                    "event_type": "application.bot.menu_v6",
+                    "event_id": "menu-event-weekly",
+                },
+                "event": {
+                    "event_key": "report.weekly",
+                    "operator": {"operator_id": {"open_id": "ou_requester"}},
+                },
+            }
+
+    monkeypatch.setattr(feishu, "_seen_message_keys", {})
+
+    result = asyncio.run(feishu.handle_feishu_events(FakeRequest(), FakeBackgroundTasks()))
+
+    assert result["report_kind"] == "weekly"
+    assert queued_tasks[0][1]["target_open_id"] == "ou_requester"
+
+
 def test_extract_sender_identity_prefers_union_id_with_type() -> None:
     sender = {
         "sender_id": {

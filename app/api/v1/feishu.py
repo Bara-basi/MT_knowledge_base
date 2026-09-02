@@ -271,6 +271,13 @@ async def handle_feishu_events(
     if event_type == "drive.file.edit_v1":
         return _handle_feishu_drive_file_edit_event(payload)
 
+    if event_type == "application.bot.menu_v6":
+        return _handle_feishu_bot_menu_event(
+            event=event,
+            event_id=event_id,
+            background_tasks=background_tasks,
+        )
+
     if event_type != "im.message.receive_v1":
         _debug("event ignored", reason="unsupported_event_type", event_type=event_type)
         return {"ok": True, "ignored": True, "event_type": event_type}
@@ -348,6 +355,107 @@ async def handle_feishu_events(
         "event_id": event_id,
         "message_id": message_id,
     }
+
+
+def _handle_feishu_bot_menu_event(
+    *,
+    event: dict[str, Any],
+    event_id: str | None,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    """Queue usage reports requested from a Feishu bot custom-menu item."""
+    menu_event_id = str(event.get("event_key") or "").strip()
+    report_kind_by_event_id = {
+        "report.daily": "daily",
+        "report.weekly": "weekly",
+    }
+    report_kind = report_kind_by_event_id.get(menu_event_id)
+    if not report_kind:
+        _debug("bot menu event ignored", event_id=event_id, menu_event_id=menu_event_id)
+        return {"ok": True, "ignored": True, "event_id": event_id}
+
+    operator = event.get("operator") if isinstance(event.get("operator"), dict) else {}
+    operator_id = (
+        operator.get("operator_id") if isinstance(operator.get("operator_id"), dict) else {}
+    )
+    open_id = str(operator_id.get("open_id") or "").strip()
+    if not open_id:
+        _warn(
+            "bot menu event rejected",
+            event_id=event_id,
+            menu_event_id=menu_event_id,
+            reason="missing_operator_open_id",
+        )
+        return {
+            "ok": False,
+            "ignored": True,
+            "event_id": event_id,
+            "reason": "missing_operator_open_id",
+        }
+
+    dedupe_key = _build_dedupe_key(None, event_id)
+    if _is_duplicate_message(dedupe_key):
+        return {"ok": True, "duplicate": True, "event_id": event_id}
+
+    background_tasks.add_task(
+        _send_feishu_menu_report,
+        report_kind=report_kind,
+        target_open_id=open_id,
+        event_id=event_id,
+    )
+    _debug(
+        "bot menu report queued",
+        event_id=event_id,
+        menu_event_id=menu_event_id,
+        report_kind=report_kind,
+        target_open_id=open_id,
+    )
+    return {
+        "ok": True,
+        "accepted": True,
+        "event_id": event_id,
+        "report_kind": report_kind,
+    }
+
+
+async def _send_feishu_menu_report(
+    *,
+    report_kind: str,
+    target_open_id: str,
+    event_id: str | None,
+) -> None:
+    """Generate and deliver a menu-requested report to the requesting user."""
+    try:
+        # Import lazily: report services use this module's Feishu send helpers.
+        if report_kind == "daily":
+            from app.services.daily_report import send_daily_report
+
+            result = await send_daily_report(target_open_id=target_open_id, force=True)
+        else:
+            from app.services.weekly_report import send_weekly_report
+
+            result = await send_weekly_report(target_open_id=target_open_id, force=True)
+        if not result.get("ok"):
+            raise RuntimeError("Feishu did not return a message id for the report.")
+        _debug(
+            "bot menu report delivered",
+            event_id=event_id,
+            report_kind=report_kind,
+            target_open_id=target_open_id,
+            message_id=result.get("message_id"),
+        )
+    except Exception as exc:
+        logger.exception("Failed to deliver Feishu %s menu report: %s", report_kind, exc)
+        error_text = "日报生成失败，请稍后重试。" if report_kind == "daily" else "周报生成失败，请稍后重试。"
+        try:
+            await _send_feishu_markdown_message_to_receive_id(
+                receive_id=target_open_id,
+                receive_id_type="open_id",
+                markdown_text=error_text,
+                log_content=False,
+            )
+        except Exception:
+            logger.exception("Failed to send Feishu menu report failure notice")
 
 
 def _handle_feishu_drive_file_edit_event(payload: dict[str, Any]) -> dict[str, Any]:

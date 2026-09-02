@@ -170,10 +170,12 @@ async def send_weekly_report(
 
     session_id = (target_session_id or settings.weekly_report_target_session_id).strip()
     union_id = (
-        target_union_id or target_open_id or settings.weekly_report_target_union_id
+        target_union_id
+        or ("" if target_open_id else settings.weekly_report_target_union_id)
     ).strip()
-    if not union_id and not session_id:
-        raise ValueError("Weekly report target union_id or session_id is required.")
+    open_id = (target_open_id or "").strip()
+    if not union_id and not open_id and not session_id:
+        raise ValueError("Weekly report target union_id, open_id, or session_id is required.")
 
     end = report_end or default_report_end()
     start, end = week_bounds(report_end=end)
@@ -188,12 +190,12 @@ async def send_weekly_report(
     report_data = await asyncio.to_thread(fetch_weekly_report_data, **fetch_kwargs)
     stats = report_data.user_stats
     text = build_weekly_report_text(stats, report_end=end, report_data=report_data)
-    receive_id_type = "union_id" if union_id else "chat_id"
-    receive_id = union_id or session_id
-    if union_id:
+    receive_id_type = "union_id" if union_id else "open_id" if open_id else "chat_id"
+    receive_id = union_id or open_id or session_id
+    if union_id or open_id:
         message_id = await feishu._send_feishu_markdown_message_to_receive_id(
-            receive_id=union_id,
-            receive_id_type="union_id",
+            receive_id=receive_id,
+            receive_id_type=receive_id_type,
             markdown_text=text,
             log_content=True,
         )
@@ -208,6 +210,7 @@ async def send_weekly_report(
         "ok": message_id is not None,
         "message_id": message_id,
         "target_union_id": union_id,
+        "target_open_id": open_id,
         "target_session_id": session_id,
         "receive_id": receive_id,
         "receive_id_type": receive_id_type,
@@ -218,35 +221,3 @@ async def send_weekly_report(
         "report_data": report_data,
         "text": text,
     }
-
-
-def seconds_until_next_weekly_run(
-    *,
-    now: datetime | None = None,
-    weekday: int = FRIDAY_WEEKDAY,
-    hour: int = 17,
-    minute: int = 35,
-    timezone: ZoneInfo | None = None,
-) -> float:
-    tz = timezone or get_report_timezone()
-    current = now.astimezone(tz) if now else datetime.now(tz)
-    days_ahead = (weekday - current.weekday()) % 7
-    next_date = current.date() + timedelta(days=days_ahead)
-    next_run = datetime.combine(next_date, time(hour=hour, minute=minute), tzinfo=tz)
-    if next_run <= current:
-        next_run += timedelta(days=7)
-    return max((next_run - current).total_seconds(), 0.0)
-
-
-async def run_weekly_report_loop(
-    *,
-    weekday: int = FRIDAY_WEEKDAY,
-    hour: int = 17,
-    minute: int = 35,
-    department_names: Iterable[str] | str | None = None,
-) -> None:
-    while True:
-        await asyncio.sleep(
-            seconds_until_next_weekly_run(weekday=weekday, hour=hour, minute=minute)
-        )
-        await send_weekly_report(department_names=department_names)

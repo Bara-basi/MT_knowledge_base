@@ -103,6 +103,7 @@ def get_docx_document(access_token: str, document_id: str):
 
 def list_child_nodes(access_token: str, space_id: str, parent_node_token: str):
     page_token = None
+    seen_page_tokens: set[str] = set()
     while True:
         params = {"parent_node_token": parent_node_token, "page_size": 50}
         if page_token:
@@ -112,10 +113,14 @@ def list_child_nodes(access_token: str, space_id: str, parent_node_token: str):
         if not data.get("has_more"):
             break
         page_token = data.get("page_token")
+        if not page_token or page_token in seen_page_tokens:
+            raise RuntimeError(f"Feishu child-node pagination did not advance for {parent_node_token}")
+        seen_page_tokens.add(page_token)
 
 
 def list_space_root_nodes(access_token: str, space_id: str):
     page_token = None
+    seen_page_tokens: set[str] = set()
     while True:
         params = {"page_size": 50}
         if page_token:
@@ -125,10 +130,14 @@ def list_space_root_nodes(access_token: str, space_id: str):
         if not data.get("has_more"):
             break
         page_token = data.get("page_token")
+        if not page_token or page_token in seen_page_tokens:
+            raise RuntimeError(f"Feishu root-node pagination did not advance for {space_id}")
+        seen_page_tokens.add(page_token)
 
 
 def list_document_blocks(access_token: str, document_id: str):
     page_token = None
+    seen_page_tokens: set[str] = set()
     while True:
         params = {"page_size": 500}
         if page_token:
@@ -138,6 +147,9 @@ def list_document_blocks(access_token: str, document_id: str):
         if not data.get("has_more"):
             break
         page_token = data.get("page_token")
+        if not page_token or page_token in seen_page_tokens:
+            raise RuntimeError(f"Feishu document-block pagination did not advance for {document_id}")
+        seen_page_tokens.add(page_token)
 
 
 def get_sub_page_list_tokens(access_token: str, node: dict) -> list[str]:

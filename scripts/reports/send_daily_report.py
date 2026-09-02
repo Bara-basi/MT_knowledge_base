@@ -10,12 +10,11 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.services.daily_report import run_daily_report_loop, send_daily_report  # noqa: E402
+from app.services.daily_report import send_daily_report  # noqa: E402
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Send MTSCO knowledge base daily usage report.")
-    parser.add_argument("--loop", action="store_true", help="Keep running and send every day at 09:00.")
     parser.add_argument("--union-id", default=None, help="Target Feishu union_id.")
     parser.add_argument("--open-id", default=None, help="Deprecated alias for --union-id.")
     parser.add_argument("--session-id", default=None, help="Target Feishu chat/session id.")
@@ -27,10 +26,6 @@ def main() -> None:
     )
     parser.add_argument("--force", action="store_true", help="Send once even when DAILY_REPORT_ENABLED=false.")
     args = parser.parse_args()
-
-    if args.loop:
-        asyncio.run(run_daily_report_loop(department_names=args.department))
-        return
 
     result = asyncio.run(
         send_daily_report(
