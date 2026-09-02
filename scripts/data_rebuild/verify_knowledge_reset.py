@@ -7,9 +7,13 @@ import json
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(PROJECT_ROOT / ".env.host", override=True)
 
 from app.core.config import settings  # noqa: E402
 from app.db.minio import get_minio_client  # noqa: E402

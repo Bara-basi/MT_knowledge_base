@@ -15,9 +15,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+# Production FastAPI is a host systemd service: its unit loads .env.host after
+# .env to replace Docker service DNS names with localhost endpoints.  Mirror
+# that order for this manually-run rebuild command.
+load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(PROJECT_ROOT / ".env.host", override=True)
 
 from app.core.config import settings  # noqa: E402
 from app.db.postgres import postgres_connection  # noqa: E402

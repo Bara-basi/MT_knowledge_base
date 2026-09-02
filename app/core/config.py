@@ -234,7 +234,7 @@ class Settings:
     # Set false only as an emergency rollback to inject the application
     # transcript into a create-only third-party runtime.
     harness_native_jsonl_resume: bool = _env_bool("HARNESS_NATIVE_JSONL_RESUME", True)
-    harness_workdir: str = os.getenv("HARNESS_WORKDIR", "data/processing")
+    harness_workdir: str = os.getenv("HARNESS_WORKDIR", "data/harness")
     harness_memory_bucket: str = os.getenv("HARNESS_MEMORY_BUCKET", "knowledge-chat-memory")
     harness_memory_summary_model: str = os.getenv(
         "HARNESS_MEMORY_SUMMARY_MODEL", os.getenv("HARNESS_MODEL", "deepseek-v4-flash")

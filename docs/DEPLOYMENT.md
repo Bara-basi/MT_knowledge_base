@@ -71,13 +71,13 @@ MILVUS_URI=http://127.0.0.1:19530
 MINIO_ENDPOINT=http://127.0.0.1:9000
 NEO4J_URI=bolt://127.0.0.1:7687
 HARNESS_ENABLED=true
-HARNESS_WORKDIR=/opt/mtsco-knowledge-base/data/processing
+HARNESS_WORKDIR=/opt/mtsco-knowledge-base/data/harness
 HARNESS_SESSION_ROOT=/opt/mtsco-knowledge-base/data/harness_sessions
 HARNESS_GLOBAL_CONCURRENCY=2
 FEISHU_DURABLE_QUEUE_ENABLED=false
 ```
 
-`HARNESS_WORKDIR` 必须是已解析纯文本的目录，并对 `mtsco` 可读；Harness 只以受限、只读方式访问该目录。`HARNESS_SESSION_ROOT` 与 `HARNESS_ATTACHMENT_ROOT` 必须对 `mtsco` 可读写。不要把容器内地址（如 `postgres`、`milvus-standalone`）写入 `.env.host`。
+`HARNESS_WORKDIR` 必须是新版解析后的 `data/harness` 目录，并对 `mtsco` 可读；Harness 只以受限、只读方式访问该目录。`HARNESS_SESSION_ROOT` 与 `HARNESS_ATTACHMENT_ROOT` 必须对 `mtsco` 可读写。不要把容器内地址（如 `postgres`、`milvus-standalone`）写入 `.env.host`。
 
 ## 5. 启动基础服务与初始化
 

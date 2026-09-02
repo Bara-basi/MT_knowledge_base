@@ -14,9 +14,13 @@ import sys
 from pathlib import Path
 from typing import Any, Iterator
 
+from dotenv import load_dotenv
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(PROJECT_ROOT / ".env.host", override=True)
 
 from psycopg.types.json import Jsonb  # noqa: E402
 

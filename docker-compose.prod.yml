@@ -32,7 +32,7 @@ services:
       FEISHU_DURABLE_QUEUE_ENABLED: "false"
       SHARED_RATE_LIMIT_ENABLED: "true"
     volumes:
-      - ./data/processing:/app/harness_workspace:ro
+      - ./data/harness:/app/harness_workspace:ro
     depends_on:
       milvus-minio:
         condition: service_healthy
