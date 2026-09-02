@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -20,7 +21,7 @@ def parse_document(
     directory.  The caller remains responsible for returning bounded chunks
     instead of the full item list to an agent.
     """
-    if source not in {"knowledge_base", "model"}:
+    if source not in {"knowledge_base", "model", "rebuild"}:
         raise ValueError(f"Unsupported parser source: {source}")
     parser_source = source
     document_source = str(file_path)
@@ -44,14 +45,14 @@ def parse_document(
             document_source,
             local_path=path,
             image_analysis_workers=image_analysis_workers,
-            synchronize=parser_source != "model",
+            synchronize=parser_source == "knowledge_base",
         )
     else:
         raise ValueError(f"Unsupported document type: {suffix or 'unknown'}")
 
     # `path` may be a cache file while `document_source` is a MinIO URI. Synchronize the
     # parser's real output to the source-derived local path and the archive.
-    if parser_source != "model":
+    if parser_source == "knowledge_base":
         synchronize_processed_assets(
             document_source,
             produced_processing_dir=processing_document_dir(path),
@@ -95,6 +96,10 @@ def _parse_pdf_sources(
                     and not is_generated_standard_pdf_section(resolved_source)
                 ),
             )
+        elif parser_source == "rebuild":
+            # The rebuilt Harness workspace retains only user-usable TXT and
+            # image assets, not the PDF parser's diagnostic JSON manifest.
+            shutil.rmtree(processing_document_dir(resolved_path) / "json", ignore_errors=True)
         all_items.extend(items)
     return all_items
 

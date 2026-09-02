@@ -97,3 +97,24 @@
 ```powershell
 .\.venv\Scripts\python.exe scripts\data_rebuild\sync_feishu_material_catalog.py --source data\src\material.json
 ```
+
+## OSS → 解析 → 向量库（开发验证）
+
+新版入库只读取 `lark_document_catalog` 中带有 `oss_object_key` 的文档，不使用
+MinIO 或 `ingestion_registry`。原文件、解析 TXT 和图片输出保留在
+`data/harness/knowledge/<document-key>/`；chunk 和 embedding 只在
+`data/processing/lark/` 暂存，Milvus 写入成功后会自动删除。
+
+先用五份文档验证全链路：
+
+```powershell
+.\.venv\Scripts\python.exe -u scripts\data_rebuild\ingest_oss_knowledge.py `
+  --limit 5 --continue-on-error
+```
+
+如只检查解析、清洗和切块，不写入向量库且保留临时产物：
+
+```powershell
+.\.venv\Scripts\python.exe -u scripts\data_rebuild\ingest_oss_knowledge.py `
+  --limit 5 --no-upsert --continue-on-error
+```

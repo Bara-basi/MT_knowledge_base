@@ -38,6 +38,7 @@ from app.db.postgres import (
 from app.schemas.query import QueryRequest
 from app.services.chat_records import create_chat_record, record_chat_answer
 from app.services.harness import resolve_internal_session
+from app.services.lark_reference_links import resolve_lark_document_link
 from app.services.llm import LLMAPIError, LLMConfigError, LLMClient, LLMSettings
 from app.services.privacy import decrypt_chat_text, encrypt_chat_text
 
@@ -3951,6 +3952,9 @@ def _is_document_download_url(url: str) -> bool:
 
 
 def _resolve_lark_document_url(raw_path: str) -> str | None:
+    catalog_url = resolve_lark_document_link(raw_path)
+    if catalog_url:
+        return catalog_url
     file_name = _extract_reference_file_name(raw_path)
     if not file_name:
         return None

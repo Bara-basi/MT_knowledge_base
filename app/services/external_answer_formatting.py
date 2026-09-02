@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from app.core.config import settings
 from app.db.minio import parse_raw_document_reference
+from app.services.lark_reference_links import resolve_lark_document_link
 
 
 _REFERENCE_TAG = re.compile(
@@ -173,6 +174,9 @@ def _normalize_download_reference(raw_path: str) -> str:
 
 
 def _resolve_lark_document_url(raw_path: str) -> str | None:
+    catalog_url = resolve_lark_document_link(raw_path)
+    if catalog_url:
+        return catalog_url
     file_name = _extract_file_name(raw_path)
     if not file_name:
         return None

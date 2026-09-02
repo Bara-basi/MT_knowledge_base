@@ -9,6 +9,7 @@ from app.services.harness_attachments import harness_attachment_root
 
 RAW_ROOT = Path("data") / "raw"
 PROCESSING_ROOT = Path("data") / "processing"
+HARNESS_ROOT = Path("data") / "harness"
 
 
 def processing_document_dir(source_file: str | Path) -> Path:
@@ -30,6 +31,19 @@ def processing_document_dir(source_file: str | Path) -> Path:
         # same-name files from different users sharing data/processing output.
         attachment_dir = attachment_root.joinpath(*relative_attachment.parts[:3])
         return attachment_dir / "parsed"
+
+    harness_root_abs = (Path.cwd() / HARNESS_ROOT).resolve()
+    try:
+        relative_harness = source_abs.relative_to(harness_root_abs)
+    except ValueError:
+        pass
+    else:
+        # Rebuild downloads use data/harness/knowledge/<document-key>/original.
+        # Keep their text and images in that document's Harness workspace.
+        if "original" in relative_harness.parts:
+            original_index = relative_harness.parts.index("original")
+            return harness_root_abs.joinpath(*relative_harness.parts[:original_index]) / "parsed"
+        return source_abs.parent / "parsed"
     raw_root_abs = (Path.cwd() / RAW_ROOT).resolve()
 
     try:
