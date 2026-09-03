@@ -45,7 +45,6 @@ from app.services.embedding import (  # noqa: E402
 from app.services.knowledge_quality import is_acceptable_knowledge_file  # noqa: E402
 from app.services.parser.parser import parse_document  # noqa: E402
 from app.services.parser.paths import processing_document_dir  # noqa: E402
-from app.services.vector_store import VectorStoreService  # noqa: E402
 
 SUPPORTED_SUFFIXES = {".docx", ".xlsx", ".pptx", ".pdf"}
 def _harness_knowledge_root() -> Path:
@@ -200,14 +199,20 @@ def _apply_lark_chunk_metadata(document: CatalogDocument, chunks: list[Any]) -> 
         })
 
 
-def prepare_from_harness_txt(document: CatalogDocument) -> tuple[Path, list[Any]]:
-    """Rebuild chunks from the retained Harness TXT without raw-file parsing."""
+def chunks_from_harness_txt(document: CatalogDocument) -> tuple[Path, list[Any]]:
+    """Build chunks from retained Harness TXT without raw-file parsing."""
     txt_name = f"{Path(sanitize_path_part(document.document_name)).stem}.txt"
     txt_file = document.harness_document_dir / "txt" / txt_name
     items = load_items_from_txt(txt_file)
     chunks = split_items(items, source_file=txt_file)
     _apply_lark_chunk_metadata(document, chunks)
-    chunk_file = document.processing_dir / "chunk" / f"{Path(txt_name).stem}.chunks.json"
+    return txt_file, chunks
+
+
+def prepare_from_harness_txt(document: CatalogDocument) -> tuple[Path, list[Any]]:
+    """Build and persist temporary chunks from retained Harness TXT."""
+    txt_file, chunks = chunks_from_harness_txt(document)
+    chunk_file = document.processing_dir / "chunk" / f"{txt_file.stem}.chunks.json"
     save_chunks(chunks, chunk_file)
     return chunk_file, chunks
 
@@ -248,6 +253,37 @@ def missing_vector_documents(
     return missing, len(existing_file_ids)
 
 
+def rebuild_bm25_from_harness(*, limit: int | None, continue_on_error: bool) -> int:
+    """Recreate only the global BM25 vocabulary from retained parsed TXT files."""
+    documents = load_catalog_documents(limit, None)
+    if not documents:
+        raise RuntimeError("No OSS-backed supported documents found in lark_document_catalog")
+    all_chunks: list[Any] = []
+    failures: list[tuple[str, str]] = []
+    print(f"[bm25-rebuild] harness_txt_documents={len(documents)}", flush=True)
+    for index, document in enumerate(documents, 1):
+        print(f"[{index}/{len(documents)}] harness-txt→chunk {document.lark_path}", flush=True)
+        try:
+            _txt_file, chunks = chunks_from_harness_txt(document)
+            all_chunks.extend(chunks)
+            print(f"[{index}/{len(documents)}] chunks={len(chunks)}", flush=True)
+        except Exception as exc:
+            failures.append((document.lark_path, str(exc)))
+            print(f"[{index}/{len(documents)}] harness-txt failed {document.lark_path}: {exc}", flush=True)
+            if not continue_on_error:
+                raise
+    if not all_chunks:
+        raise RuntimeError("Cannot rebuild BM25: no chunks could be built from Harness TXT files")
+    output_file, _model = EmbeddingService().save_global_bm25_model_file(
+        all_chunks,
+        default_bm25_model_file(),
+    )
+    print(f"[bm25-rebuild] saved={output_file} chunks={len(all_chunks)} failures={len(failures)}", flush=True)
+    for path, error in failures:
+        print(f"[failure] {path}: {error}", flush=True)
+    return 1 if failures else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=None, help="Only ingest the first N catalog documents (use 5 for development validation).")
@@ -273,6 +309,11 @@ def main() -> int:
         default=DEFAULT_MISSING_VECTOR_REPORT,
         help="JSON report written by --repair-missing-vectors.",
     )
+    parser.add_argument(
+        "--rebuild-bm25-from-harness",
+        action="store_true",
+        help="Read retained Harness TXT files, rebuild chunks in memory, and save only data/processing/global.bm25.json.",
+    )
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         raise SystemExit("--limit must be at least 1")
@@ -280,6 +321,12 @@ def main() -> int:
         raise SystemExit("--resume-from-chunks cannot be combined with document filters or --repair-missing-vectors")
     if args.repair_missing_vectors and (args.document_key or args.document_key_file):
         raise SystemExit("--repair-missing-vectors always scans the full catalog and cannot be combined with document filters")
+    if args.rebuild_bm25_from_harness and (
+        args.resume_from_chunks or args.repair_missing_vectors or args.document_key or args.document_key_file or args.no_upsert
+    ):
+        raise SystemExit("--rebuild-bm25-from-harness cannot be combined with other ingestion modes or filters")
+    if args.rebuild_bm25_from_harness:
+        return rebuild_bm25_from_harness(limit=args.limit, continue_on_error=args.continue_on_error)
 
     prepared: list[tuple[str, Path, list[Any]]] = []
     failures: list[tuple[str, str]] = []
@@ -305,6 +352,8 @@ def main() -> int:
         if args.repair_missing_vectors:
             catalog_document_count = len(documents)
             print(f"[repair] scan catalog_documents={catalog_document_count}", flush=True)
+            from app.services.vector_store import VectorStoreService
+
             vector_store = VectorStoreService()
             documents, existing_vector_file_id_count = missing_vector_documents(documents, vector_store)
             args.missing_vector_report.parent.mkdir(parents=True, exist_ok=True)
@@ -390,7 +439,10 @@ def main() -> int:
         else:
             bm25_file, bm25_model = embedding_service.save_global_bm25_model_file(all_chunks, bm25_file)
             print(f"[bm25] trained={bm25_file} chunks={len(all_chunks)}", flush=True)
-        vector_store = vector_store or VectorStoreService()
+        if vector_store is None:
+            from app.services.vector_store import VectorStoreService
+
+            vector_store = VectorStoreService()
         for index, (lark_path, chunk_file, _chunks) in enumerate(prepared, 1):
             embedding_file = chunk_file.parents[1] / "embedding" / chunk_file.name.replace(".chunks.json", ".embeddings.json")
             try:

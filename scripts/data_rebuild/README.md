@@ -164,6 +164,16 @@ sudo chown -R mtsco:mtsco \
 清单默认写到 `data/metadata/lark_missing_vector_documents.json`。若 Milvus 已有部分
 向量，该模式必须保留已有 `data/processing/global.bm25.json`，以保持 BM25 词表一致。
 
+若误删了 `data/processing`，但 Harness 中的 TXT 已保留，可只重建 BM25 词表。该模式
+遍历所有 Harness TXT，在内存中执行 `TXT → chunk`，只写回
+`data/processing/global.bm25.json`；不会下载 OSS、调用原始解析器、生成 embedding 或写入
+Milvus：
+
+```powershell
+.\.venv\Scripts\python.exe -u scripts\data_rebuild\ingest_oss_knowledge.py `
+  --rebuild-bm25-from-harness --continue-on-error
+```
+
 ## 日常飞书增量刷新
 
 飞书文档后续变更时，运行下面脚本。它会暴力扫描全部映射来源、逐份下载并计算
