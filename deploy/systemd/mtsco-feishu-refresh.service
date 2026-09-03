@@ -1,0 +1,22 @@
+[Unit]
+Description=MTSCO Daily Feishu Knowledge Refresh and Vector Ingestion
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=mtsco
+Group=mtsco
+WorkingDirectory=/opt/mtsco-knowledge-base
+EnvironmentFile=/opt/mtsco-knowledge-base/.env
+EnvironmentFile=-/opt/mtsco-knowledge-base/.env.host
+RuntimeDirectory=mtsco-feishu-refresh
+RuntimeDirectoryMode=0750
+# A non-blocking lock prevents a timer run from overlapping a manually started
+# refresh.  The command exits non-zero if another refresh is still active.
+ExecStart=/usr/bin/flock -n /run/mtsco-feishu-refresh/refresh.lock /opt/mtsco-knowledge-base/.venv/bin/python -u /opt/mtsco-knowledge-base/scripts/data_rebuild/refresh_feishu_knowledge.py --image-workers 3
+TimeoutStartSec=infinity
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run MTSCO Feishu knowledge refresh daily
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 Asia/Shanghai
+Persistent=true
+AccuracySec=5min
+Unit=mtsco-feishu-refresh.service
+
+[Install]
+WantedBy=timers.target

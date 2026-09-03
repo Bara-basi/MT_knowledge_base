@@ -118,3 +118,57 @@ MinIO 或 `ingestion_registry`。原文件、解析 TXT 和图片输出保留在
 .\.venv\Scripts\python.exe -u scripts\data_rebuild\ingest_oss_knowledge.py `
   --limit 5 --no-upsert --continue-on-error
 ```
+
+## 日常飞书增量刷新
+
+飞书文档后续变更时，运行下面脚本。它会暴力扫描全部映射来源、逐份下载并计算
+SHA-256；只有新增、内容哈希变化或 OSS 路径变化的文档才会上传 OSS、更新 catalog
+并重新解析、嵌入、覆盖 Milvus 中该飞书文档原有的 chunks。
+
+```powershell
+.\.venv\Scripts\python.exe -u scripts\data_rebuild\refresh_feishu_knowledge.py `
+  --image-workers 3
+```
+
+首次可先用 `--dry-run` 检查变更数量；它不会写 OSS、PostgreSQL 或 Milvus：
+
+```powershell
+.\.venv\Scripts\python.exe -u scripts\data_rebuild\refresh_feishu_knowledge.py --dry-run
+```
+
+自动入库只接受 `.docx`、`.xlsx`、`.pptx` 与原生文本充足的 PDF。扫描件 PDF、
+低文本 PDF、不可读文件和其他格式会被拒绝，名称写入
+`data/metadata/lark_incremental_failures.json`。增量入库会加载已有全局 BM25 模型，
+以避免改变旧向量的稀疏向量词表。
+
+## 服务器每日增量刷新（systemd）
+
+仓库包含 `deploy/systemd/mtsco-feishu-refresh.service` 和对应的 timer。部署代码和
+项目 Python 依赖后，在服务器执行：
+
+```bash
+sudo install -m 0644 deploy/systemd/mtsco-feishu-refresh.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/mtsco-feishu-refresh.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now mtsco-feishu-refresh.timer
+systemctl list-timers mtsco-feishu-refresh.timer
+```
+
+timer 每天 02:30（`Asia/Shanghai`）运行；`Persistent=true` 表示服务器在计划时间
+关机时，会在下次启动后补跑一次。任务读取与 API 相同的 `.env`、`.env.host`，不需要
+重启 API 服务。首次建议手动验证一次：
+
+```bash
+sudo systemctl start mtsco-feishu-refresh.service
+sudo journalctl -u mtsco-feishu-refresh.service -n 200 --no-pager
+```
+
+查看后续执行状态：
+
+```bash
+systemctl list-timers mtsco-feishu-refresh.timer
+sudo journalctl -u mtsco-feishu-refresh.service -f
+```
+
+同一时刻只允许一个刷新任务运行；若需要手动运行，请先确认该 service 不在 `active`
+状态，避免与定时任务争用 OSS、数据库和 Milvus 写入。

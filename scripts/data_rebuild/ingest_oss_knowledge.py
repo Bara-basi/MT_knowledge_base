@@ -29,7 +29,12 @@ load_dotenv(PROJECT_ROOT / ".env.host", override=True)
 from app.core.config import settings  # noqa: E402
 from app.db.postgres import postgres_connection  # noqa: E402
 from app.services.chunking.splitter import build_file_id, save_chunks, split_items  # noqa: E402
-from app.services.embedding import EmbeddingService, default_bm25_model_file  # noqa: E402
+from app.services.embedding import (  # noqa: E402
+    EmbeddingService,
+    default_bm25_model_file,
+    load_bm25_embedding_function,
+)
+from app.services.knowledge_quality import is_acceptable_knowledge_file  # noqa: E402
 from app.services.parser.parser import parse_document  # noqa: E402
 from app.services.parser.paths import processing_document_dir  # noqa: E402
 from app.services.vector_store import VectorStoreService  # noqa: E402
@@ -64,7 +69,13 @@ def _oss_bucket():
     required = (settings.aliyun_oss_endpoint, settings.aliyun_access_key_id, settings.aliyun_access_key_secret, settings.aliyun_raw_data_bucket)
     if not all(required):
         raise RuntimeError("Missing Aliyun OSS configuration in .env")
-    import oss2
+    try:
+        import oss2
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing oss2 in this virtual environment. From the project root run: "
+            ".venv/bin/python -m pip install 'oss2>=2.19.1,<3.0.0'"
+        ) from exc
 
     return oss2.Bucket(
         oss2.Auth(settings.aliyun_access_key_id, settings.aliyun_access_key_secret),
@@ -73,17 +84,26 @@ def _oss_bucket():
     )
 
 
-def load_catalog_documents(limit: int | None) -> list[CatalogDocument]:
+def load_catalog_documents(
+    limit: int | None,
+    document_keys: list[str] | None = None,
+) -> list[CatalogDocument]:
     query = """
         SELECT document_key, document_name, document_link, path_titles, oss_object_key
         FROM lark_document_catalog
         WHERE oss_object_key IS NOT NULL AND oss_object_key <> ''
-        ORDER BY path_titles, document_name, document_key
     """
+    params: list[Any] = []
+    if document_keys:
+        query += " AND document_key = ANY(%s)"
+        params.append(document_keys)
+    query += " ORDER BY path_titles, document_name, document_key"
     if limit is not None:
         query += " LIMIT %s"
     with postgres_connection() as conn, conn.cursor() as cur:
-        cur.execute(query, (limit,) if limit is not None else ())
+        if limit is not None:
+            params.append(limit)
+        cur.execute(query, params)
         rows = cur.fetchall()
     return [
         CatalogDocument(
@@ -112,7 +132,9 @@ def prepare(document: CatalogDocument, source: Path, *, image_workers: int) -> t
     if not txt_file.is_file():
         raise RuntimeError(f"Parser produced no txt file: {txt_file}")
     chunks = split_items(items, source_file=source)
-    file_id = build_file_id(Path(document.document_name).suffix.lstrip(".") or "file", document.document_key)
+    # Stable across document renames and extension changes, so vector upsert
+    # removes every prior chunk for this Lark document before inserting new ones.
+    file_id = build_file_id("lark", document.document_key)
     for chunk in chunks:
         chunk.metadata.update({
             "file_id": file_id,
@@ -134,11 +156,19 @@ def main() -> int:
     parser.add_argument("--image-workers", type=int, default=3)
     parser.add_argument("--no-upsert", action="store_true", help="Keep chunk/embedding artifacts and do not write Milvus.")
     parser.add_argument("--continue-on-error", action="store_true")
+    parser.add_argument("--document-key", action="append", default=[], help="Ingest only this catalog document key; repeat as needed.")
+    parser.add_argument("--document-key-file", type=Path, help="UTF-8 file containing one catalog document key per line.")
+    parser.add_argument("--use-existing-bm25", action="store_true", help="Use data/processing/global.bm25.json instead of retraining BM25; required for incremental updates.")
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         raise SystemExit("--limit must be at least 1")
 
-    documents = load_catalog_documents(args.limit)
+    selected_keys = list(args.document_key)
+    if args.document_key_file:
+        selected_keys.extend(
+            line.strip() for line in args.document_key_file.read_text(encoding="utf-8").splitlines() if line.strip()
+        )
+    documents = load_catalog_documents(args.limit, list(dict.fromkeys(selected_keys)) or None)
     if not documents:
         raise SystemExit("No OSS-backed supported documents found in lark_document_catalog")
     print(f"[start] catalog_documents={len(documents)} limit={args.limit or 'all'}", flush=True)
@@ -149,6 +179,9 @@ def main() -> int:
         print(f"[{index}/{len(documents)}] download+parse {document.lark_path}", flush=True)
         try:
             source = download_to_workspace(bucket, document)
+            accepted, rule = is_acceptable_knowledge_file(source)
+            if not accepted:
+                raise ValueError(f"quality rejected: {rule}")
             _txt, chunk_file, chunks = prepare(document, source, image_workers=args.image_workers)
             prepared.append((document, chunk_file, chunks))
             print(f"[{index}/{len(documents)}] chunks={len(chunks)}", flush=True)
@@ -161,8 +194,15 @@ def main() -> int:
     if prepared and not args.no_upsert:
         embedding_service = EmbeddingService()
         all_chunks = [chunk for _doc, _path, chunks in prepared for chunk in chunks]
-        bm25_file, bm25_model = embedding_service.save_global_bm25_model_file(all_chunks, default_bm25_model_file())
-        print(f"[bm25] trained={bm25_file} chunks={len(all_chunks)}", flush=True)
+        bm25_file = default_bm25_model_file()
+        if args.use_existing_bm25:
+            if not bm25_file.is_file():
+                raise RuntimeError("--use-existing-bm25 requires data/processing/global.bm25.json")
+            bm25_model = load_bm25_embedding_function(bm25_file)
+            print(f"[bm25] loaded={bm25_file}", flush=True)
+        else:
+            bm25_file, bm25_model = embedding_service.save_global_bm25_model_file(all_chunks, bm25_file)
+            print(f"[bm25] trained={bm25_file} chunks={len(all_chunks)}", flush=True)
         vector_store = VectorStoreService()
         for index, (document, chunk_file, _chunks) in enumerate(prepared, 1):
             embedding_file = document.processing_dir / "embedding" / chunk_file.name.replace(".chunks.json", ".embeddings.json")
