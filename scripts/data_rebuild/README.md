@@ -105,6 +105,10 @@ MinIO 或 `ingestion_registry`。原文件、解析 TXT 和图片输出保留在
 `data/harness/knowledge/<document-key>/`；chunk 和 embedding 只在
 `data/processing/lark/` 暂存，Milvus 写入成功后会自动删除。
 
+Linux 服务器应确保 `EMBEDDING_CACHE_DIR` 和 `RERANKER_CACHE_DIR` 是 `mtsco`
+用户可写的 Linux 路径；推荐在 `.env.host` 中设置为
+`/opt/mtsco-knowledge-base/data/models`。不要沿用旧 Windows 配置 `E:\\models`。
+
 先用五份文档验证全链路：
 
 ```powershell

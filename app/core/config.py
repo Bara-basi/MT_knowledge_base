@@ -122,7 +122,10 @@ class Settings:
         "BAAI/bge-large-zh-v1.5",
     )
     use_local_embedding_model: bool = _env_bool("USE_LOCAL_EMBEDDING_MODEL", True)
-    embedding_cache_dir: str = os.getenv("EMBEDDING_CACHE_DIR", r"E:\models")
+    # Keep the default inside the project so the same configuration works on
+    # Windows development machines and the Linux systemd deployment.  A
+    # deployment can still point this at a shared model volume explicitly.
+    embedding_cache_dir: str = os.getenv("EMBEDDING_CACHE_DIR", str(Path("data") / "models"))
     embedding_device: str | None = os.getenv("EMBEDDING_DEVICE") or None
     embedding_batch_size: int = int(os.getenv("EMBEDDING_BATCH_SIZE", "16"))
     embedding_normalize: bool = (
