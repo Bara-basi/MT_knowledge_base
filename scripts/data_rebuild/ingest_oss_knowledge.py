@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import shutil
 import sys
 from dataclasses import dataclass
@@ -50,6 +51,7 @@ def _harness_knowledge_root() -> Path:
 
 HARNESS_KNOWLEDGE_ROOT = _harness_knowledge_root()
 PROCESSING_ROOT = PROJECT_ROOT / "data" / "processing"
+DEFAULT_MISSING_VECTOR_REPORT = PROJECT_ROOT / "data" / "metadata" / "lark_missing_vector_documents.json"
 
 
 @dataclass(frozen=True)
@@ -211,6 +213,19 @@ def load_pending_chunk_files(limit: int | None) -> list[tuple[str, Path, list[An
     return pending
 
 
+def missing_vector_documents(
+    documents: list[CatalogDocument], vector_store: VectorStoreService
+) -> tuple[list[CatalogDocument], int]:
+    """Find catalog documents with no persisted Milvus chunk for their Lark ID."""
+    existing_file_ids = vector_store.list_file_ids()
+    missing = [
+        document
+        for document in documents
+        if build_file_id("lark", document.document_key) not in existing_file_ids
+    ]
+    return missing, len(existing_file_ids)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=None, help="Only ingest the first N catalog documents (use 5 for development validation).")
@@ -225,14 +240,29 @@ def main() -> int:
         action="store_true",
         help="Skip OSS download and parsing; embed/upsert retained data/processing/lark/*/chunk/*.chunks.json files.",
     )
+    parser.add_argument(
+        "--repair-missing-vectors",
+        action="store_true",
+        help="Scan every catalog document against Milvus and re-ingest only documents with no persisted chunks.",
+    )
+    parser.add_argument(
+        "--missing-vector-report",
+        type=Path,
+        default=DEFAULT_MISSING_VECTOR_REPORT,
+        help="JSON report written by --repair-missing-vectors.",
+    )
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         raise SystemExit("--limit must be at least 1")
-    if args.resume_from_chunks and (args.document_key or args.document_key_file):
-        raise SystemExit("--resume-from-chunks cannot be combined with --document-key or --document-key-file")
+    if args.resume_from_chunks and (args.document_key or args.document_key_file or args.repair_missing_vectors):
+        raise SystemExit("--resume-from-chunks cannot be combined with document filters or --repair-missing-vectors")
+    if args.repair_missing_vectors and (args.document_key or args.document_key_file):
+        raise SystemExit("--repair-missing-vectors always scans the full catalog and cannot be combined with document filters")
 
     prepared: list[tuple[str, Path, list[Any]]] = []
     failures: list[tuple[str, str]] = []
+    vector_store: VectorStoreService | None = None
+    existing_vector_file_id_count = 0
     if args.resume_from_chunks:
         prepared = load_pending_chunk_files(args.limit)
         if not prepared:
@@ -244,9 +274,43 @@ def main() -> int:
             selected_keys.extend(
                 line.strip() for line in args.document_key_file.read_text(encoding="utf-8").splitlines() if line.strip()
             )
-        documents = load_catalog_documents(args.limit, list(dict.fromkeys(selected_keys)) or None)
+        documents = load_catalog_documents(
+            None if args.repair_missing_vectors else args.limit,
+            list(dict.fromkeys(selected_keys)) or None,
+        )
         if not documents:
             raise SystemExit("No OSS-backed supported documents found in lark_document_catalog")
+        if args.repair_missing_vectors:
+            catalog_document_count = len(documents)
+            print(f"[repair] scan catalog_documents={catalog_document_count}", flush=True)
+            vector_store = VectorStoreService()
+            documents, existing_vector_file_id_count = missing_vector_documents(documents, vector_store)
+            args.missing_vector_report.parent.mkdir(parents=True, exist_ok=True)
+            args.missing_vector_report.write_text(
+                json.dumps(
+                    {
+                        "catalog_documents": catalog_document_count,
+                        "persisted_file_ids": existing_vector_file_id_count,
+                        "missing": [
+                            {"document_key": document.document_key, "lark_path": document.lark_path}
+                            for document in documents
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            if args.limit is not None:
+                documents = documents[:args.limit]
+            print(
+                f"[repair] persisted_file_ids={existing_vector_file_id_count} "
+                f"missing_documents={len(documents)} report={args.missing_vector_report}",
+                flush=True,
+            )
+            if not documents:
+                print("[repair] all catalog documents already have Milvus chunks", flush=True)
+                return 0
         print(f"[start] catalog_documents={len(documents)} limit={args.limit or 'all'}", flush=True)
         bucket = _oss_bucket()
         for index, document in enumerate(documents, 1):
@@ -275,7 +339,14 @@ def main() -> int:
         embedding_service = EmbeddingService()
         all_chunks = [chunk for _path, _chunk_file, chunks in prepared for chunk in chunks]
         bm25_file = default_bm25_model_file()
-        use_existing_bm25 = args.use_existing_bm25 or (args.resume_from_chunks and bm25_file.is_file())
+        if args.repair_missing_vectors and existing_vector_file_id_count and not bm25_file.is_file():
+            raise RuntimeError(
+                "Cannot repair a partial Milvus collection without data/processing/global.bm25.json. "
+                "Restore that file before repairing so sparse-vector vocabulary remains stable."
+            )
+        use_existing_bm25 = args.use_existing_bm25 or (
+            (args.resume_from_chunks or args.repair_missing_vectors) and bm25_file.is_file()
+        )
         if use_existing_bm25:
             if not bm25_file.is_file():
                 raise RuntimeError("--use-existing-bm25 requires data/processing/global.bm25.json")
@@ -284,7 +355,7 @@ def main() -> int:
         else:
             bm25_file, bm25_model = embedding_service.save_global_bm25_model_file(all_chunks, bm25_file)
             print(f"[bm25] trained={bm25_file} chunks={len(all_chunks)}", flush=True)
-        vector_store = VectorStoreService()
+        vector_store = vector_store or VectorStoreService()
         for index, (lark_path, chunk_file, _chunks) in enumerate(prepared, 1):
             embedding_file = chunk_file.parents[1] / "embedding" / chunk_file.name.replace(".chunks.json", ".embeddings.json")
             try:

@@ -17,6 +17,16 @@ def test_default_report_date_uses_previous_day_in_report_timezone() -> None:
     assert report_date == date(2026, 7, 7)
 
 
+def test_get_report_timezone_falls_back_for_an_invalid_zoneinfo_key(monkeypatch) -> None:
+    monkeypatch.setattr(
+        daily_report,
+        "settings",
+        SimpleNamespace(daily_report_timezone="Asia/"),
+    )
+
+    assert daily_report.get_report_timezone().key == "Asia/Shanghai"
+
+
 def test_build_daily_report_text_lists_previous_day_user_counts() -> None:
     text = daily_report.build_daily_report_text(
         [

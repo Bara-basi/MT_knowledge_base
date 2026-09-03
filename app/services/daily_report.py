@@ -25,7 +25,7 @@ DailyUserChatStat = UsageUserStat
 def get_report_timezone() -> ZoneInfo:
     try:
         return ZoneInfo(settings.daily_report_timezone or "Asia/Shanghai")
-    except ZoneInfoNotFoundError:
+    except (ZoneInfoNotFoundError, ValueError):
         return ZoneInfo("Asia/Shanghai")
 
 

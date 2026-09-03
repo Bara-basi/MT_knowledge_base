@@ -150,6 +150,18 @@ sudo chown -R mtsco:mtsco \
 该模式优先复用已有 `data/processing/global.bm25.json`；每份文档成功写入 Milvus 后，
 只删除该文档的 chunk 和 embedding 临时文件。
 
+若入库在中途失败、无法确定哪些临时 chunk 已被清理，可在 Milvus 恢复后执行完整
+对账。它读取全量 `lark_document_catalog`，按稳定的 Lark `file_id` 检查 Milvus 是否
+至少保留一个 chunk；仅重新解析和入库完全缺失的文档，并写出缺失项清单：
+
+```powershell
+.\.venv\Scripts\python.exe -u scripts\data_rebuild\ingest_oss_knowledge.py `
+  --repair-missing-vectors --continue-on-error
+```
+
+清单默认写到 `data/metadata/lark_missing_vector_documents.json`。若 Milvus 已有部分
+向量，该模式必须保留已有 `data/processing/global.bm25.json`，以保持 BM25 词表一致。
+
 ## 日常飞书增量刷新
 
 飞书文档后续变更时，运行下面脚本。它会暴力扫描全部映射来源、逐份下载并计算

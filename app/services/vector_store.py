@@ -200,6 +200,32 @@ class VectorStoreService:
         )
         return bool(rows)
 
+    def list_file_ids(self, *, batch_size: int = 4096) -> set[str]:
+        """Return every persisted source-file identifier with one collection scan."""
+        if not self.client.has_collection(self.config.name):
+            return set()
+        self.client.load_collection(self.config.name)
+        iterator = self.client.query_iterator(
+            collection_name=self.config.name,
+            filter='id != ""',
+            output_fields=["file_id"],
+            batch_size=batch_size,
+        )
+        file_ids: set[str] = set()
+        try:
+            while True:
+                rows = iterator.next()
+                if not rows:
+                    break
+                file_ids.update(
+                    str(row.get("file_id") or "").strip()
+                    for row in rows
+                    if str(row.get("file_id") or "").strip()
+                )
+        finally:
+            iterator.close()
+        return file_ids
+
     def get_by_ids(self, ids: list[str]) -> list[dict[str, Any]]:
         if not ids:
             return []

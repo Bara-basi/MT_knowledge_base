@@ -12,6 +12,16 @@ from app.services.usage_report import UsageReportData, UsageUserStat
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
+def test_get_report_timezone_falls_back_for_an_invalid_zoneinfo_key(monkeypatch) -> None:
+    monkeypatch.setattr(
+        weekly_report,
+        "settings",
+        SimpleNamespace(weekly_report_timezone="Asia/"),
+    )
+
+    assert weekly_report.get_report_timezone().key == "Asia/Shanghai"
+
+
 def test_default_report_end_uses_last_friday_when_run_on_monday() -> None:
     report_end = weekly_report.default_report_end(
         datetime(2026, 7, 20, 9, 0, tzinfo=SHANGHAI)
