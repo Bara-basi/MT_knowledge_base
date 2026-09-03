@@ -3,13 +3,19 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import urlparse
 
+from app.core.config import settings
 from app.db.minio import parse_raw_document_reference
 from app.services.harness_attachments import harness_attachment_root
 
 
 RAW_ROOT = Path("data") / "raw"
 PROCESSING_ROOT = Path("data") / "processing"
-HARNESS_ROOT = Path("data") / "harness"
+
+
+def harness_workspace_root() -> Path:
+    """Resolve the configured Harness workspace, relative to the project cwd."""
+    configured = Path(settings.harness_workdir).expanduser()
+    return configured.resolve() if configured.is_absolute() else (Path.cwd() / configured).resolve()
 
 
 def processing_document_dir(source_file: str | Path) -> Path:
@@ -32,14 +38,14 @@ def processing_document_dir(source_file: str | Path) -> Path:
         attachment_dir = attachment_root.joinpath(*relative_attachment.parts[:3])
         return attachment_dir / "parsed"
 
-    harness_root_abs = (Path.cwd() / HARNESS_ROOT).resolve()
+    harness_root_abs = harness_workspace_root()
     try:
         relative_harness = source_abs.relative_to(harness_root_abs)
     except ValueError:
         pass
     else:
         # Legacy rebuild downloads used
-        # data/harness/knowledge/<document-key>/original/<file>.  Preserve
+        # <harness-workdir>/knowledge/<document-key>/original/<file>. Preserve
         # their parser location until those workspaces have been re-ingested.
         if "original" in relative_harness.parts:
             original_index = relative_harness.parts.index("original")

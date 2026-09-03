@@ -1,6 +1,6 @@
 """Parse OSS-backed Lark knowledge, embed it, and upsert it into Milvus.
 
-Only parser TXT/image assets live in ``data/harness/knowledge``.  OSS source
+Only parser TXT/image assets live in ``$HARNESS_WORKDIR/knowledge``.  OSS source
 downloads, parser work files, chunks and embeddings live temporarily in
 ``data/processing``; chunk and embedding JSON are removed after vector writes.
 """
@@ -34,6 +34,7 @@ from app.services.embedding import (  # noqa: E402
     EmbeddingService,
     default_bm25_model_file,
     load_bm25_embedding_function,
+    load_chunks,
 )
 from app.services.knowledge_quality import is_acceptable_knowledge_file  # noqa: E402
 from app.services.parser.parser import parse_document  # noqa: E402
@@ -41,7 +42,13 @@ from app.services.parser.paths import processing_document_dir  # noqa: E402
 from app.services.vector_store import VectorStoreService  # noqa: E402
 
 SUPPORTED_SUFFIXES = {".docx", ".xlsx", ".pptx", ".pdf"}
-HARNESS_KNOWLEDGE_ROOT = PROJECT_ROOT / "data" / "harness" / "knowledge"
+def _harness_knowledge_root() -> Path:
+    configured = Path(settings.harness_workdir).expanduser()
+    workdir = configured if configured.is_absolute() else PROJECT_ROOT / configured
+    return workdir.resolve() / "knowledge"
+
+
+HARNESS_KNOWLEDGE_ROOT = _harness_knowledge_root()
 PROCESSING_ROOT = PROJECT_ROOT / "data" / "processing"
 
 
@@ -187,6 +194,23 @@ def cleanup_temporary_parser_files(document: CatalogDocument) -> None:
     shutil.rmtree(document.processing_dir / "parsed", ignore_errors=True)
 
 
+def load_pending_chunk_files(limit: int | None) -> list[tuple[str, Path, list[Any]]]:
+    """Load retained chunk files without downloading or parsing source files."""
+    chunk_files = sorted((PROCESSING_ROOT / "lark").glob("*/chunk/*.chunks.json"))
+    if limit is not None:
+        chunk_files = chunk_files[:limit]
+    pending: list[tuple[str, Path, list[Any]]] = []
+    for chunk_file in chunk_files:
+        chunks = load_chunks(chunk_file)
+        if not chunks:
+            print(f"[resume] skip empty chunk file {chunk_file}", flush=True)
+            continue
+        metadata = chunks[0].metadata if chunks else {}
+        lark_path = str(metadata.get("lark_path") or metadata.get("file_path") or chunk_file)
+        pending.append((lark_path, chunk_file, chunks))
+    return pending
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=None, help="Only ingest the first N catalog documents (use 5 for development validation).")
@@ -196,49 +220,63 @@ def main() -> int:
     parser.add_argument("--document-key", action="append", default=[], help="Ingest only this catalog document key; repeat as needed.")
     parser.add_argument("--document-key-file", type=Path, help="UTF-8 file containing one catalog document key per line.")
     parser.add_argument("--use-existing-bm25", action="store_true", help="Use data/processing/global.bm25.json instead of retraining BM25; required for incremental updates.")
+    parser.add_argument(
+        "--resume-from-chunks",
+        action="store_true",
+        help="Skip OSS download and parsing; embed/upsert retained data/processing/lark/*/chunk/*.chunks.json files.",
+    )
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         raise SystemExit("--limit must be at least 1")
+    if args.resume_from_chunks and (args.document_key or args.document_key_file):
+        raise SystemExit("--resume-from-chunks cannot be combined with --document-key or --document-key-file")
 
-    selected_keys = list(args.document_key)
-    if args.document_key_file:
-        selected_keys.extend(
-            line.strip() for line in args.document_key_file.read_text(encoding="utf-8").splitlines() if line.strip()
-        )
-    documents = load_catalog_documents(args.limit, list(dict.fromkeys(selected_keys)) or None)
-    if not documents:
-        raise SystemExit("No OSS-backed supported documents found in lark_document_catalog")
-    print(f"[start] catalog_documents={len(documents)} limit={args.limit or 'all'}", flush=True)
-    bucket = _oss_bucket()
-    prepared: list[tuple[CatalogDocument, Path, list[Any]]] = []
+    prepared: list[tuple[str, Path, list[Any]]] = []
     failures: list[tuple[str, str]] = []
-    for index, document in enumerate(documents, 1):
-        print(f"[{index}/{len(documents)}] download+parse {document.lark_path}", flush=True)
-        try:
-            source = download_to_temporary_source(bucket, document)
-            accepted, rule = is_acceptable_knowledge_file(source)
-            if not accepted:
-                raise ValueError(f"quality rejected: {rule}")
-            _txt, chunk_file, chunks = prepare(document, source, image_workers=args.image_workers)
-            # Replace only this document's obsolete hash-named workspace after
-            # the OSS download and parser output both completed successfully.
-            if document.legacy_workspace_dir.is_dir():
-                shutil.rmtree(document.legacy_workspace_dir)
-            prepared.append((document, chunk_file, chunks))
-            print(f"[{index}/{len(documents)}] chunks={len(chunks)}", flush=True)
-        except Exception as exc:
-            failures.append((document.lark_path, str(exc)))
-            print(f"[{index}/{len(documents)}] failed {document.lark_path}: {exc}", flush=True)
-            if not args.continue_on_error:
-                raise
-        finally:
-            cleanup_temporary_parser_files(document)
+    if args.resume_from_chunks:
+        prepared = load_pending_chunk_files(args.limit)
+        if not prepared:
+            raise SystemExit("No retained chunk files found under data/processing/lark")
+        print(f"[start] resume_from_chunks={len(prepared)} limit={args.limit or 'all'}", flush=True)
+    else:
+        selected_keys = list(args.document_key)
+        if args.document_key_file:
+            selected_keys.extend(
+                line.strip() for line in args.document_key_file.read_text(encoding="utf-8").splitlines() if line.strip()
+            )
+        documents = load_catalog_documents(args.limit, list(dict.fromkeys(selected_keys)) or None)
+        if not documents:
+            raise SystemExit("No OSS-backed supported documents found in lark_document_catalog")
+        print(f"[start] catalog_documents={len(documents)} limit={args.limit or 'all'}", flush=True)
+        bucket = _oss_bucket()
+        for index, document in enumerate(documents, 1):
+            print(f"[{index}/{len(documents)}] download+parse {document.lark_path}", flush=True)
+            try:
+                source = download_to_temporary_source(bucket, document)
+                accepted, rule = is_acceptable_knowledge_file(source)
+                if not accepted:
+                    raise ValueError(f"quality rejected: {rule}")
+                _txt, chunk_file, chunks = prepare(document, source, image_workers=args.image_workers)
+                # Replace only this document's obsolete hash-named workspace after
+                # the OSS download and parser output both completed successfully.
+                if document.legacy_workspace_dir.is_dir():
+                    shutil.rmtree(document.legacy_workspace_dir)
+                prepared.append((document.lark_path, chunk_file, chunks))
+                print(f"[{index}/{len(documents)}] chunks={len(chunks)}", flush=True)
+            except Exception as exc:
+                failures.append((document.lark_path, str(exc)))
+                print(f"[{index}/{len(documents)}] failed {document.lark_path}: {exc}", flush=True)
+                if not args.continue_on_error:
+                    raise
+            finally:
+                cleanup_temporary_parser_files(document)
 
     if prepared and not args.no_upsert:
         embedding_service = EmbeddingService()
-        all_chunks = [chunk for _doc, _path, chunks in prepared for chunk in chunks]
+        all_chunks = [chunk for _path, _chunk_file, chunks in prepared for chunk in chunks]
         bm25_file = default_bm25_model_file()
-        if args.use_existing_bm25:
+        use_existing_bm25 = args.use_existing_bm25 or (args.resume_from_chunks and bm25_file.is_file())
+        if use_existing_bm25:
             if not bm25_file.is_file():
                 raise RuntimeError("--use-existing-bm25 requires data/processing/global.bm25.json")
             bm25_model = load_bm25_embedding_function(bm25_file)
@@ -247,21 +285,27 @@ def main() -> int:
             bm25_file, bm25_model = embedding_service.save_global_bm25_model_file(all_chunks, bm25_file)
             print(f"[bm25] trained={bm25_file} chunks={len(all_chunks)}", flush=True)
         vector_store = VectorStoreService()
-        for index, (document, chunk_file, _chunks) in enumerate(prepared, 1):
-            embedding_file = document.processing_dir / "embedding" / chunk_file.name.replace(".chunks.json", ".embeddings.json")
-            print(f"[{index}/{len(prepared)}] embed {document.lark_path}", flush=True)
-            embedding_service.embed_chunk_file(chunk_file, embedding_file, bm25_model=bm25_model, bm25_model_file=bm25_file)
-            result = vector_store.upsert_embedding_file(embedding_file)
-            print(f"[{index}/{len(prepared)}] upserted={result['upsert_count']}", flush=True)
-            # Do not remove parser output; only remove disposable processing data
-            # after Milvus confirms the corresponding write.
-            embedding_file.unlink(missing_ok=True)
-            chunk_file.unlink(missing_ok=True)
-            for directory in (embedding_file.parent, chunk_file.parent, document.processing_dir):
-                try:
-                    directory.rmdir()
-                except OSError:
-                    pass
+        for index, (lark_path, chunk_file, _chunks) in enumerate(prepared, 1):
+            embedding_file = chunk_file.parents[1] / "embedding" / chunk_file.name.replace(".chunks.json", ".embeddings.json")
+            try:
+                print(f"[{index}/{len(prepared)}] embed {lark_path}", flush=True)
+                embedding_service.embed_chunk_file(chunk_file, embedding_file, bm25_model=bm25_model, bm25_model_file=bm25_file)
+                result = vector_store.upsert_embedding_file(embedding_file)
+                print(f"[{index}/{len(prepared)}] upserted={result['upsert_count']}", flush=True)
+                # Do not remove parser output; only remove disposable processing data
+                # after Milvus confirms the corresponding write.
+                embedding_file.unlink(missing_ok=True)
+                chunk_file.unlink(missing_ok=True)
+                for directory in (embedding_file.parent, chunk_file.parent, chunk_file.parents[1]):
+                    try:
+                        directory.rmdir()
+                    except OSError:
+                        pass
+            except Exception as exc:
+                failures.append((lark_path, str(exc)))
+                print(f"[{index}/{len(prepared)}] embedding-or-upsert failed {lark_path}: {exc}", flush=True)
+                if not args.continue_on_error:
+                    raise
 
     if prepared and args.no_upsert:
         print("[summary] --no-upsert: chunk artifacts retained; embedding and Milvus stages skipped", flush=True)

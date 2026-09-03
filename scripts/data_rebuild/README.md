@@ -103,9 +103,9 @@
 新版入库只读取 `lark_document_catalog` 中带有 `oss_object_key` 的文档，不使用
 MinIO 或 `ingestion_registry`。原始文件只在 `data/processing` 临时下载给解析器，
 不会保留在 Harness 工作区。Harness 仅保留按飞书目录组织的 TXT 和图片：
-`data/harness/knowledge/<飞书目录>/<完整文档名>/txt/` 与 `img/`。目录名保留源文件
+`$HARNESS_WORKDIR/knowledge/<飞书目录>/<完整文档名>/txt/` 与 `img/`。目录名保留源文件
 扩展名，便于与 OSS/飞书源文件一一匹配。例如
-`data/harness/knowledge/迈拓思学院/成长手册使用说明.docx/txt/成长手册使用说明.txt`。
+`$HARNESS_WORKDIR/knowledge/迈拓思学院/成长手册使用说明.docx/txt/成长手册使用说明.txt`。
 chunk 和 embedding 只在
 `data/processing/lark/` 暂存，Milvus 写入成功后会自动删除。
 
@@ -138,6 +138,17 @@ sudo chown -R mtsco:mtsco \
 .\.venv\Scripts\python.exe -u scripts\data_rebuild\ingest_oss_knowledge.py `
   --limit 5 --no-upsert --continue-on-error
 ```
+
+若解析已完成、`data/processing/lark/*/chunk/*.chunks.json` 仍在，但 Milvus 暂时
+不可用，恢复后可从 chunk 直接继续 embedding 和向量写入，不会重新下载或解析：
+
+```powershell
+.\.venv\Scripts\python.exe -u scripts\data_rebuild\ingest_oss_knowledge.py `
+  --resume-from-chunks --continue-on-error
+```
+
+该模式优先复用已有 `data/processing/global.bm25.json`；每份文档成功写入 Milvus 后，
+只删除该文档的 chunk 和 embedding 临时文件。
 
 ## 日常飞书增量刷新
 
