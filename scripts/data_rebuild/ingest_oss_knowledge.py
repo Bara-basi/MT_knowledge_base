@@ -1,8 +1,8 @@
 """Parse OSS-backed Lark knowledge, embed it, and upsert it into Milvus.
 
-Original files and parser outputs live in ``data/harness/knowledge``.  Only
-chunk and embedding JSON are temporary ``data/processing`` artifacts; they are
-removed after their vectors have been successfully written.
+Only parser TXT/image assets live in ``data/harness/knowledge``.  OSS source
+downloads, parser work files, chunks and embeddings live temporarily in
+``data/processing``; chunk and embedding JSON are removed after vector writes.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ load_dotenv(PROJECT_ROOT / ".env.host", override=True)
 
 from app.core.config import settings  # noqa: E402
 from app.db.postgres import postgres_connection  # noqa: E402
+from app.services.lark_client import sanitize_path_part  # noqa: E402
 from app.services.chunking.splitter import build_file_id, save_chunks, split_items  # noqa: E402
 from app.services.embedding import (  # noqa: E402
     EmbeddingService,
@@ -57,7 +58,17 @@ class CatalogDocument:
         return "/".join([*self.path_titles, self.document_name])
 
     @property
-    def workspace_dir(self) -> Path:
+    def harness_document_dir(self) -> Path:
+        """Human-readable Harness asset directory, mirroring the Lark path."""
+        path_parts = [sanitize_path_part(part) for part in self.path_titles]
+        return HARNESS_KNOWLEDGE_ROOT.joinpath(
+            *path_parts,
+            sanitize_path_part(self.document_name),
+        )
+
+    @property
+    def legacy_workspace_dir(self) -> Path:
+        """Pre-rebuild hash workspace, removed after this document succeeds."""
         return HARNESS_KNOWLEDGE_ROOT / hashlib.sha1(self.document_key.encode("utf-8")).hexdigest()[:16]
 
     @property
@@ -116,8 +127,10 @@ def load_catalog_documents(
     ]
 
 
-def download_to_workspace(bucket: Any, document: CatalogDocument) -> Path:
-    target = document.workspace_dir / "original" / document.document_name
+def download_to_temporary_source(bucket: Any, document: CatalogDocument) -> Path:
+    # The source binary is needed only by the parser; do not expose it in the
+    # Harness workspace.  It is deleted after TXT/image assets are promoted.
+    target = document.processing_dir / "source" / sanitize_path_part(document.document_name)
     target.parent.mkdir(parents=True, exist_ok=True)
     bucket.get_object_to_file(document.oss_object_key, str(target))
     if not target.is_file() or target.stat().st_size <= 0:
@@ -128,9 +141,27 @@ def download_to_workspace(bucket: Any, document: CatalogDocument) -> Path:
 def prepare(document: CatalogDocument, source: Path, *, image_workers: int) -> tuple[Path, Path, list[Any]]:
     items = parse_document(source, image_analysis_workers=image_workers, source="rebuild")
     parsed_dir = processing_document_dir(source)
-    txt_file = parsed_dir / "txt" / f"{source.stem}.txt"
+    source_txt_file = parsed_dir / "txt" / f"{source.stem}.txt"
+    if not source_txt_file.is_file():
+        raise RuntimeError(f"Parser produced no txt file: {source_txt_file}")
+    # Harness receives only model-readable parsing assets.  Replacing this
+    # document directory also prevents stale images from an earlier version.
+    harness_dir = document.harness_document_dir
+    # A previous short-lived layout wrote the source binary at exactly this
+    # path.  Remove that file before converting the path into a directory.
+    if harness_dir.is_file():
+        harness_dir.unlink()
+    else:
+        shutil.rmtree(harness_dir, ignore_errors=True)
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    for asset_name in ("txt", "img"):
+        asset_dir = parsed_dir / asset_name
+        if asset_dir.is_dir():
+            shutil.move(str(asset_dir), str(harness_dir / asset_name))
+    txt_file = harness_dir / "txt" / source_txt_file.name
+    shutil.rmtree(parsed_dir, ignore_errors=True)
     if not txt_file.is_file():
-        raise RuntimeError(f"Parser produced no txt file: {txt_file}")
+        raise RuntimeError(f"Parser TXT promotion failed: {txt_file}")
     chunks = split_items(items, source_file=source)
     # Stable across document renames and extension changes, so vector upsert
     # removes every prior chunk for this Lark document before inserting new ones.
@@ -148,6 +179,12 @@ def prepare(document: CatalogDocument, source: Path, *, image_workers: int) -> t
     chunk_file = document.processing_dir / "chunk" / f"{source.stem}.chunks.json"
     save_chunks(chunks, chunk_file)
     return txt_file, chunk_file, chunks
+
+
+def cleanup_temporary_parser_files(document: CatalogDocument) -> None:
+    """Remove source binaries and parser work files; preserve chunk artifacts."""
+    shutil.rmtree(document.processing_dir / "source", ignore_errors=True)
+    shutil.rmtree(document.processing_dir / "parsed", ignore_errors=True)
 
 
 def main() -> int:
@@ -178,11 +215,15 @@ def main() -> int:
     for index, document in enumerate(documents, 1):
         print(f"[{index}/{len(documents)}] download+parse {document.lark_path}", flush=True)
         try:
-            source = download_to_workspace(bucket, document)
+            source = download_to_temporary_source(bucket, document)
             accepted, rule = is_acceptable_knowledge_file(source)
             if not accepted:
                 raise ValueError(f"quality rejected: {rule}")
             _txt, chunk_file, chunks = prepare(document, source, image_workers=args.image_workers)
+            # Replace only this document's obsolete hash-named workspace after
+            # the OSS download and parser output both completed successfully.
+            if document.legacy_workspace_dir.is_dir():
+                shutil.rmtree(document.legacy_workspace_dir)
             prepared.append((document, chunk_file, chunks))
             print(f"[{index}/{len(documents)}] chunks={len(chunks)}", flush=True)
         except Exception as exc:
@@ -190,6 +231,8 @@ def main() -> int:
             print(f"[{index}/{len(documents)}] failed {document.lark_path}: {exc}", flush=True)
             if not args.continue_on_error:
                 raise
+        finally:
+            cleanup_temporary_parser_files(document)
 
     if prepared and not args.no_upsert:
         embedding_service = EmbeddingService()

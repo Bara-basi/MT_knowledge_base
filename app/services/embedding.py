@@ -381,7 +381,14 @@ class EmbeddingService:
         embedding_texts = [self.build_embedding_text(chunk) for chunk in chunk_list]
         bm25_model = build_bm25_embedding_function()
         bm25_model.fit(embedding_texts)
-        bm25_model.save(str(output_path))
+        try:
+            bm25_model.save(str(output_path))
+        except PermissionError as exc:
+            raise PermissionError(
+                f"Cannot write the global BM25 model at {output_path}. "
+                "Run the ingestion command as the owner of data/processing "
+                "(the production service user is mtsco), or repair that directory's ownership."
+            ) from exc
         return output_path, bm25_model
 
     def save_bm25_model_file(self, chunks: list[Chunk], embedding_file: Path) -> Path:

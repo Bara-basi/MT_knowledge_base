@@ -38,12 +38,30 @@ def processing_document_dir(source_file: str | Path) -> Path:
     except ValueError:
         pass
     else:
-        # Rebuild downloads use data/harness/knowledge/<document-key>/original.
-        # Keep their text and images in that document's Harness workspace.
+        # Legacy rebuild downloads used
+        # data/harness/knowledge/<document-key>/original/<file>.  Preserve
+        # their parser location until those workspaces have been re-ingested.
         if "original" in relative_harness.parts:
             original_index = relative_harness.parts.index("original")
             return harness_root_abs.joinpath(*relative_harness.parts[:original_index]) / "parsed"
-        return source_abs.parent / "parsed"
+        # Current rebuild downloads use a human-readable Lark path directly
+        # under the Harness workspace.  Keep TXT and extracted images next to
+        # the source, in a directory named for that source document.
+        return source_abs.parent / source_abs.stem
+
+    processing_root_abs = (Path.cwd() / PROCESSING_ROOT).resolve()
+    try:
+        relative_processing = source_abs.relative_to(processing_root_abs)
+    except ValueError:
+        pass
+    else:
+        # OSS rebuild inputs are short-lived files in
+        # data/processing/lark/<hash>/source/.  Keep parser side effects in
+        # that same temporary document directory so the caller can promote
+        # only TXT/image assets into the Harness workspace afterwards.
+        if "source" in relative_processing.parts:
+            source_index = relative_processing.parts.index("source")
+            return processing_root_abs.joinpath(*relative_processing.parts[:source_index]) / "parsed"
     raw_root_abs = (Path.cwd() / RAW_ROOT).resolve()
 
     try:

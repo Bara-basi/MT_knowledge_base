@@ -101,13 +101,29 @@
 ## OSS → 解析 → 向量库（开发验证）
 
 新版入库只读取 `lark_document_catalog` 中带有 `oss_object_key` 的文档，不使用
-MinIO 或 `ingestion_registry`。原文件、解析 TXT 和图片输出保留在
-`data/harness/knowledge/<document-key>/`；chunk 和 embedding 只在
+MinIO 或 `ingestion_registry`。原始文件只在 `data/processing` 临时下载给解析器，
+不会保留在 Harness 工作区。Harness 仅保留按飞书目录组织的 TXT 和图片：
+`data/harness/knowledge/<飞书目录>/<完整文档名>/txt/` 与 `img/`。目录名保留源文件
+扩展名，便于与 OSS/飞书源文件一一匹配。例如
+`data/harness/knowledge/迈拓思学院/成长手册使用说明.docx/txt/成长手册使用说明.txt`。
+chunk 和 embedding 只在
 `data/processing/lark/` 暂存，Milvus 写入成功后会自动删除。
 
 Linux 服务器应确保 `EMBEDDING_CACHE_DIR` 和 `RERANKER_CACHE_DIR` 是 `mtsco`
 用户可写的 Linux 路径；推荐在 `.env.host` 中设置为
 `/opt/mtsco-knowledge-base/data/models`。不要沿用旧 Windows 配置 `E:\\models`。
+同样，首次部署或曾以 `root` 运行重建脚本后，应将运行期目录交给 `mtsco`：
+
+```bash
+sudo install -d -o mtsco -g mtsco -m 0750 \
+  /opt/mtsco-knowledge-base/data/processing \
+  /opt/mtsco-knowledge-base/data/harness \
+  /opt/mtsco-knowledge-base/data/models
+sudo chown -R mtsco:mtsco \
+  /opt/mtsco-knowledge-base/data/processing \
+  /opt/mtsco-knowledge-base/data/harness \
+  /opt/mtsco-knowledge-base/data/models
+```
 
 先用五份文档验证全链路：
 
