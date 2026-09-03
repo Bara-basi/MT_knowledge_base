@@ -30,7 +30,12 @@ load_dotenv(PROJECT_ROOT / ".env.host", override=True)
 from app.core.config import settings  # noqa: E402
 from app.db.postgres import postgres_connection  # noqa: E402
 from app.services.lark_client import sanitize_path_part  # noqa: E402
-from app.services.chunking.splitter import build_file_id, save_chunks, split_items  # noqa: E402
+from app.services.chunking.splitter import (  # noqa: E402
+    build_file_id,
+    load_items_from_txt,
+    save_chunks,
+    split_items,
+)
 from app.services.embedding import (  # noqa: E402
     EmbeddingService,
     default_bm25_model_file,
@@ -172,6 +177,14 @@ def prepare(document: CatalogDocument, source: Path, *, image_workers: int) -> t
     if not txt_file.is_file():
         raise RuntimeError(f"Parser TXT promotion failed: {txt_file}")
     chunks = split_items(items, source_file=source)
+    _apply_lark_chunk_metadata(document, chunks)
+    chunk_file = document.processing_dir / "chunk" / f"{source.stem}.chunks.json"
+    save_chunks(chunks, chunk_file)
+    return txt_file, chunk_file, chunks
+
+
+def _apply_lark_chunk_metadata(document: CatalogDocument, chunks: list[Any]) -> None:
+    """Attach stable Lark identity and citation metadata to generated chunks."""
     # Stable across document renames and extension changes, so vector upsert
     # removes every prior chunk for this Lark document before inserting new ones.
     file_id = build_file_id("lark", document.document_key)
@@ -185,9 +198,18 @@ def prepare(document: CatalogDocument, source: Path, *, image_workers: int) -> t
             "document_link": document.document_link,
             "oss_object_key": document.oss_object_key,
         })
-    chunk_file = document.processing_dir / "chunk" / f"{source.stem}.chunks.json"
+
+
+def prepare_from_harness_txt(document: CatalogDocument) -> tuple[Path, list[Any]]:
+    """Rebuild chunks from the retained Harness TXT without raw-file parsing."""
+    txt_name = f"{Path(sanitize_path_part(document.document_name)).stem}.txt"
+    txt_file = document.harness_document_dir / "txt" / txt_name
+    items = load_items_from_txt(txt_file)
+    chunks = split_items(items, source_file=txt_file)
+    _apply_lark_chunk_metadata(document, chunks)
+    chunk_file = document.processing_dir / "chunk" / f"{Path(txt_name).stem}.chunks.json"
     save_chunks(chunks, chunk_file)
-    return txt_file, chunk_file, chunks
+    return chunk_file, chunks
 
 
 def cleanup_temporary_parser_files(document: CatalogDocument) -> None:
@@ -312,28 +334,41 @@ def main() -> int:
                 print("[repair] all catalog documents already have Milvus chunks", flush=True)
                 return 0
         print(f"[start] catalog_documents={len(documents)} limit={args.limit or 'all'}", flush=True)
-        bucket = _oss_bucket()
-        for index, document in enumerate(documents, 1):
-            print(f"[{index}/{len(documents)}] download+parse {document.lark_path}", flush=True)
-            try:
-                source = download_to_temporary_source(bucket, document)
-                accepted, rule = is_acceptable_knowledge_file(source)
-                if not accepted:
-                    raise ValueError(f"quality rejected: {rule}")
-                _txt, chunk_file, chunks = prepare(document, source, image_workers=args.image_workers)
-                # Replace only this document's obsolete hash-named workspace after
-                # the OSS download and parser output both completed successfully.
-                if document.legacy_workspace_dir.is_dir():
-                    shutil.rmtree(document.legacy_workspace_dir)
-                prepared.append((document.lark_path, chunk_file, chunks))
-                print(f"[{index}/{len(documents)}] chunks={len(chunks)}", flush=True)
-            except Exception as exc:
-                failures.append((document.lark_path, str(exc)))
-                print(f"[{index}/{len(documents)}] failed {document.lark_path}: {exc}", flush=True)
-                if not args.continue_on_error:
-                    raise
-            finally:
-                cleanup_temporary_parser_files(document)
+        if args.repair_missing_vectors:
+            for index, document in enumerate(documents, 1):
+                print(f"[{index}/{len(documents)}] harness-txt→chunk {document.lark_path}", flush=True)
+                try:
+                    chunk_file, chunks = prepare_from_harness_txt(document)
+                    prepared.append((document.lark_path, chunk_file, chunks))
+                    print(f"[{index}/{len(documents)}] chunks={len(chunks)}", flush=True)
+                except Exception as exc:
+                    failures.append((document.lark_path, str(exc)))
+                    print(f"[{index}/{len(documents)}] harness-txt failed {document.lark_path}: {exc}", flush=True)
+                    if not args.continue_on_error:
+                        raise
+        else:
+            bucket = _oss_bucket()
+            for index, document in enumerate(documents, 1):
+                print(f"[{index}/{len(documents)}] download+parse {document.lark_path}", flush=True)
+                try:
+                    source = download_to_temporary_source(bucket, document)
+                    accepted, rule = is_acceptable_knowledge_file(source)
+                    if not accepted:
+                        raise ValueError(f"quality rejected: {rule}")
+                    _txt, chunk_file, chunks = prepare(document, source, image_workers=args.image_workers)
+                    # Replace only this document's obsolete hash-named workspace after
+                    # the OSS download and parser output both completed successfully.
+                    if document.legacy_workspace_dir.is_dir():
+                        shutil.rmtree(document.legacy_workspace_dir)
+                    prepared.append((document.lark_path, chunk_file, chunks))
+                    print(f"[{index}/{len(documents)}] chunks={len(chunks)}", flush=True)
+                except Exception as exc:
+                    failures.append((document.lark_path, str(exc)))
+                    print(f"[{index}/{len(documents)}] failed {document.lark_path}: {exc}", flush=True)
+                    if not args.continue_on_error:
+                        raise
+                finally:
+                    cleanup_temporary_parser_files(document)
 
     if prepared and not args.no_upsert:
         embedding_service = EmbeddingService()

@@ -152,7 +152,9 @@ sudo chown -R mtsco:mtsco \
 
 若入库在中途失败、无法确定哪些临时 chunk 已被清理，可在 Milvus 恢复后执行完整
 对账。它读取全量 `lark_document_catalog`，按稳定的 Lark `file_id` 检查 Milvus 是否
-至少保留一个 chunk；仅重新解析和入库完全缺失的文档，并写出缺失项清单：
+至少保留一个 chunk；对完全缺失的文档只读取 Harness 中已解析的 TXT，重新执行
+`TXT → chunk → embedding → Milvus`，不会重新下载 OSS 原文件或调用原始文件解析器，
+并写出缺失项清单：
 
 ```powershell
 .\.venv\Scripts\python.exe -u scripts\data_rebuild\ingest_oss_knowledge.py `
